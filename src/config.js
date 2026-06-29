@@ -24,6 +24,27 @@ function bool(name, fallback = false) {
 
 const dataDir = resolve(str('DATA_DIR', './data'));
 
+// BASE_URL may be a single URL or a comma-separated list of public origins (for
+// serving the same instance on multiple domains, e.g. share.example.com and
+// files.example.com). The first entry is canonical: it's used for the startup log
+// and as the fallback when a request arrives on an unrecognized host. Every
+// listed host is allowlisted, so links are built from whichever of YOUR domains
+// the visitor is actually on, while a spoofed Host header falls back to canonical.
+const baseUrls = str('BASE_URL', `http://localhost:${int('PORT', 3300)}`)
+	.split(',')
+	.map(s => s.trim().replace(/\/+$/, ''))
+	.filter(Boolean);
+if (baseUrls.length === 0) baseUrls.push(`http://localhost:${int('PORT', 3300)}`);
+
+const allowedHosts = new Set();
+for (const b of baseUrls) {
+	try {
+		allowedHosts.add(new URL(b).host.toLowerCase());
+	} catch {
+		console.warn(`  WARNING: BASE_URL entry is not a valid URL, ignoring: ${b}`);
+	}
+}
+
 // A SECRET is mandatory for signing. If none is provided we generate an
 // ephemeral one and warn - sessions/tokens will not survive a restart.
 let secret = str('SECRET');
@@ -36,7 +57,14 @@ if (!secret) {
 export const config = Object.freeze({
 	host: str('HOST', '0.0.0.0'),
 	port: int('PORT', 3300),
-	baseUrl: str('BASE_URL', `http://localhost:${int('PORT', 3300)}`).replace(/\/+$/, ''),
+	// Canonical origin (first BASE_URL entry); used for logging and as the
+	// fallback for requests arriving on a host not in the allowlist.
+	baseUrl: baseUrls[0],
+	// All configured public origins, and the set of their hosts. requestOrigin()
+	// (lib/http.js) matches the incoming host against allowedHosts to build links
+	// for the domain the visitor is actually using.
+	baseUrls,
+	allowedHosts,
 
 	adminPassword: str('ADMIN_PASSWORD'),
 	uploadPassword: str('UPLOAD_PASSWORD'),

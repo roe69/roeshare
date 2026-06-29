@@ -4,7 +4,7 @@
 
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, cookie } from '../lib/http.js';
+import { json, error, cookie, requestOrigin, requestScheme } from '../lib/http.js';
 import { hashPassword, verifyPassword, safeEqual } from '../lib/crypto.js';
 import { uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
 import { newShareId, newToken } from '../lib/ids.js';
@@ -45,14 +45,15 @@ async function readJson(req) {
 export default function shares(router) {
 	// ---- Public config -----------------------------------------------------
 
-	router.get('/api/config', () =>
+	router.get('/api/config', ctx =>
 		json({
 			chunkSize: config.chunkSize,
 			maxFileSize: config.maxFileSize,
 			maxShareSize: config.maxShareSize,
 			defaultExpiry: config.defaultExpiry,
 			uploadPasswordRequired: !!config.uploadPassword,
-			baseUrl: config.baseUrl,
+			// Resolved from the visitor's host so links match the domain in use.
+			baseUrl: requestOrigin(ctx.req, ctx.url),
 		})
 	);
 
@@ -66,7 +67,7 @@ export default function shares(router) {
 		if (!config.uploadPassword) return json({ ok: true });
 		const body = (await readJson(ctx.req)) || {};
 		if (!uploadAllowed(body.password)) return error(403, 'Incorrect upload password');
-		const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: config.baseUrl.startsWith('https') });
+		const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url) === 'https' });
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
@@ -227,7 +228,7 @@ export default function shares(router) {
 		if (!isOwner(ctx.req, share)) return error(403, 'Forbidden');
 
 		setFinalized.run(share.id);
-		return json({ id: share.id, url: `${config.baseUrl}/${share.id}` });
+		return json({ id: share.id, url: `${requestOrigin(ctx.req, ctx.url)}/${share.id}` });
 	});
 
 	// ---- Delete (owner or admin) -------------------------------------------

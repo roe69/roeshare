@@ -83,7 +83,7 @@ default except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | ---------------- | ------------------------ | --------------------------------------------------------------------------- |
 | `HOST`           | `0.0.0.0`                | Network interface to bind.                                                   |
 | `PORT`           | `3300`                   | Port to listen on.                                                          |
-| `BASE_URL`       | `http://localhost:3300`  | Public base URL for share links and QR codes. No trailing slash.            |
+| `BASE_URL`       | `http://localhost:3300`  | Public base URL for share links and QR codes. No trailing slash. Comma-separate multiple domains for multi-domain serving (e.g. `https://share.example.com,https://files.example.com`); links are built from the visitor's domain, first entry is the canonical fallback. |
 | `ADMIN_PASSWORD` | `change-me`              | Admin panel password. Required for admin access; if unset, admin is locked. |
 | `SECRET`         | (ephemeral)              | Secret used to sign cookies and access tokens. Required in production.       |
 | `TRUST_PROXY`    | `0`                      | Honor X-Forwarded-For/X-Real-IP for client IP. On ONLY behind a trusted proxy; off when exposed directly (else IPs are spoofable). |

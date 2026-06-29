@@ -3,7 +3,7 @@
 
 import { config } from '../config.js';
 import { db } from '../db.js';
-import { json, error, cookie, clearCookie } from '../lib/http.js';
+import { json, error, cookie, clearCookie, requestScheme } from '../lib/http.js';
 import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin } from '../lib/auth.js';
 import { deleteShareFiles, deleteBlob, totalUsage, renameShareDir } from '../lib/storage.js';
 import { enforce, reset } from '../lib/ratelimit.js';
@@ -41,7 +41,7 @@ async function readBody(req) {
 export default router => {
 	// ---- Session ----------------------------------------------------------
 
-	router.post('/api/admin/login', async ({ req, ip }) => {
+	router.post('/api/admin/login', async ({ req, ip, url }) => {
 		// Brute-force guard: 8 attempts per 5 minutes per IP. A successful login
 		// clears the counter so a legitimate admin is never locked out.
 		const limited = enforce('admin-login', ip, 8, 5 * 60 * 1000);
@@ -50,7 +50,7 @@ export default router => {
 		const { password } = await readBody(req);
 		if (!checkAdminPassword(password)) return error(403, 'Invalid password');
 		reset('admin-login', ip);
-		const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: config.baseUrl.startsWith('https') });
+		const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(req, url) === 'https' });
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 

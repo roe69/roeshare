@@ -74,6 +74,40 @@ export function clientIp(req, server) {
 	return socket;
 }
 
+// First value of a possibly comma-joined header (e.g. X-Forwarded-*), trimmed.
+function firstHeader(req, name) {
+	const v = req.headers.get(name);
+	return v ? v.split(',')[0].trim() : '';
+}
+
+// The actual transport scheme of this request ('http' | 'https'). Honors
+// X-Forwarded-Proto only behind a trusted proxy (TRUST_PROXY=1), where TLS is
+// terminated upstream; otherwise uses the real connection scheme. Used to set
+// the Secure flag on cookies correctly per request.
+export function requestScheme(req, url) {
+	if (config.trustProxy) {
+		const p = firstHeader(req, 'x-forwarded-proto').toLowerCase();
+		if (p === 'http' || p === 'https') return p;
+	}
+	return url.protocol === 'https:' ? 'https' : 'http';
+}
+
+// The public origin to build share links/QR codes from, derived from the host
+// the visitor actually used so a single instance can serve multiple domains.
+// The host comes from X-Forwarded-Host (trusted proxy) or the Host header. To
+// stop a spoofed Host from poisoning links, only hosts listed in BASE_URL are
+// honored; anything else falls back to the canonical BASE_URL. No trailing slash.
+export function requestOrigin(req, url) {
+	let host = url.host;
+	if (config.trustProxy) {
+		const xfh = firstHeader(req, 'x-forwarded-host');
+		if (xfh) host = xfh;
+	}
+	host = host.toLowerCase();
+	if (config.allowedHosts.has(host)) return `${requestScheme(req, url)}://${host}`;
+	return config.baseUrl;
+}
+
 // Parse a single-range "bytes=start-end" header against a known total size.
 // Returns { start, end, length } (inclusive end) or null if absent, or
 // { invalid: true } if the range is unsatisfiable.

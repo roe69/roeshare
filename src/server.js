@@ -145,7 +145,7 @@ const server = Bun.serve({
 sweep();
 setInterval(sweep, Math.max(60, config.sweepInterval) * 1000);
 
-console.log(`\n  RoeShare running at ${config.baseUrl}`);
+console.log(`\n  RoeShare running at ${config.baseUrls.join(', ')}`);
 console.log(`  Listening on http://${config.host}:${server.port}`);
 console.log(`  Data dir: ${config.dataDir}`);
 if (!config.adminPassword) console.warn('  WARNING: ADMIN_PASSWORD is unset - the admin panel is locked out.');
