@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+	<head>
+		<meta charset="UTF-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<meta name="color-scheme" content="dark" />
+		<title>RoeShare</title>
+		<link rel="icon" href="/favicon.ico" sizes="any" />
+		<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png" />
+		<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png" />
+		<link rel="manifest" href="/site.webmanifest" />
+		<meta name="theme-color" content="#ff9f09" />
+		<link rel="stylesheet" href="/css/app.css" />
+	</head>
+	<body>
+		<div class="rl-aurora"></div>
+		<div class="rl-app">
+			<header class="rl-header">
+				<a class="rl-wordmark" href="/"><img class="rl-wordmark-logo" src="/favicon-32x32.png" alt="" width="24" height="24" /><span>Roe<b>Share</b></span></a>
+			</header>
+
+			<main class="rl-container">
+				<div class="rl-stack" style="gap: var(--rl-space-5)">
+					<!-- Dropzone -->
+					<div id="dropzone" class="rl-dropzone" tabindex="0" role="button" aria-label="Add files">
+						<div class="rl-dropzone-icon" aria-hidden="true">&#x2191;</div>
+						<p class="rl-h2" style="margin: var(--rl-space-2) 0 0">Drop files here</p>
+						<p class="rl-muted" style="margin: var(--rl-space-1) 0">or</p>
+						<div class="rl-row" style="justify-content: center; flex-wrap: wrap; margin-top: var(--rl-space-1)">
+							<button type="button" id="pick-files" class="rl-btn rl-btn-secondary">Choose files</button>
+						</div>
+						<p class="rl-help" style="margin-top: var(--rl-space-3)">You can drag in a whole folder, or paste from your clipboard.</p>
+						<input id="file-input" type="file" multiple hidden />
+					</div>
+
+					<!-- Selected files -->
+					<div id="file-list" class="rl-stack rl-hidden"></div>
+
+					<!-- Options -->
+					<section class="rl-card">
+						<h2 class="rl-h2">Share options</h2>
+						<p class="rl-help">Everything here is optional. By default you get a public link that expires in 7 days.</p>
+
+						<div class="rl-optgrid">
+							<div class="rl-field">
+								<label class="rl-label" for="opt-title">Title</label>
+								<input id="opt-title" class="rl-input" type="text" placeholder="My share" maxlength="200" />
+								<p class="rl-help">Shown to anyone who opens the link.</p>
+							</div>
+
+							<div class="rl-field">
+								<label class="rl-label" for="opt-slug">Custom link</label>
+								<div class="rl-input-affix" id="opt-slug-affix">
+									<span class="rl-affix">/</span>
+									<input id="opt-slug" class="rl-input" type="text" placeholder="my-files" maxlength="64" autocomplete="off" spellcheck="false" />
+								</div>
+								<p class="rl-help" id="opt-slug-help">Letters, numbers, - and _. Blank for a random link.</p>
+							</div>
+
+							<div class="rl-field">
+								<label class="rl-label" for="opt-expiry">Expires</label>
+								<select id="opt-expiry" class="rl-select">
+									<option value="600">10 minutes</option>
+									<option value="3600">1 hour</option>
+									<option value="86400">1 day</option>
+									<option value="604800" selected>7 days</option>
+									<option value="2592000">30 days</option>
+									<option value="0">Never</option>
+									<option value="custom">Custom date...</option>
+								</select>
+								<input id="opt-expiry-custom" class="rl-input rl-hidden" type="datetime-local" style="margin-top: var(--rl-space-2)" />
+								<p class="rl-help">Files are deleted automatically when the share expires.</p>
+							</div>
+
+							<div class="rl-field">
+								<label class="rl-label" for="opt-limit">Download limit</label>
+								<select id="opt-limit" class="rl-select">
+									<option value="unlimited" selected>Unlimited</option>
+									<option value="onetime">One-time (delete after first download)</option>
+									<option value="custom">Limit to a number...</option>
+								</select>
+								<input id="opt-limit-num" class="rl-input rl-hidden" type="number" min="1" step="1" placeholder="e.g. 5" style="margin-top: var(--rl-space-2)" />
+								<p class="rl-help">How many times the files can be downloaded.</p>
+							</div>
+
+							<div class="rl-field rl-col-span">
+								<label class="rl-switch">
+									<input id="opt-e2e" type="checkbox" />
+									<span class="rl-switch-track"></span>
+									<span>End-to-end encrypt (zero-knowledge)</span>
+								</label>
+								<p class="rl-help">Only the link can open these files. Lose it and they're gone for good.</p>
+							</div>
+
+							<div class="rl-field rl-col-span">
+								<label class="rl-label" for="opt-password">Password</label>
+								<input id="opt-password" class="rl-input" type="password" placeholder="Leave blank for a public link" autocomplete="new-password" />
+								<p class="rl-help">Require a password to open the share.</p>
+							</div>
+
+							<div class="rl-field rl-col-span rl-hidden" id="opt-password-confirm-field">
+								<label class="rl-label" for="opt-password-confirm">Confirm password</label>
+								<input id="opt-password-confirm" class="rl-input" type="password" placeholder="Re-enter the password" autocomplete="new-password" />
+								<p class="rl-help" id="opt-password-confirm-help">Re-enter the password to confirm.</p>
+							</div>
+						</div>
+					</section>
+
+					<button id="upload-btn" class="rl-btn rl-btn-primary rl-btn-lg rl-btn-block" disabled>Upload</button>
+
+					<!-- Result -->
+					<section id="result" class="rl-card rl-hidden"></section>
+				</div>
+			</main>
+		</div>
+
+		<script type="module" src="/js/upload.js"></script>
+	</body>
+</html>

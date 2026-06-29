@@ -1,0 +1,111 @@
+// HTTP helpers shared by every route: JSON responses, cookies, Range parsing,
+// client IP extraction, and security headers.
+
+import { config } from '../config.js';
+
+const SECURITY_HEADERS = {
+	'X-Content-Type-Options': 'nosniff',
+	'X-Frame-Options': 'SAMEORIGIN',
+	'Referrer-Policy': 'strict-origin-when-cross-origin',
+	'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+};
+
+export function json(data, init = {}) {
+	const status = typeof init === 'number' ? init : (init.status ?? 200);
+	const headers = { 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS, ...(init.headers || {}) };
+	return new Response(JSON.stringify(data), { status, headers });
+}
+
+export function error(status, message, extra = {}) {
+	return json({ error: message, ...extra }, status);
+}
+
+export function text(body, status = 200, headers = {}) {
+	return new Response(body, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS, ...headers } });
+}
+
+export function noContent(headers = {}) {
+	return new Response(null, { status: 204, headers: { ...SECURITY_HEADERS, ...headers } });
+}
+
+// Parse the Cookie header into a plain object.
+export function parseCookies(req) {
+	const header = req.headers.get('cookie');
+	const out = {};
+	if (!header) return out;
+	for (const part of header.split(';')) {
+		const idx = part.indexOf('=');
+		if (idx === -1) continue;
+		const k = part.slice(0, idx).trim();
+		const v = part.slice(idx + 1).trim();
+		if (k) out[k] = decodeURIComponent(v);
+	}
+	return out;
+}
+
+export function cookie(name, value, { maxAge, httpOnly = true, sameSite = 'Lax', path = '/', secure } = {}) {
+	const parts = [`${name}=${encodeURIComponent(value)}`, `Path=${path}`, `SameSite=${sameSite}`];
+	if (httpOnly) parts.push('HttpOnly');
+	if (secure) parts.push('Secure');
+	if (maxAge !== undefined) parts.push(`Max-Age=${maxAge}`);
+	return parts.join('; ');
+}
+
+export const clearCookie = name => cookie(name, '', { maxAge: 0 });
+
+// Client IP used for rate-limit and audit keys. Client-supplied forwarding
+// headers (X-Forwarded-For / X-Real-IP) are fully attacker-controlled on a
+// directly-exposed server, so they are only honored when config.trustProxy is
+// set (i.e. the deployment really sits behind a trusted reverse proxy).
+// Otherwise we always use the real socket peer, which a client cannot spoof.
+export function clientIp(req, server) {
+	let socket = null;
+	try {
+		socket = server?.requestIP?.(req)?.address ?? null;
+	} catch {
+		socket = null;
+	}
+	if (config.trustProxy) {
+		const fwd = req.headers.get('x-forwarded-for');
+		if (fwd) return fwd.split(',')[0].trim();
+		const real = req.headers.get('x-real-ip');
+		if (real) return real.trim();
+	}
+	return socket;
+}
+
+// Parse a single-range "bytes=start-end" header against a known total size.
+// Returns { start, end, length } (inclusive end) or null if absent, or
+// { invalid: true } if the range is unsatisfiable.
+export function parseRange(header, size) {
+	if (!header) return null;
+	const m = /^bytes=(\d*)-(\d*)$/.exec(header.trim());
+	if (!m) return { invalid: true };
+	let [, s, e] = m;
+	if (s === '' && e === '') return { invalid: true };
+	let start, end;
+	if (s === '') {
+		// suffix range: last N bytes
+		const n = Number(e);
+		if (n <= 0) return { invalid: true };
+		start = Math.max(0, size - n);
+		end = size - 1;
+	} else {
+		start = Number(s);
+		end = e === '' ? size - 1 : Number(e);
+	}
+	if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) return { invalid: true };
+	end = Math.min(end, size - 1);
+	return { start, end, length: end - start + 1 };
+}
+
+// Sanitize a value for use in a Content-Disposition filename. Strips control
+// chars and quotes; provides both the legacy and RFC 5987 (UTF-8) forms.
+export function contentDisposition(filename, inline = false) {
+	const fallback = String(filename).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+	const encoded = encodeURIComponent(filename);
+	const type = inline ? 'inline' : 'attachment';
+	return `${type}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+export { SECURITY_HEADERS };

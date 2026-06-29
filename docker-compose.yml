@@ -1,0 +1,24 @@
+# RoeShare. `bash setup.sh` generates .env and runs this, or once .env exists:
+#   docker compose up -d --build
+services:
+  roeshare:
+    build: .
+    image: roeshare:latest
+    container_name: roeshare
+    restart: unless-stopped
+    # Host port comes from PORT in .env (default 3300); container is always 3300.
+    ports:
+      - "${PORT:-3300}:3300"
+    # Secrets and public URL come from .env ...
+    env_file:
+      - .env
+    # ... but these are pinned for the container regardless of .env.
+    environment:
+      HOST: 0.0.0.0
+      PORT: 3300
+      DATA_DIR: /data
+    volumes:
+      - roeshare-data:/data
+
+volumes:
+  roeshare-data:

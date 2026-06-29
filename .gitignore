@@ -1,0 +1,23 @@
+# Runtime data (uploaded files + sqlite db)
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Env
+.env
+.env.local
+
+# Dependencies
+node_modules/
+
+# Build output
+/roeshare
+/roeshare-*
+/dist/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

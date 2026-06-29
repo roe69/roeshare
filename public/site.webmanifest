@@ -1,0 +1,8 @@
+{
+	"name": "RoeShare",
+	"short_name": "RoeShare",
+	"icons": [{ "src": "/favicon-32x32.png", "sizes": "32x32", "type": "image/png" }],
+	"theme_color": "#ff9f09",
+	"background_color": "#000000",
+	"display": "standalone"
+}

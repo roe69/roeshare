@@ -1,0 +1,23 @@
+{
+	"name": "roeshare",
+	"version": "0.1.0",
+	"private": true,
+	"description": "RoeShare - a secure, self-hosted file sharing platform with the RoeLite design system",
+	"author": "Roe <admin@roelite.net>",
+	"license": "SEE LICENSE IN LICENSE",
+	"type": "module",
+	"module": "src/server.js",
+	"scripts": {
+		"start": "bun run src/server.js",
+		"dev": "bun --watch run src/server.js",
+		"build": "bun build --compile --minify --sourcemap src/server.js --outfile roeshare",
+		"build:linux": "bun build --compile --minify --target=bun-linux-x64 src/server.js --outfile roeshare-linux"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"playwright": "^1.61.1"
+	},
+	"engines": {
+		"bun": ">=1.1.0"
+	}
+}

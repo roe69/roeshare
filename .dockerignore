@@ -1,0 +1,16 @@
+# Keep the build context tiny.
+.git/
+.gitignore
+.idea/
+.vscode/
+node_modules/
+data/
+.env
+.env.local
+*.md
+roeshare
+roeshare-*
+_*.mjs
+_*.png
+.uishots/
+.e2e-shots/
