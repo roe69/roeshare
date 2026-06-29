@@ -163,6 +163,39 @@ body {
 	color: transparent;
 }
 
+/* Header nav: quick links (My shares, Admin, quick-access) next to the wordmark. */
+.rl-nav {
+	display: flex;
+	align-items: center;
+	gap: var(--rl-space-1);
+	flex-wrap: wrap;
+}
+.rl-navlink {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--rl-space-2);
+	padding: var(--rl-space-2) var(--rl-space-3);
+	border-radius: var(--rl-radius-sm);
+	font-size: var(--rl-text-sm);
+	font-weight: var(--rl-weight-semibold);
+	color: var(--rl-text-muted);
+	text-decoration: none;
+	background: transparent;
+	border: var(--rl-border-thin) solid transparent;
+	cursor: pointer;
+	font-family: var(--rl-font);
+	transition: var(--rl-transition);
+}
+.rl-navlink:hover {
+	color: var(--rl-gold-200);
+	background: rgba(var(--rl-primary-rgb), 0.1);
+	border-color: rgba(var(--rl-primary-rgb), 0.3);
+}
+.rl-navlink:focus-visible {
+	outline: var(--rl-focus-outline);
+	outline-offset: var(--rl-focus-ring-offset);
+}
+
 /* ---------- Typography helpers ---------- */
 .rl-h1 {
 	font-size: var(--rl-text-4xl);

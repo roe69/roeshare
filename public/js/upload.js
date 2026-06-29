@@ -750,7 +750,29 @@ async function doUpload() {
 
 uploadBtn.addEventListener('click', doUpload);
 
+// ---- Quick-access link -----------------------------------------------------
+// When an upload password is configured, reveal a header button that copies an
+// instant-login link (?token=...) so a trusted person can reach the upload page
+// without typing the password. The token is fetched on demand and is derived
+// from the server secret, not the password itself.
+function wireQuickLink() {
+	const btn = $('#quick-link');
+	if (!btn || !config || !config.uploadPasswordRequired) return;
+	btn.classList.remove('rl-hidden');
+	btn.addEventListener('click', async () => {
+		btn.disabled = true;
+		try {
+			const res = await api.get('/api/upload/link');
+			if (res && res.url) await copyText(res.url);
+			else toastErr('Quick link is unavailable');
+		} catch (e) {
+			toastErr('Could not create a quick link');
+		}
+		btn.disabled = false;
+	});
+}
+
 // ---- Init ------------------------------------------------------------------
 wireConditionalOptions();
 wireValidation();
-loadConfig();
+loadConfig().then(wireQuickLink);

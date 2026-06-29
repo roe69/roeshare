@@ -6,7 +6,7 @@ import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { json, error, cookie, requestOrigin, requestScheme } from '../lib/http.js';
 import { hashPassword, verifyPassword, safeEqual } from '../lib/crypto.js';
-import { uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
+import { uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, uploadLinkToken, UPLOAD_COOKIE } from '../lib/auth.js';
 import { newShareId, newToken } from '../lib/ids.js';
 import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
@@ -20,6 +20,7 @@ const insertShare = db.query(
 const getFiles = db.query('SELECT id, name, size, mime, complete, download_count FROM files WHERE share_id = ? ORDER BY created_at ASC');
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
 const softDelete = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
+const incShareView = db.query('UPDATE shares SET view_count = view_count + 1 WHERE id = ?');
 
 // A share is "live" when it exists, is not soft-deleted, and has not expired.
 function liveShare(id) {
@@ -69,6 +70,18 @@ export default function shares(router) {
 		if (!uploadAllowed(body.password)) return error(403, 'Incorrect upload password');
 		const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url) === 'https' });
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
+	});
+
+	// ---- Quick-access link --------------------------------------------------
+	// Returns a shareable instant-login link for an already-authorized uploader.
+	// The token is derived from SECRET (not the password), so handing out the link
+	// never exposes the real upload password. Only available to a caller that
+	// already holds upload access, and only when an upload password is configured.
+
+	router.get('/api/upload/link', ctx => {
+		if (!config.uploadPassword) return json({ enabled: false });
+		if (!hasUploadAccess(ctx.req)) return error(403, 'Forbidden');
+		return json({ enabled: true, url: `${requestOrigin(ctx.req, ctx.url)}/?token=${encodeURIComponent(uploadLinkToken())}` });
 	});
 
 	// ---- Create draft ------------------------------------------------------
@@ -190,6 +203,11 @@ export default function shares(router) {
 			}
 		}
 
+		// Count a view when a non-owner opens the share (the page loads its
+		// metadata once). Owners checking their own share never inflate the count.
+		const counted = !owner;
+		if (counted) incShareView.run(share.id);
+
 		const files = getFiles.all(share.id);
 		const totalSize = files.reduce((sum, f) => sum + f.size, 0);
 
@@ -202,6 +220,7 @@ export default function shares(router) {
 			e2e: !!share.e2e,
 			maxDownloads: share.max_downloads,
 			downloadCount: share.download_count,
+			viewCount: (share.view_count || 0) + (counted ? 1 : 0),
 			finalized: !!share.finalized,
 			totalSize,
 			owner,

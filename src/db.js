@@ -65,6 +65,7 @@ for (const stmt of [
 	'ALTER TABLE shares ADD COLUMN creator_ua TEXT',
 	'ALTER TABLE files ADD COLUMN iv TEXT',
 	'ALTER TABLE shares ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0',
+	'ALTER TABLE shares ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0',
 ]) {
 	try {
 		db.exec(stmt);

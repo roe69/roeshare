@@ -50,6 +50,25 @@ export function hasUploadAccess(req) {
 	return !!payload && payload.scope === 'upload';
 }
 
+// A stable, shareable "quick access" token for instant upload login via a link
+// (?token=...). It is derived from SECRET (so it cannot be forged) but is NOT
+// the upload password itself, so the link can be handed to a trusted person
+// without revealing the real password. It does not expire; rotate SECRET to
+// invalidate every outstanding link.
+export function uploadLinkToken() {
+	return signToken({ scope: 'upload-link' });
+}
+
+// True if `token` authorizes upload login: either the derived quick-access token
+// above, or the literal upload password (constant-time). Only meaningful when an
+// upload password is configured.
+export function checkUploadLink(token) {
+	if (!config.uploadPassword || !token) return false;
+	const payload = verifyToken(token);
+	if (payload && payload.scope === 'upload-link') return true;
+	return safeEqual(token, config.uploadPassword);
+}
+
 // ---- Per-share access ------------------------------------------------------
 // After a visitor unlocks a password-protected share, we hand them a short-lived
 // signed token scoped to that share id. The edit token (returned to the

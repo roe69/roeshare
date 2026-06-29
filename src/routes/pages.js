@@ -4,8 +4,9 @@
 
 import { join } from 'node:path';
 import { config } from '../config.js';
-import { error, SECURITY_HEADERS } from '../lib/http.js';
-import { hasUploadAccess } from '../lib/auth.js';
+import { error, cookie, requestScheme, SECURITY_HEADERS } from '../lib/http.js';
+import { hasUploadAccess, checkUploadLink, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
+import { enforce } from '../lib/ratelimit.js';
 
 const PAGES_DIR = join(import.meta.dir, '..', '..', 'public');
 
@@ -27,9 +28,31 @@ export default function pages(router) {
 	// When an upload password is set, an unauthorized visitor gets only the lock
 	// page - the upload portal's markup is never served without the cookie.
 	router.get('/', ctx => {
-		const file = config.uploadPassword && !hasUploadAccess(ctx.req) ? 'lock.html' : 'upload.html';
+		const { req, url, ip } = ctx;
+
+		// Magic-link login: ?token=<upload password | quick-access token> grants
+		// the upload cookie and redirects to a clean URL (so the token does not
+		// linger in the address bar/history). Rate-limited and constant-time so the
+		// query string cannot be brute-forced; an invalid token silently falls
+		// through to the lock page, revealing nothing.
+		if (config.uploadPassword && !hasUploadAccess(req)) {
+			const token = url.searchParams.get('token');
+			if (token) {
+				const limited = enforce('magic-link', ip, 20, 5 * 60 * 1000);
+				if (!limited && checkUploadLink(token)) {
+					const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), {
+						maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax',
+						secure: requestScheme(req, url) === 'https',
+					});
+					return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': setCookie, 'Cache-Control': 'no-store' } });
+				}
+			}
+		}
+
+		const file = config.uploadPassword && !hasUploadAccess(req) ? 'lock.html' : 'upload.html';
 		return servePage(file, { 'Cache-Control': 'no-store' });
 	});
 	router.get('/s/:id', () => servePage('view.html'));
+	router.get('/mine', () => servePage('myshares.html'));
 	router.get('/admin', () => servePage('admin.html'));
 }

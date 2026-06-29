@@ -376,10 +376,12 @@ function renderShare(share) {
 		editToken ? el('span', { class: 'rl-badge rl-badge-success' }, 'You own this share') : null,
 	);
 
+	const views = share.viewCount || 0;
 	const stats = el('div', { class: 'rl-share-stats' },
 		statChip(`${count} ${count === 1 ? 'file' : 'files'}`),
 		statChip(formatBytes(totalSize)),
 		statChip(expiry),
+		statChip(`${views} view${views === 1 ? '' : 's'}`),
 		statChip(downloads),
 	);
 

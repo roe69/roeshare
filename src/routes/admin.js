@@ -86,7 +86,7 @@ export default router => {
 
 		const rows = db
 			.query(
-				`SELECT s.id, s.title, s.created_at, s.expires_at, s.password_hash, s.one_time, s.max_downloads, s.download_count, s.finalized,
+				`SELECT s.id, s.title, s.created_at, s.expires_at, s.password_hash, s.one_time, s.max_downloads, s.download_count, s.view_count, s.finalized,
 					(SELECT COUNT(*) FROM files f WHERE f.share_id = s.id) AS fileCount,
 					(SELECT COALESCE(SUM(f.size), 0) FROM files f WHERE f.share_id = s.id) AS totalSize
 				FROM shares s
@@ -105,6 +105,7 @@ export default router => {
 			oneTime: !!r.one_time,
 			maxDownloads: r.max_downloads,
 			downloadCount: r.download_count,
+			viewCount: r.view_count,
 			finalized: !!r.finalized,
 			fileCount: r.fileCount,
 			totalSize: r.totalSize,
@@ -134,6 +135,7 @@ export default router => {
 			oneTime: !!share.one_time,
 			maxDownloads: share.max_downloads,
 			downloadCount: share.download_count,
+			viewCount: share.view_count,
 			finalized: !!share.finalized,
 			deletedAt: share.deleted_at,
 			creatorIp: share.creator_ip,
@@ -278,6 +280,7 @@ export default router => {
 
 		const shareCount = db.query('SELECT COUNT(*) AS n FROM shares WHERE deleted_at IS NULL').get().n;
 		const downloadTotal = db.query('SELECT COALESCE(SUM(download_count), 0) AS n FROM shares WHERE deleted_at IS NULL').get().n;
+		const viewTotal = db.query('SELECT COALESCE(SUM(view_count), 0) AS n FROM shares WHERE deleted_at IS NULL').get().n;
 		const fileAgg = db
 			.query(
 				`SELECT COUNT(*) AS n, COALESCE(SUM(f.size), 0) AS total
@@ -292,6 +295,7 @@ export default router => {
 			fileCount: fileAgg.n,
 			totalSize: fileAgg.total,
 			downloadTotal,
+			viewTotal,
 			storageUsed: await totalUsage(),
 			maxTotalSize: config.maxTotalSize,
 		});

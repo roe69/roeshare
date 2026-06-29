@@ -187,6 +187,7 @@ function renderDashboard() {
 					el('th', {}, 'Share'),
 					el('th', { class: 'rl-col-num' }, 'Files'),
 					el('th', { class: 'rl-col-num' }, 'Size'),
+					el('th', { class: 'rl-col-num' }, 'Views'),
 					el('th', { class: 'rl-col-num' }, 'Downloads'),
 					el('th', { class: 'rl-col-w' }, 'Created'),
 					el('th', { class: 'rl-col-w' }, 'Expires'),
@@ -246,6 +247,7 @@ async function loadStats() {
 			statCard('Shares', String(s.shareCount ?? 0)),
 			statCard('Files', String(s.fileCount ?? 0)),
 			statCard('Storage used', formatBytes(s.storageUsed ?? 0), storageExtra),
+			statCard('Total views', String(s.viewTotal ?? 0)),
 			statCard('Total downloads', String(s.downloadTotal ?? 0)),
 		);
 	} catch (err) {
@@ -257,7 +259,7 @@ async function loadStats() {
 // ---- Shares table ----------------------------------------------------------
 
 function colspanRow(content) {
-	return el('tr', {}, el('td', { colspan: 9 }, content));
+	return el('tr', {}, el('td', { colspan: 10 }, content));
 }
 
 async function loadShares() {
@@ -337,6 +339,7 @@ function renderRow(s) {
 		el('td', {}, link, idLine),
 		el('td', { class: 'rl-col-num' }, String(s.fileCount ?? 0)),
 		el('td', { class: 'rl-col-num' }, formatBytes(s.totalSize ?? 0)),
+		el('td', { class: 'rl-col-num' }, String(s.viewCount ?? 0)),
 		el('td', { class: 'rl-col-num' }, dl),
 		el('td', { class: 'rl-col-w' }, formatDate(s.createdAt)),
 		el('td', { class: 'rl-col-w' }, timeUntil(s.expiresAt)),
@@ -463,7 +466,7 @@ function renderDetail(modal, d, id) {
 		),
 		el('div', { class: 'rl-mono rl-dim', style: 'font-size:var(--rl-text-xs)' }, id),
 		el('div', { class: 'rl-muted', style: 'font-size:var(--rl-text-sm)' },
-			`Created ${formatDate(d.createdAt)} • Expires ${timeUntil(d.expiresAt)} • ${d.downloadCount} downloads`,
+			`Created ${formatDate(d.createdAt)} • Expires ${timeUntil(d.expiresAt)} • ${d.viewCount ?? 0} views • ${d.downloadCount} downloads`,
 		),
 		el('div', { class: 'rl-dim rl-truncate', style: 'font-size:var(--rl-text-xs)', title: `${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' — ' + d.creatorUa : ''}` },
 			`Uploaded from ${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' · ' + d.creatorUa : ''}`,
