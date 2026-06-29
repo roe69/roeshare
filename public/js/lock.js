@@ -13,6 +13,19 @@ function showError(msg) {
 	errEl.classList.remove('rl-hidden');
 }
 
+// Compact "time remaining" ("45s", "4m 12s", "1h 5m"). This page intentionally
+// imports nothing from shared.js (so it reveals no portal code), hence the local
+// copy - keep it in sync with formatDuration in shared.js.
+function formatDuration(seconds) {
+	const s = Math.max(1, Math.ceil(Number(seconds) || 0));
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	const sec = s % 60;
+	if (h >= 1) return m ? `${h}h ${m}m` : `${h}h`;
+	if (m >= 1) return sec ? `${m}m ${sec}s` : `${m}m`;
+	return `${sec}s`;
+}
+
 form.addEventListener('submit', async e => {
 	e.preventDefault();
 	const password = input.value;
@@ -32,7 +45,17 @@ form.addEventListener('submit', async e => {
 			location.reload();
 			return;
 		}
-		showError(res.status === 429 ? 'Too many attempts, please slow down.' : 'Incorrect upload password.');
+		if (res.status === 429) {
+			let retryAfter = 0;
+			try {
+				const body = await res.json();
+				retryAfter = Number(body && body.retryAfter);
+			} catch {}
+			if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = Number(res.headers.get('Retry-After')) || 0;
+			showError(retryAfter > 0 ? `Too many attempts. Try again in ${formatDuration(retryAfter)}.` : 'Too many attempts, please slow down.');
+		} else {
+			showError('Incorrect upload password.');
+		}
 	} catch {
 		showError('Could not reach the server.');
 	}

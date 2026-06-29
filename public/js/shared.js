@@ -83,7 +83,19 @@ export function toast(message, type = 'info', ms = 4000) {
 	return node;
 }
 export const toastOk = m => toast(m, 'success');
-export const toastErr = m => toast(typeof m === 'string' ? m : m?.message || 'Something went wrong', 'error');
+export const toastErr = m => toast(describeError(m), 'error');
+
+// Turn any thrown value into a friendly message. A 429 ApiError carrying a
+// retryAfter (seconds, from the server body) becomes a precise retry hint.
+export function describeError(err) {
+	if (typeof err === 'string') return err;
+	if (err && err.status === 429) {
+		const ra = Number(err.data && err.data.retryAfter);
+		if (Number.isFinite(ra) && ra > 0) return `Too many requests. Try again in ${formatDuration(ra)}.`;
+		return 'Too many requests. Please slow down.';
+	}
+	return (err && err.message) || 'Something went wrong';
+}
 
 // ---- Modal -----------------------------------------------------------------
 
@@ -182,6 +194,18 @@ export function timeUntil(ts) {
 	const m = Math.floor(s / 60);
 	if (m >= 1) return `${m}m`;
 	return `${s}s`;
+}
+
+// Compact, human "time remaining" from a number of seconds: "45s", "4m 12s",
+// "1h 5m". Rounds up and floors at 1s so it never reads "0". Used for retry-after.
+export function formatDuration(seconds) {
+	const s = Math.max(1, Math.ceil(Number(seconds) || 0));
+	const h = Math.floor(s / 3600);
+	const m = Math.floor((s % 3600) / 60);
+	const sec = s % 60;
+	if (h >= 1) return m ? `${h}h ${m}m` : `${h}h`;
+	if (m >= 1) return sec ? `${m}m ${sec}s` : `${m}m`;
+	return `${sec}s`;
 }
 
 export async function copyText(text) {

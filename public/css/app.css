@@ -143,6 +143,7 @@ body {
 .rl-wordmark {
 	display: inline-flex;
 	align-items: center;
+	line-height: 1; /* text box = em-height, so it centres cleanly against the logo and nav */
 	font-weight: var(--rl-weight-extrabold);
 	font-size: var(--rl-text-xl);
 	letter-spacing: var(--rl-tracking-tight);
@@ -175,6 +176,8 @@ body {
 	align-items: center;
 	gap: var(--rl-space-2);
 	padding: var(--rl-space-2) var(--rl-space-3);
+	min-height: 32px; /* match .rl-btn-sm so navlinks and header buttons are the same height */
+	line-height: 1; /* drop inherited 1.5 leading so text centres in the box */
 	border-radius: var(--rl-radius-sm);
 	font-size: var(--rl-text-sm);
 	font-weight: var(--rl-weight-semibold);

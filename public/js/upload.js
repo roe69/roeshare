@@ -676,8 +676,12 @@ async function doUpload() {
 			// Upload session expired (cookie no longer valid): reload to the lock screen.
 			toastErr('Upload session expired, returning to the lock screen');
 			setTimeout(() => location.reload(), 1200);
+		} else if (e instanceof ApiError) {
+			// Pass the error object (not just .message) so a 429's retryAfter survives
+			// and the toast can show how long until the user can retry.
+			toastErr(e);
 		} else {
-			toastErr(e instanceof ApiError ? e.message : 'Could not create share');
+			toastErr('Could not create share');
 		}
 		return;
 	}

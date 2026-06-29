@@ -45,6 +45,16 @@ for (const b of baseUrls) {
 	}
 }
 
+// Brand wordmark. APP_NAME is injected verbatim as HTML into the header span so
+// the operator can keep the default ember colouring (the <b> is gradient-clipped
+// by `.rl-wordmark b` in app.css) or supply their own markup/inline colours,
+// e.g. APP_NAME='Acme<span style="color:#3b82f6">Share</span>'. This is
+// OPERATOR-TRUSTED config (it comes from the server environment, never from a
+// request), so the raw HTML carries no end-user XSS vector - do not wire it to
+// any user-supplied source. appTitle is the tag-stripped plain text for <title>.
+const appName = str('APP_NAME', 'Roe<b>Share</b>');
+const appTitle = appName.replace(/<[^>]*>/g, '').trim() || 'RoeShare';
+
 // A SECRET is mandatory for signing. If none is provided we generate an
 // ephemeral one and warn - sessions/tokens will not survive a restart.
 let secret = str('SECRET');
@@ -70,6 +80,10 @@ export const config = Object.freeze({
 	uploadPassword: str('UPLOAD_PASSWORD'),
 	secret,
 	ephemeralSecret,
+
+	// Brand name (raw HTML) and its plain-text form; see the comment above.
+	appName,
+	appTitle,
 
 	// Only honor X-Forwarded-For / X-Real-IP when behind a trusted reverse proxy.
 	// When false (the default for a directly-exposed server), rate-limit and audit

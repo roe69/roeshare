@@ -3,6 +3,7 @@
 // them.
 
 import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { config } from '../config.js';
 import { error, cookie, requestScheme, SECURITY_HEADERS } from '../lib/http.js';
 import { hasUploadAccess, checkUploadLink, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
@@ -16,12 +17,34 @@ const PAGES_DIR = join(import.meta.dir, '..', '..', 'public');
 const PAGE_CSP =
 	"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'";
 
-export async function servePage(file, extraHeaders) {
-	const f = Bun.file(join(PAGES_DIR, file));
-	if (!(await f.exists())) return error(404, 'Not found');
-	return new Response(f, {
-		// Always revalidate HTML so a deploy's new markup is served immediately
-		// (the `/` route overrides this with a stronger no-store).
+// Templated files are rendered once and memoised per file: the tokens
+// ({{APP_NAME}} / {{APP_TITLE}}) resolve from config, which is frozen at boot, so
+// a file's output never changes within a process. Editing a file on disk needs a
+// restart to take effect (same as the static-asset cache); a redeploy restarts
+// the process, so new markup ships then. A missing file caches as null (404).
+const pageCache = new Map();
+
+function renderPage(file) {
+	if (pageCache.has(file)) return pageCache.get(file);
+	let out;
+	try {
+		out = readFileSync(join(PAGES_DIR, file), 'utf8')
+			.replaceAll('{{APP_NAME}}', config.appName)
+			.replaceAll('{{APP_TITLE}}', config.appTitle);
+	} catch {
+		out = null;
+	}
+	pageCache.set(file, out);
+	return out;
+}
+
+export function servePage(file, extraHeaders) {
+	const html = renderPage(file);
+	if (html === null) return error(404, 'Not found');
+	return new Response(html, {
+		// no-cache = the browser revalidates each load, so a redeploy's new markup
+		// is served immediately (the `/` route overrides this with a stronger
+		// no-store). The rendered string itself is cached per process (see above).
 		headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Security-Policy': PAGE_CSP, ...SECURITY_HEADERS, ...(extraHeaders || {}) },
 	});
 }
@@ -57,4 +80,15 @@ export default function pages(router) {
 	router.get('/s/:id', () => servePage('view.html'));
 	router.get('/mine', () => servePage('myshares.html'));
 	router.get('/admin', () => servePage('admin.html'));
+
+	// The web app manifest is templated too, so the PWA/install name follows
+	// APP_TITLE. Registered as a route (runs before the static handler) so the
+	// {{APP_TITLE}} token is substituted rather than served verbatim.
+	router.get('/site.webmanifest', () => {
+		const body = renderPage('site.webmanifest');
+		if (body === null) return error(404, 'Not found');
+		return new Response(body, {
+			headers: { 'Content-Type': 'application/manifest+json; charset=utf-8', 'Cache-Control': 'no-cache', ...SECURITY_HEADERS },
+		});
+	});
 }

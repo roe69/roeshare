@@ -63,7 +63,7 @@ function renderMissing() {
 				el('div', { class: 'rl-empty-icon' }, '\u{1F50D}'),
 				el('div', { class: 'rl-h2' }, 'Share not found'),
 				el('p', { class: 'rl-muted' }, 'This share does not exist or has expired.'),
-				el('a', { class: 'rl-btn rl-btn-secondary', href: '/', style: 'margin-top:var(--rl-space-4)' }, 'Go to RoeShare'),
+				el('a', { class: 'rl-btn rl-btn-secondary', href: '/', style: 'margin-top:var(--rl-space-4)' }, 'Go to the home page'),
 			),
 		),
 	);
@@ -201,7 +201,7 @@ function renderE2eError(title, msg) {
 				el('div', { class: 'rl-empty-icon' }, '\u{1F510}'),
 				el('div', { class: 'rl-h2' }, title),
 				el('p', { class: 'rl-muted' }, msg),
-				el('a', { class: 'rl-btn rl-btn-secondary', href: '/', style: 'margin-top:var(--rl-space-4)' }, 'Go to RoeShare'),
+				el('a', { class: 'rl-btn rl-btn-secondary', href: '/', style: 'margin-top:var(--rl-space-4)' }, 'Go to the home page'),
 			),
 		),
 	);
