@@ -72,3 +72,10 @@ share.example.com, files.example.com {
 > back up/restore the volume (`docker run --rm -v roeshare_roeshare-data:/d -v
 > "$PWD":/b alpine tar czf /b/roeshare-data.tgz -C /d .`) or switch the compose
 > volume to a bind mount on shared/persistent storage.
+
+> **Secrets in the volume.** If you edit settings via the admin panel, they're
+> saved to `settings.env` inside the data volume — and that file can hold
+> `SECRET`/passwords (written `0600`). A volume backup therefore may contain your
+> master key, so protect/encrypt those backups. Settings changed in the panel
+> override `/opt/roeshare/.env` on the next restart; to revert a key to `.env`
+> control, remove it from `settings.env` and restart.

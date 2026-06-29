@@ -1,14 +1,35 @@
 // Admin API: session login/logout, share browsing, hard deletes, and dashboard
 // stats. Every endpoint except login/logout/me requires a valid admin cookie.
 
+import { existsSync } from 'node:fs';
 import { config } from '../config.js';
 import { db } from '../db.js';
-import { json, error, cookie, clearCookie, requestScheme } from '../lib/http.js';
-import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin } from '../lib/auth.js';
+import { json, error, cookie, clearCookie, requestScheme, requestOrigin } from '../lib/http.js';
+import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken } from '../lib/auth.js';
 import { deleteShareFiles, deleteBlob, totalUsage, renameShareDir } from '../lib/storage.js';
 import { enforce, reset } from '../lib/ratelimit.js';
 import { hashPassword } from '../lib/crypto.js';
 import { slugError } from '../lib/slug.js';
+import { getLogs } from '../lib/logbuffer.js';
+import { ALLOWED_KEYS, ALLOWLIST, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
+
+// The editable settings keys mapped to their current effective (booted) values,
+// for pre-filling the editor. Secret keys are reported only as set/unset.
+const effectiveSettings = () => ({
+	BASE_URL: config.baseUrls.join(','),
+	TRUST_PROXY: config.trustProxy ? '1' : '0',
+	APP_NAME: config.appName,
+	MAX_FILE_SIZE: String(config.maxFileSize),
+	MAX_SHARE_SIZE: String(config.maxShareSize),
+	MAX_TOTAL_SIZE: String(config.maxTotalSize),
+	CHUNK_SIZE: String(config.chunkSize),
+	MAX_FILES_PER_SHARE: String(config.maxFilesPerShare),
+	MAX_PASSWORD_LENGTH: String(config.maxPasswordLength),
+	DEFAULT_EXPIRY: String(config.defaultExpiry),
+	SWEEP_INTERVAL: String(config.sweepInterval),
+});
+const secretIsSet = key =>
+	key === 'SECRET' ? !config.ephemeralSecret : key === 'ADMIN_PASSWORD' ? !!config.adminPassword : !!config.uploadPassword;
 
 // Move a share to a new id (slug): copy the row, repoint children, drop the old
 // row. Done as one transaction so FK constraints never see a dangling parent.
@@ -299,5 +320,85 @@ export default router => {
 			storageUsed: await totalUsage(),
 			maxTotalSize: config.maxTotalSize,
 		});
+	});
+
+	// ---- Server operations -------------------------------------------------
+
+	// Quick-access upload link (the HMAC-derived token, not the password). The
+	// admin needs no upload cookie, so this is a separate route from the
+	// upload-cookie-gated /api/upload/link.
+	router.get('/api/admin/upload-link', ({ req, url }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		if (!config.uploadPassword) return json({ enabled: false });
+		return json({ enabled: true, url: `${requestOrigin(req, url)}/?token=${encodeURIComponent(uploadLinkToken())}` });
+	});
+
+	// Current editable settings. Secret values are NEVER returned - only a
+	// set/unset flag. Non-secret keys show the pending managed value if saved,
+	// else the live effective value.
+	router.get('/api/admin/settings', ({ req }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const managed = readSettings(config.dataDir);
+		const eff = effectiveSettings();
+		const fields = ALLOWED_KEYS.map(key => {
+			const s = ALLOWLIST[key];
+			const base = { key, label: s.label, help: s.help || null, type: s.type, secret: !!s.secret, clearable: !!s.clearable, danger: s.danger || null };
+			if (s.secret) return { ...base, set: secretIsSet(key) };
+			return { ...base, value: key in managed ? managed[key] : (eff[key] ?? '') };
+		});
+		return json({
+			fields,
+			readOnly: { HOST: config.host, PORT: String(config.port), DATA_DIR: config.dataDir },
+			ephemeralSecret: config.ephemeralSecret,
+			uploadPasswordSet: !!config.uploadPassword,
+		});
+	});
+
+	// Save settings to the managed file (does NOT apply live - needs a restart).
+	router.put('/api/admin/settings', async ({ req, ip }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-settings', ip, 30, 60 * 60 * 1000);
+		if (limited) return limited;
+
+		let body;
+		try {
+			body = (await req.json()) || {};
+		} catch {
+			return error(400, 'Invalid JSON body');
+		}
+		const r = validatePatch(body);
+		if (r.error) return error(400, r.error);
+
+		try {
+			writeSettings(config.dataDir, r);
+		} catch (e) {
+			console.error('settings write failed:', e);
+			return error(500, 'Could not save settings');
+		}
+		const warnings = [];
+		if (r.secretChanged) warnings.push('SECRET changed: after restart, all sessions and quick-access links are invalidated and existing encrypted uploads become permanently unreadable.');
+		return json({ ok: true, restartRequired: true, warnings });
+	});
+
+	// Restart by exiting; a supervisor (Docker restart: unless-stopped, systemd)
+	// relaunches the process, which re-reads the managed settings file.
+	router.post('/api/admin/restart', ({ req, ip }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-restart', ip, 5, 60 * 60 * 1000);
+		if (limited) return limited;
+		console.warn('[admin] restart requested - exiting for the supervisor to relaunch');
+		// Exit after the response has a chance to flush.
+		setTimeout(() => process.exit(0), 200);
+		return json({ ok: true, restarting: true, willAutoRecover: existsSync('/.dockerenv') });
+	});
+
+	// Recent process logs (newest-last), from the in-memory ring buffer.
+	router.get('/api/admin/logs', ({ req, ip, query }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-logs', ip, 120, 60 * 1000);
+		if (limited) return limited;
+		let limit = Number(query.get('limit'));
+		if (!Number.isFinite(limit) || limit <= 0) limit = 300;
+		return json({ logs: getLogs(limit) });
 	});
 };

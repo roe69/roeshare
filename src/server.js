@@ -1,6 +1,7 @@
 // RoeShare entry point. Wires the router, static assets, security headers, the
 // expired-share sweeper, and starts Bun.serve. Run with `bun run src/server.js`.
 
+import './lib/logbuffer.js'; // first, so console capture covers the earliest boot logs
 import { join, normalize, sep } from 'node:path';
 import { createHash } from 'node:crypto';
 import { config } from './config.js';

@@ -100,6 +100,30 @@ If `SECRET` is unset, RoeShare generates an ephemeral key and warns at startup;
 all sessions and access tokens reset on restart, so set a stable secret in
 production.
 
+### App-managed settings (admin panel)
+
+The admin panel has a **Server** section that can edit most of the settings
+above, copy a quick-access upload link, restart the server, and view recent
+logs. Panel edits are saved to `${DATA_DIR}/settings.env` (inside the data
+volume) and **applied on the next restart** — they are not live. A few things to
+know:
+
+- **They override `.env`.** At boot, the managed file is layered over the
+  environment for its keys, so a value set once in the panel wins over the host
+  `.env` forever. To hand a key back to `.env`, remove it from
+  `settings.env` (or use the editor's Clear control where available) and
+  restart. `HOST`, `PORT`, and `DATA_DIR` are intentionally **not** editable
+  (they're pinned by the container/compose).
+- **Restart needs a supervisor.** The Restart button exits the process; Docker's
+  `restart: unless-stopped` (or systemd `Restart=always`) relaunches it. Without
+  one, the app stays down.
+- **`SECRET` is guarded.** Changing it logs everyone out, invalidates every
+  quick-access link, and **permanently** breaks decryption of existing uploads,
+  so the editor requires an explicit confirmation. Set it once and leave it.
+- **Secrets now live in the volume.** Because the managed file can hold
+  `SECRET`/passwords, a backup of the data volume may contain them — protect and
+  encrypt volume backups accordingly. The file is written `0600`.
+
 ## Deployment
 
 ### Single binary
@@ -126,11 +150,16 @@ After=network.target
 WorkingDirectory=/opt/roeshare
 ExecStart=/usr/local/bin/bun run src/server.js
 EnvironmentFile=/opt/roeshare/.env
-Restart=on-failure
+Restart=always
 
 [Install]
 WantedBy=multi-user.target
 ```
+
+Use `Restart=always` (not `on-failure`): the admin panel's **Restart** button
+exits the process cleanly (exit 0), so only `always` relaunches it. The Docker
+`docker-compose.yml` already uses `restart: unless-stopped`, which behaves the
+same way.
 
 ### Docker / Compose
 

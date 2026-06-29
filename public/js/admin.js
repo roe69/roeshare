@@ -3,7 +3,7 @@
 
 import {
 	el, $, $$, api, ApiError,
-	toastOk, toastErr, openModal,
+	toast, toastOk, toastErr, openModal,
 	formatBytes, formatDate, timeUntil, copyText,
 } from '/js/shared.js';
 
@@ -46,6 +46,7 @@ function editField(label, control, help) {
 // ---- Boot ------------------------------------------------------------------
 
 async function boot() {
+	stopLogsPoll();
 	headerActions.replaceChildren();
 	try {
 		const me = await api.get('/api/admin/me');
@@ -204,6 +205,7 @@ function renderDashboard() {
 		statsRow,
 		toolbar,
 		el('div', { class: 'rl-card', style: 'padding:0;overflow:hidden' }, table),
+		serverSection(),
 	);
 
 	loadStats();
@@ -611,6 +613,244 @@ function fileRow(modal, shareId, f, filesHost) {
 		}, 'Delete'),
 	);
 	return row;
+}
+
+// ---- Server section (admin ops: quick link, settings, restart, logs) -------
+
+let logsTimer = null;
+function stopLogsPoll() {
+	if (logsTimer) {
+		clearInterval(logsTimer);
+		logsTimer = null;
+	}
+}
+
+// One editable settings row, keyed into `inputs` for collection on save.
+function settingRow(f, inputs) {
+	if (f.type === 'bool') {
+		const cb = el('input', { type: 'checkbox' });
+		cb.checked = String(f.value) === '1' || String(f.value).toLowerCase() === 'true';
+		inputs.set(f.key, { input: cb, type: 'bool' });
+		return el('div', { class: 'rl-field' },
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2)' }, cb, el('span', { class: 'rl-label', style: 'margin:0' }, f.label)),
+			f.help ? el('p', { class: 'rl-help' }, f.help) : false,
+		);
+	}
+	if (f.secret) {
+		const input = el('input', { class: 'rl-input', type: 'password', autocomplete: 'new-password', placeholder: f.set ? '(unchanged - leave blank to keep)' : '(not set)' });
+		const reveal = el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', type: 'button' }, 'Show');
+		reveal.addEventListener('click', () => {
+			const masked = input.type === 'password';
+			input.type = masked ? 'text' : 'password';
+			reveal.textContent = masked ? 'Hide' : 'Show';
+		});
+		const controls = [input, reveal];
+		let clearBox = null;
+		if (f.clearable) {
+			clearBox = el('input', { type: 'checkbox' });
+			controls.push(el('label', { class: 'rl-row', style: 'gap:var(--rl-space-1);font-size:var(--rl-text-sm)' }, clearBox, el('span', {}, 'Clear')));
+		}
+		inputs.set(f.key, { input, type: 'secret', clearBox });
+		return el('div', { class: 'rl-field' },
+			el('label', { class: 'rl-label' }, f.label),
+			el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' }, ...controls),
+			f.danger ? el('p', { class: 'rl-help', style: 'color:var(--rl-danger)' }, f.danger) : (f.help ? el('p', { class: 'rl-help' }, f.help) : false),
+		);
+	}
+	const input = el('input', { class: 'rl-input', type: f.type === 'int' ? 'number' : 'text', value: f.value ?? '' });
+	inputs.set(f.key, { input, type: f.type });
+	return el('div', { class: 'rl-field' },
+		el('label', { class: 'rl-label' }, f.label),
+		input,
+		f.help ? el('p', { class: 'rl-help' }, f.help) : false,
+	);
+}
+
+async function saveSettings(inputs, saveBtn, banner) {
+	const values = {};
+	const clear = [];
+	let secretChange = false;
+	for (const [key, meta] of inputs) {
+		if (meta.type === 'bool') {
+			values[key] = meta.input.checked ? '1' : '0';
+		} else if (meta.type === 'secret') {
+			if (meta.clearBox && meta.clearBox.checked) clear.push(key);
+			else if (meta.input.value) {
+				values[key] = meta.input.value;
+				if (key === 'SECRET') secretChange = true;
+			}
+		} else if (meta.input.value !== '') {
+			// Blank non-secret field = leave unchanged (avoids saving a number
+			// field as 0, which would, e.g., set the max upload size to 0 bytes).
+			values[key] = meta.input.value;
+		}
+	}
+
+	const send = async confirmSecretChange => {
+		saveBtn.disabled = true;
+		try {
+			const res = await api.put('/api/admin/settings', { values, clear, confirmSecretChange });
+			toastOk('Saved - restart to apply');
+			banner.classList.remove('rl-hidden');
+			(res.warnings || []).forEach(w => toast(w, 'error', 8000));
+		} catch (err) {
+			toastErr(err);
+		} finally {
+			saveBtn.disabled = false;
+		}
+	};
+
+	if (secretChange) {
+		openModal({
+			title: 'Change SECRET?',
+			body: el('div', { class: 'rl-stack' },
+				el('p', {}, 'Changing SECRET will:'),
+				el('ul', { style: 'margin:0;padding-left:var(--rl-space-5)' },
+					el('li', {}, 'log out every admin session'),
+					el('li', {}, 'invalidate every quick-access link'),
+					el('li', {}, 'permanently break decryption of ALL existing uploads'),
+				),
+				el('p', { class: 'rl-text-danger' }, 'This cannot be undone.'),
+			),
+			actions: [
+				{ label: 'Cancel', variant: 'ghost' },
+				{ label: 'Change SECRET', variant: 'danger', onClick: () => send(true) },
+			],
+		});
+	} else {
+		await send(false);
+	}
+}
+
+function pollHealthThenReload() {
+	let tries = 0;
+	const t = setInterval(async () => {
+		tries++;
+		try {
+			const r = await fetch('/healthz', { cache: 'no-store' });
+			if (r.ok) {
+				clearInterval(t);
+				location.reload();
+				return;
+			}
+		} catch { /* still down */ }
+		if (tries > 30) {
+			clearInterval(t);
+			toastErr('Server did not come back within 30s - check your host.');
+		}
+	}, 1000);
+}
+
+function confirmRestart() {
+	openModal({
+		title: 'Restart server',
+		body: el('p', {}, 'Restart now to apply saved settings? The panel will be unavailable for a few seconds while the server relaunches.'),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Restart', variant: 'danger', onClick: async () => {
+					try {
+						const res = await api.post('/api/admin/restart', {});
+						if (res && res.willAutoRecover === false) {
+							toast('Process exited, but no supervisor was detected - your host must relaunch it.', 'error', 9000);
+						} else {
+							toastOk('Restarting...');
+							pollHealthThenReload();
+						}
+					} catch (err) {
+						toastErr(err);
+					}
+				},
+			},
+		],
+	});
+}
+
+function serverSection() {
+	const host = el('div', { class: 'rl-card rl-stack', style: 'margin-top:var(--rl-space-6)' },
+		el('h2', { class: 'rl-h2' }, 'Server'),
+	);
+
+	// 1) Quick-access upload link.
+	const quickHost = el('div', { class: 'rl-field' });
+	host.append(quickHost);
+	(async () => {
+		try {
+			const r = await api.get('/api/admin/upload-link');
+			if (r && r.enabled) {
+				const btn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Copy quick-access upload link');
+				btn.addEventListener('click', () => copyText(r.url));
+				quickHost.replaceChildren(btn, el('p', { class: 'rl-help' }, 'Instant-login link for the upload page (uses a derived token, never the password).'));
+			} else {
+				quickHost.replaceChildren(el('p', { class: 'rl-help' }, 'Set an upload password to enable a quick-access link.'));
+			}
+		} catch {
+			quickHost.replaceChildren(el('p', { class: 'rl-dim' }, 'Quick link unavailable.'));
+		}
+	})();
+
+	// 2) Settings editor.
+	host.append(el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-4)' }, 'Settings'));
+	const banner = el('div', { class: 'rl-alert rl-alert-warning rl-hidden' }, 'Saved. Restart the server to apply the changes.');
+	const formHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' });
+	host.append(banner, formHost);
+
+	const inputs = new Map();
+	const saveBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Save settings');
+	const restartBtn = el('button', { class: 'rl-btn rl-btn-danger' }, 'Restart server');
+	saveBtn.addEventListener('click', () => saveSettings(inputs, saveBtn, banner));
+	restartBtn.addEventListener('click', confirmRestart);
+
+	const loadSettings = async () => {
+		formHost.replaceChildren(el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' })));
+		try {
+			const data = await api.get('/api/admin/settings');
+			inputs.clear();
+			const rows = [el('p', { class: 'rl-help' }, `Host ${data.readOnly.HOST} · Port ${data.readOnly.PORT} · Data ${data.readOnly.DATA_DIR} (fixed by the container)`)];
+			for (const f of data.fields) rows.push(settingRow(f, inputs));
+			formHost.replaceChildren(...rows);
+		} catch (err) {
+			formHost.replaceChildren(el('p', { class: 'rl-dim' }, 'Could not load settings.'));
+			toastErr(err);
+		}
+	};
+
+	host.append(el('div', { class: 'rl-row rl-row-wrap', style: 'justify-content:flex-end;gap:var(--rl-space-2)' }, restartBtn, saveBtn));
+
+	// 3) Logs.
+	host.append(el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-4)' }, 'Logs'));
+	const logBox = el('pre', {
+		class: 'rl-mono',
+		style: 'max-height:340px;overflow:auto;font-size:var(--rl-text-xs);white-space:pre-wrap;background:var(--rl-bg-tertiary);border:var(--rl-border-thin) solid var(--rl-border);border-radius:var(--rl-radius-sm);padding:var(--rl-space-3);margin:0',
+	});
+	const loadLogs = async () => {
+		try {
+			const { logs } = await api.get('/api/admin/logs?limit=500');
+			logBox.textContent = (logs || []).map(l => `${new Date(l.ts).toLocaleTimeString()} ${String(l.level).toUpperCase().padEnd(5)} ${l.msg}`).join('\n');
+			logBox.scrollTop = logBox.scrollHeight;
+		} catch { /* keep the last view on a transient error */ }
+	};
+	const refreshBtn = el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm' }, 'Refresh');
+	refreshBtn.addEventListener('click', loadLogs);
+	const autoBox = el('input', { type: 'checkbox' });
+	autoBox.addEventListener('change', () => {
+		stopLogsPoll();
+		if (autoBox.checked) {
+			loadLogs();
+			logsTimer = setInterval(loadLogs, 3000);
+		}
+	});
+	host.append(
+		el('div', { class: 'rl-row', style: 'gap:var(--rl-space-3)' },
+			refreshBtn,
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, autoBox, el('span', {}, 'Auto-refresh')),
+		),
+		logBox,
+	);
+
+	loadSettings();
+	loadLogs();
+	return host;
 }
 
 boot();

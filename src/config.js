@@ -3,6 +3,8 @@
 
 import { randomBytes } from 'node:crypto';
 import { resolve } from 'node:path';
+import { applyManagedSettings } from './lib/settings.js';
+import { addSecret } from './lib/logbuffer.js';
 
 function int(name, fallback) {
 	const raw = process.env[name];
@@ -23,6 +25,13 @@ function bool(name, fallback = false) {
 }
 
 const dataDir = resolve(str('DATA_DIR', './data'));
+
+// Apply the admin-managed settings file (in the data volume) over the
+// environment for allowlisted keys BEFORE the rest of config is read - this is
+// what makes a panel edit take effect on the next restart (the container keeps
+// its compose-injected env and never re-reads the host .env). DATA_DIR itself is
+// read above, so the file can never relocate its own source.
+applyManagedSettings(dataDir);
 
 // BASE_URL may be a single URL or a comma-separated list of public origins (for
 // serving the same instance on multiple domains, e.g. share.example.com and
@@ -111,3 +120,9 @@ export const config = Object.freeze({
 	// Lifetime of a per-share access token granted after password unlock (1 hour).
 	accessTokenTtl: 3600,
 });
+
+// Defensively scrub these from any log line the buffer captures (they should
+// never be logged in the first place).
+addSecret(config.secret);
+addSecret(config.adminPassword);
+addSecret(config.uploadPassword);
