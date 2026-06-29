@@ -33,6 +33,26 @@ function clear() {
 	root.replaceChildren();
 }
 
+// Split "src/lib/http.js" into a dim directory prefix and the bold basename so a
+// long path stays readable in a single row.
+function splitPath(p) {
+	const i = String(p).lastIndexOf('/');
+	return i < 0 ? { dir: '', base: p } : { dir: p.slice(0, i + 1), base: p.slice(i + 1) };
+}
+
+function fileNameNode(name) {
+	const { dir, base } = splitPath(name);
+	return el('div', { class: 'rl-file-name', title: name },
+		dir ? el('span', { class: 'rl-file-dir' }, dir) : null,
+		base,
+	);
+}
+
+// A small pill summarizing one share stat (file count, size, expiry, downloads).
+function statChip(text) {
+	return el('span', { class: 'rl-stat' }, text);
+}
+
 // ---- States ----------------------------------------------------------------
 
 function renderMissing() {
@@ -139,20 +159,17 @@ async function loadText(file, pre) {
 function fileCard(file) {
 	if (e2eKey) return e2eFileCard(file);
 	const kind = previewKind(file.mime, file.name);
-	const previewHost = el('div', { class: 'rl-stack' });
+	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
 	let expanded = false;
 
 	const toggle = kind === 'none' ? null : el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
 	if (toggle) {
 		toggle.addEventListener('click', () => {
 			expanded = !expanded;
-			if (expanded) {
-				toggle.textContent = 'Hide';
-				buildPreview(file, previewHost);
-			} else {
-				toggle.textContent = 'Preview';
-				previewHost.replaceChildren();
-			}
+			toggle.textContent = expanded ? 'Hide' : 'Preview';
+			previewHost.classList.toggle('rl-hidden', !expanded);
+			if (expanded) buildPreview(file, previewHost);
+			else previewHost.replaceChildren();
 		});
 	}
 
@@ -161,19 +178,16 @@ function fileCard(file) {
 		href: withAccess(`${fileBase(file.id)}/download`),
 	}, 'Download');
 
-	return el('div', { class: 'rl-card rl-card-pad-sm' },
-		el('div', { class: 'rl-stack' },
-			el('div', { class: 'rl-row rl-row-wrap' },
-				el('div', { class: 'rl-filerow-icon' }, fileGlyph(file.mime, file.name)),
-				el('div', { class: 'rl-filerow-meta' },
-					el('div', { class: 'rl-filerow-name rl-truncate', title: file.name }, file.name),
-					el('div', { class: 'rl-muted', style: 'font-size:var(--rl-text-sm)' }, formatBytes(file.size)),
-				),
-				toggle,
-				download,
+	return el('div', { class: 'rl-file' },
+		el('div', { class: 'rl-file-main' },
+			el('div', { class: 'rl-file-icon' }, fileGlyph(file.mime, file.name)),
+			el('div', { class: 'rl-file-info' },
+				fileNameNode(file.name),
+				el('div', { class: 'rl-file-sub' }, formatBytes(file.size)),
 			),
-			previewHost,
+			el('div', { class: 'rl-file-actions' }, toggle, download),
 		),
+		previewHost,
 	);
 }
 
@@ -239,7 +253,7 @@ async function e2ePreview(file, host) {
 
 function e2eFileCard(file) {
 	const kind = previewKind(file.mime, file.name);
-	const previewHost = el('div', { class: 'rl-stack' });
+	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
 	const base = file.name.split('/').pop() || file.name;
 
 	let toggle = null;
@@ -249,6 +263,7 @@ function e2eFileCard(file) {
 		toggle.addEventListener('click', async () => {
 			shown = !shown;
 			toggle.textContent = shown ? 'Hide' : 'Preview';
+			previewHost.classList.toggle('rl-hidden', !shown);
 			if (shown) await e2ePreview(file, previewHost);
 			else previewHost.replaceChildren();
 		});
@@ -268,25 +283,22 @@ function e2eFileCard(file) {
 		download.textContent = label;
 	});
 
-	return el('div', { class: 'rl-card rl-card-pad-sm' },
-		el('div', { class: 'rl-stack' },
-			el('div', { class: 'rl-row rl-row-wrap' },
-				el('div', { class: 'rl-filerow-icon' }, fileGlyph(file.mime, file.name)),
-				el('div', { class: 'rl-filerow-meta' },
-					el('div', { class: 'rl-filerow-name rl-truncate', title: file.name }, file.name),
-					el('div', { class: 'rl-muted', style: 'font-size:var(--rl-text-sm)' }, formatBytes(file.size)),
-				),
-				toggle,
-				download,
+	return el('div', { class: 'rl-file' },
+		el('div', { class: 'rl-file-main' },
+			el('div', { class: 'rl-file-icon' }, fileGlyph(file.mime, file.name)),
+			el('div', { class: 'rl-file-info' },
+				fileNameNode(file.name),
+				el('div', { class: 'rl-file-sub' }, formatBytes(file.size)),
 			),
-			previewHost,
+			el('div', { class: 'rl-file-actions' }, toggle, download),
 		),
+		previewHost,
 	);
 }
 
 // ---- Owner controls --------------------------------------------------------
 
-function ownerBar() {
+function ownerDeleteButton() {
 	const del = el('button', { class: 'rl-btn rl-btn-danger rl-btn-sm' }, 'Delete share');
 	del.addEventListener('click', () => {
 		openModal({
@@ -307,12 +319,7 @@ function ownerBar() {
 			],
 		});
 	});
-
-	return el('div', { class: 'rl-row rl-row-wrap' },
-		el('span', { class: 'rl-badge rl-badge-gold' }, 'You own this share'),
-		el('span', { class: 'rl-spacer' }),
-		del,
-	);
+	return del;
 }
 
 // ---- QR code ---------------------------------------------------------------
@@ -353,50 +360,67 @@ function renderShare(share) {
 	const files = share.files || [];
 	const count = files.length;
 	const totalSize = share.totalSize != null ? share.totalSize : files.reduce((s, f) => s + (f.size || 0), 0);
-	const limit = share.maxDownloads ? `${share.downloadCount}/${share.maxDownloads}` : `${share.downloadCount}`;
 
-	const head = el('div', { class: 'rl-stack' },
-		el('div', { class: 'rl-row rl-row-wrap' },
-			el('h1', { class: 'rl-h1', style: 'margin:0' }, share.title || 'Shared files'),
-			share.e2e ? el('span', { class: 'rl-badge rl-badge-gold' }, 'End-to-end encrypted') : null,
-		),
-		el('div', { class: 'rl-row rl-row-wrap rl-muted', style: 'font-size:var(--rl-text-sm)' },
-			el('span', null, `${count} ${count === 1 ? 'file' : 'files'}`),
-			el('span', { class: 'rl-dim' }, '•'),
-			el('span', null, formatBytes(totalSize)),
-			el('span', { class: 'rl-dim' }, '•'),
-			el('span', null, `Expires in ${timeUntil(share.expiresAt)}`),
-			el('span', { class: 'rl-dim' }, '•'),
-			el('span', null, `Downloads ${limit}`),
-		),
-	);
-
-	if (editToken) head.append(ownerBar());
-
-	// Actions: copy link always; QR code; download-all for multi-file shares.
-	const actions = el('div', { class: 'rl-row rl-row-wrap' },
-		el('button', { class: 'rl-btn rl-btn-secondary', onClick: () => copyText(location.href) }, 'Copy link'),
-		el('button', { class: 'rl-btn rl-btn-secondary', onClick: () => openQrModal(location.href) }, 'QR code'),
-		count > 1 && !share.e2e
-			? el('a', { class: 'rl-btn rl-btn-accent', href: withAccess(`/api/shares/${encodeURIComponent(shareId)}/download-all`) }, 'Download all (zip)')
-			: null,
-	);
-	head.append(actions);
-
-	if (share.oneTime) {
-		head.append(el('div', { class: 'rl-alert rl-alert-warning' }, 'This is a one-time share - the first download removes it for everyone.'));
+	const downloads = share.maxDownloads
+		? `${share.downloadCount} / ${share.maxDownloads} downloads`
+		: `${share.downloadCount} download${share.downloadCount === 1 ? '' : 's'}`;
+	let expiry = 'Never expires';
+	if (share.expiresAt) {
+		const t = timeUntil(share.expiresAt);
+		expiry = t === 'Expired' ? 'Expired' : `Expires in ${t}`;
 	}
 
-	root.append(head);
+	// Top-right badges: encryption + ownership.
+	const badges = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' },
+		share.e2e ? el('span', { class: 'rl-badge rl-badge-gold' }, 'End-to-end encrypted') : null,
+		editToken ? el('span', { class: 'rl-badge rl-badge-success' }, 'You own this share') : null,
+	);
+
+	const stats = el('div', { class: 'rl-share-stats' },
+		statChip(`${count} ${count === 1 ? 'file' : 'files'}`),
+		statChip(formatBytes(totalSize)),
+		statChip(expiry),
+		statChip(downloads),
+	);
+
+	// Actions: copy link, QR, zip-all (multi-file), and owner delete (right-aligned).
+	const actions = el('div', { class: 'rl-row rl-row-wrap' },
+		el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onClick: () => copyText(location.href) }, 'Copy link'),
+		el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onClick: () => openQrModal(location.href) }, 'QR code'),
+		count > 1 && !share.e2e
+			? el('a', { class: 'rl-btn rl-btn-accent rl-btn-sm', href: withAccess(`/api/shares/${encodeURIComponent(shareId)}/download-all`) }, 'Download all (zip)')
+			: null,
+		editToken ? el('span', { class: 'rl-spacer' }) : null,
+		editToken ? ownerDeleteButton() : null,
+	);
+
+	const summary = el('section', { class: 'rl-card' },
+		el('div', { class: 'rl-stack' },
+			el('div', { class: 'rl-row rl-row-wrap', style: 'justify-content:space-between;align-items:flex-start' },
+				el('h1', { class: 'rl-h1 rl-truncate', style: 'margin:0;min-width:0', title: share.title || 'Shared files' }, share.title || 'Shared files'),
+				badges,
+			),
+			stats,
+			share.oneTime ? el('div', { class: 'rl-alert rl-alert-warning' }, 'One-time share - the first download removes it for everyone.') : null,
+			actions,
+		),
+	);
+	root.append(summary);
 
 	if (!count) {
-		root.append(el('div', { class: 'rl-card' }, el('div', { class: 'rl-empty' }, 'No files in this share.')));
+		root.append(el('div', { class: 'rl-card' },
+			el('div', { class: 'rl-empty' },
+				el('div', { class: 'rl-empty-icon' }, '\u{1F4ED}'),
+				el('p', { class: 'rl-muted' }, 'No files in this share.'),
+			),
+		));
 		return;
 	}
 
-	const list = el('div', { class: 'rl-stack' });
+	// One framed card holding a tight list of file rows (previews expand inline).
+	const list = el('div', { class: 'rl-files' });
 	for (const f of files) list.append(fileCard(f));
-	root.append(list);
+	root.append(el('section', { class: 'rl-card rl-files-card' }, list));
 }
 
 // ---- Load ------------------------------------------------------------------

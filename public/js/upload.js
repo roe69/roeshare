@@ -563,45 +563,51 @@ function shareUrlFor(id, finalizeUrl) {
 
 async function showResult(id, url, e2e) {
 	resultEl.textContent = '';
-	const link = el('a', { class: 'rl-mono rl-truncate', href: url, target: '_blank', rel: 'noopener', style: 'flex:1;min-width:0' }, url);
-	const copyBtn = el('button', { class: 'rl-btn rl-btn-secondary', onClick: () => copyText(url) }, 'Copy');
 
-	const qrHost = el('div', { class: 'rl-card rl-card-pad-sm', style: 'width:200px;height:200px;padding:var(--rl-space-3);align-self:center' });
+	// The link sits in a mono "copy field" with a primary Copy button on the end.
+	const urlText = el('div', { class: 'rl-copyfield-url', title: url }, url);
+	const copyBtn = el('button', { class: 'rl-btn rl-btn-primary', onClick: () => copyText(url) }, 'Copy');
+	const copyField = el('div', { class: 'rl-copyfield' }, urlText, copyBtn);
+
+	// QR on a white frame so a phone camera reads it against the dark theme.
+	const qrFrame = el('div', { class: 'rl-qr-frame' });
 	try {
 		const { makeQrSvg } = await import('/js/qrcode.js');
-		qrHost.innerHTML = makeQrSvg(url, { border: 2 });
+		qrFrame.innerHTML = makeQrSvg(url, { border: 1 });
 	} catch (e) {
-		qrHost.remove();
+		/* no QR - just omit it below */
 	}
 
 	resultEl.append(
-		el(
-			'div',
-			{ class: 'rl-stack' },
-			el('div', { class: 'rl-row' },
-				el('span', { class: 'rl-badge rl-badge-success' }, 'Ready'),
-				e2e ? el('span', { class: 'rl-badge rl-badge-gold' }, 'End-to-end encrypted') : null,
-				el('h2', { class: 'rl-h2', style: 'margin:0' }, 'Your share is live'),
-			),
-			el('p', { class: 'rl-muted' }, 'Anyone with this link can view the files. Save it now.'),
-			e2e ? el('div', { class: 'rl-alert rl-alert-warning' }, 'This link contains the decryption key (after the # symbol). Keep it private - the files cannot be recovered if the link is lost.') : null,
-			el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-3)' }, link, copyBtn),
-			qrHost.isConnected || qrHost.innerHTML ? qrHost : null,
-			el(
-				'div',
-				{ class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-3)' },
-				el('a', { class: 'rl-btn rl-btn-primary', href: url, target: '_blank', rel: 'noopener' }, 'Manage / view'),
+		el('div', { class: 'rl-result' },
+			el('div', { class: 'rl-result-check', 'aria-hidden': 'true' }, '✓'),
+			el('h1', { class: 'rl-h1', style: 'margin:0' }, 'Your share is live'),
+			el('p', { class: 'rl-muted', style: 'margin:0;max-width:46ch' },
+				e2e
+					? 'Only this link can open the files - it carries the decryption key. Save it now; it cannot be recovered if lost.'
+					: 'Anyone with this link can view and download the files. Save it somewhere safe.'),
+			e2e ? el('span', { class: 'rl-badge rl-badge-gold' }, 'End-to-end encrypted') : null,
+			copyField,
+			qrFrame.innerHTML ? qrFrame : null,
+			qrFrame.innerHTML ? el('p', { class: 'rl-help', style: 'margin:0' }, 'Scan the code to open it on your phone.') : null,
+			el('div', { class: 'rl-row rl-row-wrap', style: 'justify-content:center;margin-top:var(--rl-space-2)' },
+				el('a', { class: 'rl-btn rl-btn-primary rl-btn-lg', href: url, target: '_blank', rel: 'noopener' }, 'Open share'),
 				el('button', { class: 'rl-btn rl-btn-ghost', onClick: resetForm }, 'Share more files'),
 			),
 		),
 	);
+
+	// Swap the composer out for the result so only "Your share is live" shows.
+	$('#share-form').classList.add('rl-hidden');
 	resultEl.classList.remove('rl-hidden');
-	resultEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+	window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
 function resetForm() {
 	selected.length = 0;
 	renderFileList();
+	// Bring the composer back and clear the result.
+	$('#share-form').classList.remove('rl-hidden');
 	resultEl.classList.add('rl-hidden');
 	resultEl.textContent = '';
 	$('#opt-title').value = '';
