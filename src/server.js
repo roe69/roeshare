@@ -41,12 +41,17 @@ const STATIC_TYPES = {
 // (Editing files under public/ requires a restart to take effect.)
 const staticCache = new Map();
 
-async function staticEntry(full, type, immutable) {
+async function staticEntry(full, type) {
 	let e = staticCache.get(full);
 	if (e) return e;
 	const identity = Buffer.from(await Bun.file(full).arrayBuffer());
 	const etag = '"' + createHash('sha1').update(identity).digest('base64url').slice(0, 20) + '"';
-	e = { type, etag, identity, enc: {}, cacheControl: immutable ? 'public, max-age=3600' : 'no-cache' };
+	// `no-cache` = the browser may cache but MUST revalidate against the ETag on
+	// every request, so a deploy's new CSS/JS is picked up immediately (unchanged
+	// assets just get a tiny 304). Assets are not fingerprinted, so a positive
+	// max-age would serve stale files - e.g. an old app.css missing new classes -
+	// for the whole TTL after a deploy.
+	e = { type, etag, identity, enc: {}, cacheControl: 'no-cache' };
 	staticCache.set(full, e);
 	return e;
 }
@@ -81,8 +86,7 @@ async function serveStatic(req, pathname) {
 	if (!(await Bun.file(full).exists())) return null;
 	const ext = full.slice(full.lastIndexOf('.'));
 	const type = STATIC_TYPES[ext] || 'application/octet-stream';
-	const immutable = /\/(css|js|fonts|assets)\//.test(pathname);
-	return staticResponse(req, await staticEntry(full, type, immutable));
+	return staticResponse(req, await staticEntry(full, type));
 }
 
 // ---- Expired-share sweeper -------------------------------------------------

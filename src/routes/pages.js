@@ -20,7 +20,9 @@ export async function servePage(file, extraHeaders) {
 	const f = Bun.file(join(PAGES_DIR, file));
 	if (!(await f.exists())) return error(404, 'Not found');
 	return new Response(f, {
-		headers: { 'Content-Type': 'text/html; charset=utf-8', 'Content-Security-Policy': PAGE_CSP, ...SECURITY_HEADERS, ...(extraHeaders || {}) },
+		// Always revalidate HTML so a deploy's new markup is served immediately
+		// (the `/` route overrides this with a stronger no-store).
+		headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Security-Policy': PAGE_CSP, ...SECURITY_HEADERS, ...(extraHeaders || {}) },
 	});
 }
 
