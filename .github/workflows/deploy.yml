@@ -1,0 +1,85 @@
+name: Deploy RoeShare
+
+# Build and (re)start the RoeShare container on a self-hosted runner that lives
+# on the target server. Config comes from a .env placed once on the host (see
+# DEPLOY.md); CI never reads or writes secrets. Data lives in a named volume, so
+# redeploys - and swapping in a fresh runner box - keep uploads and the db.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# One deploy at a time; a newer push cancels an in-flight (older) deploy.
+concurrency:
+  group: roeshare-deploy
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    # Any self-hosted runner. To pin to one box, add a label here and to the
+    # runner, e.g. [self-hosted, roeshare]. Assumes a Linux runner with Docker
+    # Engine + the Compose v2 plugin already installed.
+    runs-on: [self-hosted]
+    defaults:
+      run:
+        shell: bash
+    env:
+      # Persisted host config, created once (never overwritten by CI). Override
+      # by setting a repository Variable named ENV_PATH.
+      ENV_PATH: ${{ vars.ENV_PATH || '/opt/roeshare/.env' }}
+      # Fixed project name -> stable container ("roeshare") and volume
+      # ("roeshare_roeshare-data") no matter which runner/path runs this.
+      COMPOSE_PROJECT_NAME: roeshare
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Preflight (Docker + persisted .env)
+        run: |
+          set -euo pipefail
+          command -v docker >/dev/null \
+            || { echo "::error::Docker is not installed on this runner."; exit 1; }
+          docker compose version >/dev/null 2>&1 \
+            || { echo "::error::Docker Compose v2 plugin not available."; exit 1; }
+          if [ ! -f "$ENV_PATH" ]; then
+            echo "::error::Config file $ENV_PATH not found on this host. Create it once (see DEPLOY.md); CI never generates or overwrites it."
+            exit 1
+          fi
+          # Compose reads ./.env for the container's env_file AND for ${PORT}
+          # interpolation, so stage the persisted file into the project dir.
+          install -m 600 "$ENV_PATH" ./.env
+
+      - name: Build & deploy
+        run: |
+          set -euo pipefail
+          # --build reuses the local layer cache (no --no-cache), so an unchanged
+          # source tree rebuilds in seconds. --remove-orphans tidies stale services.
+          docker compose up -d --build --remove-orphans
+          # Drop only dangling images; keeps cache layers for the next fast build.
+          docker image prune -f >/dev/null 2>&1 || true
+
+      - name: Health check
+        run: |
+          set -euo pipefail
+          PORT="$(grep -E '^PORT=' ./.env | cut -d= -f2- | tr -d '[:space:]')"
+          PORT="${PORT:-3300}"
+          echo "Waiting for RoeShare to report healthy on 127.0.0.1:${PORT} ..."
+          for _ in $(seq 1 30); do
+            if curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
+              echo "Healthy:"; curl -fsS "http://127.0.0.1:${PORT}/healthz"; echo
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::RoeShare did not become healthy within ~60s. Recent logs:"
+          docker compose logs --tail=80 roeshare || true
+          exit 1
+
+      - name: Wipe staged secrets
+        if: always()
+        run: rm -f ./.env
