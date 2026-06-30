@@ -107,22 +107,26 @@ export function mountSidebar({ active, groups, account } = {}) {
 		el('span', { html: brandInner() }),
 	);
 
+	// One footer row: Collapse on the left, Log out on the right (admin only),
+	// both the same height. The "logged in as Admin" label is dropped - the admin
+	// views are only reachable in admin mode, so it carried no information.
 	const foot = el('div', { class: 'rl-side-foot' });
-	if (account) {
-		const logoutBtn = el('button', { class: 'rl-side-logout', type: 'button', title: 'Log out', 'aria-label': 'Log out' },
-			svgIcon('logout', 'rl-side-logout-ico'));
-		if (account.onLogout) logoutBtn.addEventListener('click', account.onLogout);
-		foot.append(el('div', { class: 'rl-side-account' },
-			svgIcon('user', 'rl-side-user'),
-			el('span', { class: 'rl-side-who' }, account.name || 'Account'),
-			logoutBtn,
-		));
-	}
-	const collapseBtn = el('button', { class: 'rl-side-collapse', type: 'button' },
+	const footRow = el('div', { class: 'rl-side-foot-row' });
+	const collapseBtn = el('button', { class: 'rl-side-foot-btn rl-side-foot-collapse', type: 'button' },
 		svgIcon('collapse'),
 		el('span', { class: 'rl-side-label' }, 'Collapse'),
 	);
-	foot.append(collapseBtn);
+	footRow.append(collapseBtn);
+	if (account && account.onLogout) {
+		// Icon-only (the rail is too narrow for two labelled buttons); same height
+		// as Collapse, sitting flush at the right.
+		const logoutBtn = el('button', { class: 'rl-side-foot-btn rl-side-foot-logout', type: 'button', title: 'Log out', 'aria-label': 'Log out' },
+			svgIcon('logout'),
+		);
+		logoutBtn.addEventListener('click', account.onLogout);
+		footRow.append(logoutBtn);
+	}
+	foot.append(footRow);
 
 	const aside = el('aside', { class: 'rl-side' }, brand, nav, foot);
 	const toggle = el('button', { class: 'rl-side-toggle', type: 'button', 'aria-label': 'Open menu' }, svgIcon('menu'));

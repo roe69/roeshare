@@ -1175,9 +1175,7 @@ body {
 		width: var(--rl-side-mini-width);
 	}
 	.rl-side-mini .rl-side-label,
-	.rl-side-mini .rl-side-brand span,
-	.rl-side-mini .rl-side-who,
-	.rl-side-mini .rl-side-logout {
+	.rl-side-mini .rl-side-brand span {
 		display: none;
 	}
 	.rl-side-mini .rl-side-group {
@@ -1186,15 +1184,24 @@ body {
 		margin-top: var(--rl-space-2);
 	}
 	.rl-side-mini .rl-side-brand,
-	.rl-side-mini .rl-side-item,
-	.rl-side-mini .rl-side-account,
-	.rl-side-mini .rl-side-collapse {
+	.rl-side-mini .rl-side-item {
 		justify-content: center;
 		gap: 0;
 		padding-left: 0;
 		padding-right: 0;
 		margin-left: var(--rl-space-2);
 		margin-right: var(--rl-space-2);
+	}
+	/* Footer stacks to an icon-only column when the rail is collapsed. */
+	.rl-side-mini .rl-side-foot-row {
+		flex-direction: column;
+		gap: var(--rl-space-1);
+	}
+	.rl-side-mini .rl-side-foot-btn {
+		justify-content: center;
+		gap: 0;
+		padding-left: 0;
+		padding-right: 0;
 	}
 }
 
@@ -1274,75 +1281,20 @@ body {
 	border-top: var(--rl-border-thin) solid var(--rl-border);
 }
 
-/* Same inset, gap and icon size as a nav row, so the user icon lines up exactly
-   with the nav icons above and the collapse icon below. */
-.rl-side-account {
+/* Collapse + Log out share one row at the bottom, the same height. Collapse
+   grows to fill the row so Log out sits flush at the right edge. */
+.rl-side-foot-row {
 	display: flex;
 	align-items: center;
+	gap: var(--rl-space-2);
+	margin: var(--rl-space-1) var(--rl-space-2) 0;
+}
+.rl-side-foot-btn {
+	display: inline-flex;
+	align-items: center;
+	justify-content: flex-start;
 	gap: var(--rl-space-2);
 	height: 34px;
-	margin: var(--rl-space-1) var(--rl-space-2) 0;
-	padding: 0 var(--rl-space-3);
-	border-radius: var(--rl-radius-sm);
-	min-width: 0;
-}
-.rl-side-user {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 18px;
-	height: 18px;
-	flex-shrink: 0;
-	color: var(--rl-text-muted);
-}
-.rl-side-user svg {
-	width: 18px;
-	height: 18px;
-}
-.rl-side-who {
-	flex: 1;
-	min-width: 0;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-	color: var(--rl-text);
-	font-size: var(--rl-text-sm);
-	font-weight: var(--rl-weight-semibold);
-}
-.rl-side-logout {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 28px;
-	height: 28px;
-	flex-shrink: 0;
-	border: 0;
-	border-radius: var(--rl-radius-sm);
-	background: transparent;
-	color: var(--rl-text-dim);
-	cursor: pointer;
-	transition:
-		background-color var(--rl-duration-fast) var(--rl-ease),
-		color var(--rl-duration-fast) var(--rl-ease);
-}
-.rl-side-logout svg {
-	width: 17px;
-	height: 17px;
-}
-@media (hover: hover) and (pointer: fine) {
-	.rl-side-logout:hover {
-		color: var(--rl-danger);
-		background: rgba(var(--rl-danger-rgb), 0.12);
-	}
-}
-
-/* Collapse reads as one more quiet nav row, not a heavy bar. */
-.rl-side-collapse {
-	display: flex;
-	align-items: center;
-	gap: var(--rl-space-2);
-	height: 32px;
-	margin: var(--rl-space-1) var(--rl-space-2) 0;
 	padding: 0 var(--rl-space-3);
 	border: 0;
 	border-radius: var(--rl-radius-sm);
@@ -1351,23 +1303,36 @@ body {
 	font-size: var(--rl-text-sm);
 	font-weight: var(--rl-weight-medium);
 	font-family: var(--rl-font);
+	line-height: 1;
 	cursor: pointer;
 	white-space: nowrap;
 	transition:
 		background-color var(--rl-duration-fast) var(--rl-ease),
 		color var(--rl-duration-fast) var(--rl-ease);
 }
+.rl-side-foot-collapse {
+	flex: 1;
+}
+/* Log out is an icon-only square, flush at the right edge. */
+.rl-side-foot-logout {
+	flex: 0 0 auto;
+	width: 34px;
+	justify-content: center;
+	padding: 0;
+}
 @media (hover: hover) and (pointer: fine) {
-	.rl-side-collapse:hover {
+	.rl-side-foot-btn:hover {
 		color: var(--rl-text);
 		background: rgba(255, 255, 255, 0.05);
 	}
+	.rl-side-foot-logout:hover {
+		color: var(--rl-danger);
+		background: rgba(var(--rl-danger-rgb), 0.12);
+	}
 }
-
-/* Collapse (mini) is desktop-only; in the mobile drawer it has no meaning.
-   This sits after the control block so it wins the cascade over display:flex. */
+/* Collapse (mini toggle) is desktop-only; in the mobile drawer it has no meaning. */
 @media (max-width: 900px) {
-	.rl-side-collapse {
+	.rl-side-foot-collapse {
 		display: none;
 	}
 }
