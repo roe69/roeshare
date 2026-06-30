@@ -29,7 +29,7 @@ function renderPage(file) {
 	let out;
 	try {
 		out = readFileSync(join(PAGES_DIR, file), 'utf8')
-			.replaceAll('{{APP_NAME}}', config.appName)
+			.replaceAll('{{APP_NAME}}', config.appNameHtml)
 			.replaceAll('{{APP_TITLE}}', config.appTitle);
 	} catch {
 		out = null;

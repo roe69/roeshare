@@ -24,6 +24,34 @@ function bool(name, fallback = false) {
 	return /^(1|true|yes|on)$/i.test(raw.trim());
 }
 
+function escapeHtml(s) {
+	return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// Render a brand string with OSRS-style tags to safe HTML. `<col=RRGGBB>` sets the
+// colour of the text that follows (until the next `<col>`/`</col>`); `<b>..</b>`
+// bolds. Every literal character is escaped and only colour/bold are honoured, so
+// this stays XSS-safe even though the result is injected as raw HTML into the page
+// template (APP_NAME is operator-trusted env, never request input).
+function brandHtml(s) {
+	let out = '', color = null, bold = 0;
+	const re = /<col=([0-9a-fA-F]{3,8})>|<\/col>|<b>|<\/b>|([^<]+)|(<)/g;
+	let m;
+	while ((m = re.exec(s)) !== null) {
+		if (m[1] !== undefined) color = m[1];
+		else if (m[0] === '</col>') color = null;
+		else if (m[0] === '<b>') bold++;
+		else if (m[0] === '</b>') bold = Math.max(0, bold - 1);
+		else {
+			let chunk = escapeHtml(m[2] !== undefined ? m[2] : '<');
+			if (bold > 0) chunk = `<b>${chunk}</b>`;
+			if (color) chunk = `<span style="color:#${color}">${chunk}</span>`;
+			out += chunk;
+		}
+	}
+	return out;
+}
+
 const dataDir = resolve(str('DATA_DIR', './data'));
 
 // Apply the admin-managed settings file (in the data volume) over the
@@ -54,14 +82,14 @@ for (const b of baseUrls) {
 	}
 }
 
-// Brand wordmark. APP_NAME is injected verbatim as HTML into the header span so
-// the operator can keep the default ember colouring (the <b> is gradient-clipped
-// by `.rl-wordmark b` in app.css) or supply their own markup/inline colours,
-// e.g. APP_NAME='Acme<span style="color:#3b82f6">Share</span>'. This is
-// OPERATOR-TRUSTED config (it comes from the server environment, never from a
-// request), so the raw HTML carries no end-user XSS vector - do not wire it to
-// any user-supplied source. appTitle is the tag-stripped plain text for <title>.
-const appName = str('APP_NAME', 'Roe<b>Share</b>');
+// Brand wordmark. APP_NAME carries its own colours via OSRS-style tags:
+// `<col=RRGGBB>` colours the following text and `<b>..</b>` bolds it, e.g.
+// `<col=e4e4ce>Roe<b><col=ff6b35>Share</b>` (cream "Roe" + bold orange "Share").
+// brandHtml() renders it to safe HTML (text escaped; only colour/bold honoured)
+// for the header/sidebar template, so re-theming the brand needs no CSS change -
+// just the env. appTitle is the tag-stripped plain text for <title>.
+const appName = str('APP_NAME', '<col=e4e4ce>Roe<b><col=ff6b35>Share</b>');
+const appNameHtml = brandHtml(appName);
 const appTitle = appName.replace(/<[^>]*>/g, '').trim() || 'RoeShare';
 
 // A SECRET is mandatory for signing. If none is provided we generate an
@@ -90,8 +118,10 @@ export const config = Object.freeze({
 	secret,
 	ephemeralSecret,
 
-	// Brand name (raw HTML) and its plain-text form; see the comment above.
+	// Brand name: the raw env string (for the settings editor), the rendered safe
+	// HTML (injected into pages), and the plain-text form (for <title>).
 	appName,
+	appNameHtml,
 	appTitle,
 
 	// Only honor X-Forwarded-For / X-Real-IP when behind a trusted reverse proxy.

@@ -107,6 +107,25 @@ body {
 .rl-spacer {
 	flex: 1;
 }
+/* A row of controls (search, select, buttons) forced to one consistent height
+   so the toolbar lines up regardless of which control types it holds. */
+.rl-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--rl-space-3);
+}
+.rl-toolbar .rl-input,
+.rl-toolbar .rl-select,
+.rl-toolbar .rl-btn {
+	height: 40px;
+	min-height: 40px;
+}
+.rl-toolbar .rl-input,
+.rl-toolbar .rl-select {
+	padding-top: 0;
+	padding-bottom: 0;
+}
 .rl-muted {
 	color: var(--rl-text-muted);
 }
@@ -1001,7 +1020,9 @@ body {
 	font-weight: var(--rl-weight-extrabold);
 	font-size: var(--rl-text-xl);
 	letter-spacing: var(--rl-tracking-tight);
-	color: var(--rl-brand-1);
+	/* Fallback colour only; the brand string carries its own colours via
+	   <col=RRGGBB> tags (rendered to inline spans), which override this. */
+	color: var(--rl-text);
 }
 .rl-side-brand:hover {
 	text-decoration: none;
@@ -1014,7 +1035,6 @@ body {
 }
 .rl-side-brand b {
 	font-weight: inherit;
-	color: var(--rl-brand-2);
 }
 
 /* ----- Nav ----- */
@@ -1119,6 +1139,28 @@ body {
 	margin: var(--rl-space-1) 0 0;
 	color: var(--rl-text-muted);
 	font-size: var(--rl-text-sm);
+}
+
+/* ----- Live log viewer ----- */
+.rl-log {
+	max-height: 65vh;
+	overflow-y: auto;
+	background: var(--rl-bg-tertiary);
+	border: var(--rl-border-thin) solid var(--rl-border);
+	border-radius: var(--rl-radius-sm);
+	padding: var(--rl-space-3);
+	font-family: var(--rl-font-mono);
+	font-size: var(--rl-text-xs);
+	line-height: 1.55;
+}
+/* Fixed time + level columns keep every message's left edge aligned while the
+   message itself wraps in its own 1fr column (no more clipped short lines). */
+.rl-logrow {
+	display: grid;
+	grid-template-columns: auto auto 1fr;
+	column-gap: var(--rl-space-3);
+	align-items: baseline;
+	padding: 2px 0;
 }
 
 /* ----- Collapsed (icon-only) rail (desktop only) -----

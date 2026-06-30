@@ -75,18 +75,8 @@
 	--rl-trim-rgb: 139, 105, 20;
 	--rl-brown-100-rgb: 168, 124, 61;
 
-	/* ---------- Brand wordmark colours ----------
-	   The two-tone brand name is driven entirely by these two variables.
-	   The first brand segment (the plain text, e.g. "Roe") uses --rl-brand-1;
-	   the emphasised segment (the <b>, e.g. "Share") uses --rl-brand-2.
-	   Recolour the whole wordmark - in the header, the sidebar, anywhere - by
-	   changing just these two lines. The defaults match the original look
-	   (soft cream/grey + orange); swap them for, say, blue + green with:
-	     --rl-brand-1: #5b9dff;
-	     --rl-brand-2: #34d27b;
-	   No markup or JS changes are needed. */
-	--rl-brand-1: var(--rl-text);
-	--rl-brand-2: var(--rl-accent);
+	/* The brand wordmark colours live in the brand string itself (APP_NAME),
+	   via OSRS-style <col=RRGGBB> tags - see src/config.js. Nothing to set here. */
 
 	/* ---------- Admin sidebar rail ---------- */
 	--rl-side-width: 220px;

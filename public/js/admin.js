@@ -95,15 +95,16 @@ function boot() {
 	sidebar = mountSidebar({
 		active: currentView(),
 		groups: [
-			{ label: 'Dashboard', items: [
+			// Share stays the top group, matching the site pages, so these never move.
+			{ label: 'Share', items: [
+				{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
+				{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
+			] },
+			{ label: 'Admin', items: [
 				{ id: 'overview', label: 'Overview', icon: 'overview', onClick: go('overview') },
 				{ id: 'shares', label: 'Shares', icon: 'shares', onClick: go('shares') },
 				{ id: 'server', label: 'Server', icon: 'server', onClick: go('server') },
 				{ id: 'logs', label: 'Logs', icon: 'logs', onClick: go('logs') },
-			] },
-			{ label: 'Browse', items: [
-				{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
-				{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
 			] },
 		],
 		account: { name: 'Admin', onLogout: logout },
@@ -136,35 +137,53 @@ function infoRow(label, value) {
 	);
 }
 
+function panelSpinner() {
+	return el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' }));
+}
+
+// Panel header: a title and an optional "View all" link to the Shares view.
+function panelHead(title, viewAll) {
+	return el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center' },
+		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, title),
+		viewAll ? el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => { location.hash = '#/shares'; } }, 'View all') : false,
+	);
+}
+
+// A clickable share row (title on the left, a caller-supplied node on the right).
+function shareRowBtn(s, right) {
+	return el('button', {
+		class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);width:100%;background:transparent;border:0;padding:var(--rl-space-2);border-radius:var(--rl-radius-sm);cursor:pointer;text-align:left;color:inherit',
+		onclick: () => openDetail(s.id),
+	},
+		el('span', { class: 'rl-truncate', style: 'font-weight:var(--rl-weight-semibold)' }, s.title || s.id),
+		right,
+	);
+}
+
 function renderOverview() {
 	const statsRow = el('div', {
 		id: 'stats',
 		style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--rl-space-4)',
 	});
-	const instanceHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' },
-		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Instance'),
-		el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' })),
-	);
-	const recentHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' },
-		el('div', { class: 'rl-row', style: 'justify-content:space-between' },
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, 'Recent shares'),
-			el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => { location.hash = '#/shares'; } }, 'View all'),
-		),
-		el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' })),
-	);
+	const biggestHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
+	const uploadersHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
+	const instanceHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
+	const expiringHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
 
 	view.replaceChildren(
 		viewHead('Overview', 'A snapshot of this RoeShare instance.'),
 		statsRow,
-		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--rl-space-4);margin-top:var(--rl-space-4)' },
+		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:var(--rl-space-4);margin-top:var(--rl-space-4)' },
+			biggestHost,
+			uploadersHost,
 			instanceHost,
-			recentHost,
+			expiringHost,
 		),
 	);
 
 	loadStats();
 	loadInstance(instanceHost);
-	loadRecent(recentHost);
+	loadOverview(biggestHost, uploadersHost, expiringHost);
 }
 
 async function loadStats() {
@@ -217,10 +236,7 @@ async function loadInstance(host) {
 	} catch {
 		body.append(el('p', { class: 'rl-dim' }, 'Instance info unavailable.'));
 	}
-	host.replaceChildren(
-		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Instance'),
-		body,
-	);
+	host.replaceChildren(panelHead('Instance'), body);
 }
 
 function formatUptime(s) {
@@ -231,34 +247,63 @@ function formatUptime(s) {
 	return `${Math.floor(s)}s`;
 }
 
-async function loadRecent(host) {
-	const list = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
+// Fill the three leaderboard panels (biggest shares, top uploaders, expiring
+// soon) from one request. A failure shows a per-panel notice, never a blank page.
+async function loadOverview(biggestHost, uploadersHost, expiringHost) {
+	let data;
 	try {
-		const data = await api.get('/api/admin/shares?sort=created&order=desc&limit=6');
-		const shares = (data && data.shares) || [];
-		if (!shares.length) {
-			list.append(el('p', { class: 'rl-dim' }, 'No shares yet.'));
-		} else {
-			for (const s of shares) {
-				list.append(el('button', {
-					class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);width:100%;background:transparent;border:0;padding:var(--rl-space-2);border-radius:var(--rl-radius-sm);cursor:pointer;text-align:left;color:inherit',
-					onclick: () => openDetail(s.id),
-				},
-					el('span', { class: 'rl-truncate', style: 'font-weight:var(--rl-weight-semibold)' }, s.title || s.id),
-					el('span', { class: 'rl-dim', style: 'font-size:var(--rl-text-xs);flex-shrink:0' }, `${formatBytes(s.totalSize ?? 0)} - ${timeUntil(s.expiresAt)}`),
-				));
-			}
-		}
+		data = await api.get('/api/admin/overview');
 	} catch {
-		list.append(el('p', { class: 'rl-dim' }, 'Could not load recent shares.'));
+		const fail = title => [panelHead(title), el('p', { class: 'rl-dim' }, 'Could not load.')];
+		biggestHost.replaceChildren(...fail('Biggest shares'));
+		uploadersHost.replaceChildren(...fail('Top uploaders'));
+		expiringHost.replaceChildren(...fail('Expiring soon'));
+		return;
 	}
-	host.replaceChildren(
-		el('div', { class: 'rl-row', style: 'justify-content:space-between' },
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, 'Recent shares'),
-			el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => { location.hash = '#/shares'; } }, 'View all'),
-		),
-		list,
+
+	// Biggest shares - clickable rows, size + downloads on the right.
+	const big = data.biggestShares || [];
+	const bigList = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
+	if (!big.length) bigList.append(el('p', { class: 'rl-dim' }, 'No shares yet.'));
+	else for (const s of big) {
+		bigList.append(shareRowBtn(s, el('span', { class: 'rl-dim', style: 'font-size:var(--rl-text-xs);flex-shrink:0' }, `${formatBytes(s.size)} - ${s.downloads} dl`)));
+	}
+	biggestHost.replaceChildren(panelHead('Biggest shares', true), bigList);
+
+	// Top uploaders (power users) - aggregated by creator IP.
+	const up = data.topUploaders || [];
+	const upBody = el('tbody', {},
+		...(up.length ? up.map(u => el('tr', {},
+			el('td', {}, el('span', { class: 'rl-mono rl-truncate', style: 'display:inline-block;max-width:160px', title: u.ip || 'unknown' }, u.ip || el('span', { class: 'rl-dim' }, 'unknown'))),
+			el('td', { class: 'rl-col-num' }, String(u.shareCount)),
+			el('td', { class: 'rl-col-num' }, formatBytes(u.totalSize)),
+			el('td', { class: 'rl-col-num' }, String(u.downloads)),
+		)) : [el('tr', {}, el('td', { colspan: 4 }, el('p', { class: 'rl-dim' }, 'No uploads yet.')))]),
 	);
+	uploadersHost.replaceChildren(
+		panelHead('Top uploaders'),
+		el('div', { style: 'overflow-x:auto' },
+			el('table', { class: 'rl-table' },
+				el('thead', {}, el('tr', {},
+					el('th', {}, 'IP'),
+					el('th', { class: 'rl-col-num' }, 'Shares'),
+					el('th', { class: 'rl-col-num' }, 'Size'),
+					el('th', { class: 'rl-col-num' }, 'Downloads'),
+				)),
+				upBody,
+			),
+		),
+	);
+
+	// Expiring soon - soonest first, a warning/danger badge for the time left.
+	const exp = data.expiringSoon || [];
+	const expList = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
+	if (!exp.length) expList.append(el('p', { class: 'rl-dim' }, 'Nothing expiring soon.'));
+	else for (const s of exp) {
+		const closeSoon = s.expiresAt * 1000 - Date.now() < 3600 * 1000;
+		expList.append(shareRowBtn(s, el('span', { class: `rl-badge ${closeSoon ? 'rl-badge-danger' : 'rl-badge-warning'}`, style: 'flex-shrink:0' }, timeUntil(s.expiresAt))));
+	}
+	expiringHost.replaceChildren(panelHead('Expiring soon'), expList);
 }
 
 // ===========================================================================
@@ -297,11 +342,11 @@ function renderShares() {
 	});
 
 	const bulkBtn = el('button', {
-		id: 'bulk-delete', class: 'rl-btn rl-btn-danger rl-btn-sm', disabled: true,
+		id: 'bulk-delete', class: 'rl-btn rl-btn-danger', disabled: true,
 		onclick: bulkDelete,
 	}, 'Delete selected');
 
-	const toolbar = el('div', { class: 'rl-row rl-row-wrap', style: 'margin-bottom:var(--rl-space-4)' },
+	const toolbar = el('div', { class: 'rl-toolbar', style: 'margin-bottom:var(--rl-space-4)' },
 		searchInput,
 		sortSelect,
 		el('span', { class: 'rl-spacer' }),
@@ -699,16 +744,83 @@ function fileRow(modal, shareId, f, filesHost) {
 // Server (quick link, settings, restart)
 // ===========================================================================
 
+// Per-field overrides so the Server page stays calm: a short (or no) hint, a
+// trimmed label, and byte fields edited in friendly units. The API still carries
+// the long labels/help; these just shape the presentation.
+const SETTING_HINTS = {
+	BASE_URL: 'Public URLs, comma-separated. First is canonical.',
+	APP_NAME: 'Brand name. <col=RRGGBB> colours, <b> bolds.',
+	TRUST_PROXY: 'Only enable behind a trusted proxy.',
+	MAX_TOTAL_SIZE: '0 means unlimited.',
+	CHUNK_SIZE: 'Advanced. Leave the default.',
+	DEFAULT_EXPIRY: '0 means never.',
+	SWEEP_INTERVAL: 'How often expired shares are purged.',
+	ADMIN_PASSWORD: 'Blank keeps the current one.',
+	UPLOAD_PASSWORD: 'Blank keeps it; tick Clear for open uploads.',
+};
+const SETTING_LABELS = {
+	MAX_FILE_SIZE: 'Max file size',
+	MAX_SHARE_SIZE: 'Max share size',
+	MAX_TOTAL_SIZE: 'Max total storage',
+	CHUNK_SIZE: 'Upload chunk size',
+	DEFAULT_EXPIRY: 'Default expiry (seconds)',
+	SWEEP_INTERVAL: 'Sweep interval (seconds)',
+};
+const BYTE_KEYS = new Set(['MAX_FILE_SIZE', 'MAX_SHARE_SIZE', 'MAX_TOTAL_SIZE', 'CHUNK_SIZE']);
+const BYTE_UNITS = [['B', 1], ['KB', 1024], ['MB', 1048576], ['GB', 1073741824]];
+
+// Pick the friendliest unit for a byte count: the largest that divides evenly
+// (so 8388608 shows as "8 MB"), else the largest where the value is >= 1.
+function splitBytes(bytes) {
+	if (!bytes) return { value: '0', unit: 1 };
+	for (let i = BYTE_UNITS.length - 1; i >= 0; i--) if (bytes % BYTE_UNITS[i][1] === 0) return { value: String(bytes / BYTE_UNITS[i][1]), unit: BYTE_UNITS[i][1] };
+	for (let i = BYTE_UNITS.length - 1; i >= 0; i--) if (bytes >= BYTE_UNITS[i][1]) return { value: String(+(bytes / BYTE_UNITS[i][1]).toFixed(2)), unit: BYTE_UNITS[i][1] };
+	return { value: String(bytes), unit: 1 };
+}
+
+function settingHint(key) {
+	return key in SETTING_HINTS ? el('p', { class: 'rl-help' }, SETTING_HINTS[key]) : false;
+}
+
 function settingRow(f, inputs) {
+	const label = SETTING_LABELS[f.key] || f.label;
+
 	if (f.type === 'bool') {
 		const cb = el('input', { type: 'checkbox' });
 		cb.checked = String(f.value) === '1' || String(f.value).toLowerCase() === 'true';
 		inputs.set(f.key, { input: cb, type: 'bool' });
 		return el('div', { class: 'rl-field' },
-			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2)' }, cb, el('span', { class: 'rl-label', style: 'margin:0' }, f.label)),
-			f.help ? el('p', { class: 'rl-help' }, f.help) : false,
+			el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3)' },
+				el('span', { class: 'rl-label', style: 'margin:0' }, label),
+				el('label', { class: 'rl-switch' }, cb, el('span', { class: 'rl-switch-track' })),
+			),
+			settingHint(f.key),
 		);
 	}
+
+	if (BYTE_KEYS.has(f.key)) {
+		const seed = splitBytes(Number(f.value) || 0);
+		const num = el('input', { class: 'rl-input', type: 'number', min: 0, step: 'any', value: seed.value, style: 'flex:1;min-width:0' });
+		const unit = el('select', { class: 'rl-select', style: 'max-width:88px' }, ...BYTE_UNITS.map(([name, v]) => el('option', { value: v }, name)));
+		unit.value = String(seed.unit);
+		const exact = el('p', { class: 'rl-help rl-dim', style: 'margin:0' });
+		const getBytes = () => Math.round(parseFloat(num.value || '0') * Number(unit.value));
+		const sync = () => {
+			const b = getBytes();
+			exact.textContent = f.key === 'MAX_TOTAL_SIZE' && b === 0 ? 'Unlimited' : `= ${new Intl.NumberFormat().format(b)} bytes`;
+		};
+		num.addEventListener('input', sync);
+		unit.addEventListener('change', sync);
+		sync();
+		inputs.set(f.key, { type: 'bytes', getBytes });
+		return el('div', { class: 'rl-field' },
+			el('label', { class: 'rl-label' }, label),
+			el('div', { class: 'rl-row', style: 'gap:var(--rl-space-2)' }, num, unit),
+			settingHint(f.key),
+			exact,
+		);
+	}
+
 	if (f.secret) {
 		const input = el('input', { class: 'rl-input', type: 'password', autocomplete: 'new-password', placeholder: f.set ? '(unchanged - leave blank to keep)' : '(not set)' });
 		const reveal = el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', type: 'button' }, 'Show');
@@ -725,17 +837,19 @@ function settingRow(f, inputs) {
 		}
 		inputs.set(f.key, { input, type: 'secret', clearBox });
 		return el('div', { class: 'rl-field' },
-			el('label', { class: 'rl-label' }, f.label),
+			el('label', { class: 'rl-label' }, label),
 			el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' }, ...controls),
-			f.danger ? el('p', { class: 'rl-help', style: 'color:var(--rl-danger)' }, f.danger) : (f.help ? el('p', { class: 'rl-help' }, f.help) : false),
+			// SECRET keeps its full red warning; the others get a short hint.
+			f.danger ? el('p', { class: 'rl-help', style: 'color:var(--rl-danger)' }, f.danger) : settingHint(f.key),
 		);
 	}
+
 	const input = el('input', { class: 'rl-input', type: f.type === 'int' ? 'number' : 'text', value: f.value ?? '' });
 	inputs.set(f.key, { input, type: f.type });
 	return el('div', { class: 'rl-field' },
-		el('label', { class: 'rl-label' }, f.label),
+		el('label', { class: 'rl-label' }, label),
 		input,
-		f.help ? el('p', { class: 'rl-help' }, f.help) : false,
+		settingHint(f.key),
 	);
 }
 
@@ -746,6 +860,8 @@ async function saveSettings(inputs, saveBtn, banner) {
 	for (const [key, meta] of inputs) {
 		if (meta.type === 'bool') {
 			values[key] = meta.input.checked ? '1' : '0';
+		} else if (meta.type === 'bytes') {
+			values[key] = String(meta.getBytes());
 		} else if (meta.type === 'secret') {
 			if (meta.clearBox && meta.clearBox.checked) clear.push(key);
 			else if (meta.input.value) {
@@ -854,8 +970,9 @@ function renderServer() {
 		}
 	})();
 
-	const banner = el('div', { class: 'rl-alert rl-alert-warning rl-hidden' }, 'Saved. Restart the server to apply the changes.');
-	const formHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' });
+	const banner = el('div', { class: 'rl-alert rl-alert-warning rl-hidden' }, 'Saved. Restart to apply.');
+	const formHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' });
+	const instanceStrip = el('div', { class: 'rl-card rl-card-pad-sm rl-stack', style: 'gap:var(--rl-space-2)' });
 
 	const inputs = new Map();
 	const saveBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Save settings');
@@ -863,32 +980,73 @@ function renderServer() {
 	saveBtn.addEventListener('click', () => saveSettings(inputs, saveBtn, banner));
 	restartBtn.addEventListener('click', confirmRestart);
 
+	// Fields grouped so the page scans easily instead of reading as one long wall.
+	const GROUPS = [
+		{ title: 'General', keys: ['BASE_URL', 'APP_NAME', 'TRUST_PROXY'] },
+		{ title: 'Limits', keys: ['MAX_FILE_SIZE', 'MAX_SHARE_SIZE', 'MAX_TOTAL_SIZE', 'CHUNK_SIZE', 'MAX_FILES_PER_SHARE', 'MAX_PASSWORD_LENGTH', 'DEFAULT_EXPIRY', 'SWEEP_INTERVAL'] },
+		{ title: 'Security', keys: ['ADMIN_PASSWORD', 'UPLOAD_PASSWORD', 'SECRET'] },
+	];
+	const COLSPAN = new Set(['BASE_URL', 'SECRET']);
+
+	const group = (title, fields) => {
+		const grid = el('div', { class: 'rl-optgrid' });
+		for (const f of fields) {
+			const node = settingRow(f, inputs);
+			if (COLSPAN.has(f.key)) node.classList.add('rl-col-span');
+			grid.append(node);
+		}
+		return el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+			el('div', { class: 'rl-eyebrow', style: 'margin-top:var(--rl-space-4);padding-bottom:var(--rl-space-2);border-bottom:var(--rl-border-thin) solid var(--rl-border)' }, title),
+			grid,
+		);
+	};
+
 	const loadSettings = async () => {
-		formHost.replaceChildren(el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' })));
+		formHost.replaceChildren(panelSpinner());
 		try {
 			const data = await api.get('/api/admin/settings');
 			inputs.clear();
-			const rows = [el('p', { class: 'rl-help' }, `Host ${data.readOnly.HOST} - Port ${data.readOnly.PORT} - Data ${data.readOnly.DATA_DIR} (fixed by the container)`)];
-			for (const f of data.fields) rows.push(settingRow(f, inputs));
-			formHost.replaceChildren(...rows);
+			const byKey = new Map(data.fields.map(f => [f.key, f]));
+			const used = new Set();
+			const groups = [];
+			for (const g of GROUPS) {
+				const fields = g.keys.map(k => byKey.get(k)).filter(Boolean);
+				fields.forEach(f => used.add(f.key));
+				if (fields.length) groups.push(group(g.title, fields));
+			}
+			// Anything not in a known group still shows, so a field can never vanish.
+			const extra = data.fields.filter(f => !used.has(f.key));
+			if (extra.length) groups.push(group('Other', extra));
+			formHost.replaceChildren(...groups);
+
+			const ro = data.readOnly || {};
+			const chip = (l, v) => el('span', { class: 'rl-help' }, l + ' ', el('span', { class: 'rl-mono' }, v));
+			instanceStrip.replaceChildren(
+				el('div', { class: 'rl-eyebrow' }, 'Fixed by the container'),
+				el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-4)' }, chip('Host', `${ro.HOST}:${ro.PORT}`), chip('Data', ro.DATA_DIR)),
+			);
 		} catch (err) {
 			formHost.replaceChildren(el('p', { class: 'rl-dim' }, 'Could not load settings.'));
 			toastErr(err);
 		}
 	};
 
+	const actionBar = el('div', {
+		class: 'rl-row rl-row-wrap',
+		style: 'position:sticky;bottom:0;justify-content:flex-end;align-items:center;gap:var(--rl-space-3);padding-top:var(--rl-space-3);margin-top:var(--rl-space-2);background:var(--rl-bg-secondary);border-top:var(--rl-border-thin) solid var(--rl-border)',
+	}, el('span', { class: 'rl-spacer' }), banner, restartBtn, saveBtn);
+
 	view.replaceChildren(
-		viewHead('Server', 'Quick-access link, app-managed settings, and restart.'),
+		viewHead('Server', 'Settings save to disk and apply on the next restart, not live.'),
 		el('div', { class: 'rl-card rl-stack' },
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Quick access'),
 			quickHost,
 		),
+		el('div', { style: 'margin-top:var(--rl-space-4)' }, instanceStrip),
 		el('div', { class: 'rl-card rl-stack', style: 'margin-top:var(--rl-space-4)' },
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Settings'),
-			el('p', { class: 'rl-help', style: 'margin:0' }, 'Saved to the data volume and applied on the next restart, not live.'),
-			banner,
 			formHost,
-			el('div', { class: 'rl-row rl-row-wrap', style: 'justify-content:flex-end;gap:var(--rl-space-2)' }, restartBtn, saveBtn),
+			actionBar,
 		),
 	);
 
@@ -907,43 +1065,66 @@ function stopLogsPoll() {
 	}
 }
 
+// Log level -> badge variant + short label (reuses rl-badge colors).
+const LOG_LEVELS = {
+	info: { cls: 'rl-badge-neutral', label: 'INFO' },
+	log: { cls: 'rl-badge-neutral', label: 'INFO' },
+	debug: { cls: 'rl-badge-neutral', label: 'DEBUG' },
+	warn: { cls: 'rl-badge-warning', label: 'WARN' },
+	warning: { cls: 'rl-badge-warning', label: 'WARN' },
+	error: { cls: 'rl-badge-danger', label: 'ERR' },
+};
+
+function logRow(l) {
+	const lvl = LOG_LEVELS[String(l.level || 'info').toLowerCase()] || LOG_LEVELS.info;
+	return el('div', { class: 'rl-logrow' },
+		el('span', { class: 'rl-mono rl-dim', style: 'white-space:nowrap;font-variant-numeric:tabular-nums' }, new Date(l.ts).toLocaleTimeString()),
+		el('span', { class: `rl-badge ${lvl.cls}`, style: 'font-size:10px;min-width:52px;justify-content:center;text-transform:uppercase' }, lvl.label),
+		el('span', { class: 'rl-mono', style: 'white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0;color:var(--rl-text-form)' }, l.msg),
+	);
+}
+
 function renderLogs() {
-	const logBox = el('pre', {
-		class: 'rl-mono',
-		style: 'max-height:60vh;overflow:auto;font-size:var(--rl-text-xs);white-space:pre-wrap;background:var(--rl-bg-tertiary);border:var(--rl-border-thin) solid var(--rl-border);border-radius:var(--rl-radius-sm);padding:var(--rl-space-3);margin:0',
-	});
+	const POLL = 2000;
+	let paused = false;
+	const logBox = el('div', { class: 'rl-log', id: 'log-box' });
+
 	const loadLogs = async () => {
+		if (!logBox.isConnected) return;
 		try {
 			const { logs } = await api.get('/api/admin/logs?limit=500');
-			logBox.textContent = (logs || []).map(l => `${new Date(l.ts).toLocaleTimeString()} ${String(l.level).toUpperCase().padEnd(5)} ${l.msg}`).join('\n');
-			logBox.scrollTop = logBox.scrollHeight;
-		} catch { /* keep the last view on a transient error */ }
+			// Only auto-scroll when already near the bottom, so reading history is
+			// never interrupted by the live stream.
+			const pinned = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 48;
+			const frag = document.createDocumentFragment();
+			(logs || []).forEach(l => frag.append(logRow(l)));
+			logBox.replaceChildren(frag);
+			if (pinned) logBox.scrollTop = logBox.scrollHeight;
+		} catch { /* keep the last rows on a transient error */ }
 	};
-	const refreshBtn = el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm' }, 'Refresh');
-	refreshBtn.addEventListener('click', loadLogs);
-	const autoBox = el('input', { type: 'checkbox' });
-	autoBox.addEventListener('change', () => {
-		stopLogsPoll();
-		if (autoBox.checked) {
-			loadLogs();
-			logsTimer = setInterval(loadLogs, 3000);
-		}
+
+	const liveBadge = el('span', { class: 'rl-badge rl-badge-success' }, 'Live');
+	const pauseBtn = el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm' }, 'Pause');
+	pauseBtn.addEventListener('click', () => {
+		paused = !paused;
+		pauseBtn.textContent = paused ? 'Resume' : 'Pause';
+		liveBadge.className = `rl-badge ${paused ? 'rl-badge-neutral' : 'rl-badge-success'}`;
+		liveBadge.textContent = paused ? 'Paused' : 'Live';
+		if (!paused) loadLogs();
 	});
 
-	// Stop polling when navigating away from this view.
+	// Stop the stream when navigating away from this view.
 	cleanup = stopLogsPoll;
 
 	view.replaceChildren(
-		viewHead('Logs', 'Recent process output from the in-memory ring buffer.',
-			el('div', { class: 'rl-row', style: 'gap:var(--rl-space-3)' },
-				refreshBtn,
-				el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, autoBox, el('span', {}, 'Auto-refresh')),
-			),
+		viewHead('Logs', 'Live process output from the in-memory ring buffer.',
+			el('div', { class: 'rl-row', style: 'gap:var(--rl-space-3)' }, liveBadge, pauseBtn),
 		),
-		el('div', { class: 'rl-card', style: 'padding:var(--rl-space-3)' }, logBox),
+		el('div', { class: 'rl-card', style: 'padding:var(--rl-space-2)' }, logBox),
 	);
 
 	loadLogs();
+	logsTimer = setInterval(() => { if (!paused) loadLogs(); }, POLL);
 }
 
 boot();

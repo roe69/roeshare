@@ -322,6 +322,45 @@ export default router => {
 		});
 	});
 
+	// At-a-glance leaderboards for the Overview: biggest shares by size, top
+	// uploaders aggregated by creator IP (a "power user" view), and what is
+	// expiring soonest.
+	router.get('/api/admin/overview', ({ req }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+
+		const biggestShares = db
+			.query(
+				`SELECT s.id, s.title, COALESCE(SUM(f.size), 0) AS size, s.download_count AS downloads, s.view_count AS views, s.expires_at AS expiresAt
+				FROM shares s LEFT JOIN files f ON f.share_id = s.id
+				WHERE s.deleted_at IS NULL
+				GROUP BY s.id ORDER BY size DESC LIMIT 8`,
+			)
+			.all();
+
+		// Sum per-share size from a pre-grouped subquery so SUM(download_count) is
+		// not multiplied by the files-per-share fan-out.
+		const topUploaders = db
+			.query(
+				`SELECT s.creator_ip AS ip, COUNT(DISTINCT s.id) AS shareCount,
+					COALESCE(SUM(sz.total), 0) AS totalSize, COALESCE(SUM(s.download_count), 0) AS downloads, MAX(s.created_at) AS lastUpload
+				FROM shares s LEFT JOIN (SELECT share_id, SUM(size) AS total FROM files GROUP BY share_id) sz ON sz.share_id = s.id
+				WHERE s.deleted_at IS NULL
+				GROUP BY s.creator_ip ORDER BY totalSize DESC LIMIT 8`,
+			)
+			.all();
+
+		const expiringSoon = db
+			.query(
+				`SELECT s.id, s.title, s.expires_at AS expiresAt, COALESCE(SUM(f.size), 0) AS size
+				FROM shares s LEFT JOIN files f ON f.share_id = s.id
+				WHERE s.deleted_at IS NULL AND s.expires_at IS NOT NULL AND s.expires_at > strftime('%s', 'now')
+				GROUP BY s.id ORDER BY s.expires_at ASC LIMIT 6`,
+			)
+			.all();
+
+		return json({ biggestShares, topUploaders, expiringSoon });
+	});
+
 	// ---- Server operations -------------------------------------------------
 
 	// Quick-access upload link (the HMAC-derived token, not the password). The

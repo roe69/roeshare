@@ -33,8 +33,9 @@ function svgIcon(key, cls) {
 
 const COLLAPSE_KEY = 'roeshare_side_collapsed';
 
-// Brand HTML (e.g. "Roe<b>Share</b>") is server-templated into <template id="rl-brand">
-// on every page, so the two-tone wordmark renders without an extra request.
+// Brand HTML (colour spans rendered from APP_NAME's <col=> tags, server-side) is
+// templated into <template id="rl-brand"> on every page, so the wordmark renders
+// without an extra request.
 function brandInner() {
 	const tpl = document.getElementById('rl-brand');
 	return tpl ? tpl.innerHTML : 'RoeShare';
@@ -52,13 +53,15 @@ function navItem(item, activeId) {
 	return btn;
 }
 
+// Share is always the first group on every page so Upload / My shares never
+// move when navigating between the dashboard and the site pages.
 function defaultGroups() {
 	return [
-		{ label: 'Browse', items: [
+		{ label: 'Share', items: [
 			{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
 			{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
 		] },
-		{ label: 'Manage', items: [
+		{ items: [
 			{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' },
 		] },
 	];
