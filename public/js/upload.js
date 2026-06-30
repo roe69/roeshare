@@ -3,6 +3,33 @@
 
 import { el, $, api, ApiError, toast, toastOk, toastErr, copyText, formatBytes, fileGlyph } from '/js/shared.js';
 import { generateKey, encryptBytes, encryptString, ENC_OVERHEAD } from '/js/e2e.js';
+import { mountSidebar } from '/js/sidebar.js';
+
+// The rail with a hidden "Copy quick link" item that wireQuickLink() reveals
+// when an upload password is configured.
+const sidebar = mountSidebar({
+	active: 'upload',
+	groups: [
+		{ label: 'Browse', items: [
+			{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
+			{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
+			{ id: 'quicklink', label: 'Copy quick link', icon: 'link', hidden: true, onClick: copyQuickLink },
+		] },
+		{ label: 'Manage', items: [
+			{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' },
+		] },
+	],
+});
+
+async function copyQuickLink() {
+	try {
+		const res = await api.get('/api/upload/link');
+		if (res && res.url) await copyText(res.url);
+		else toastErr('Quick link is unavailable');
+	} catch {
+		toastErr('Could not create a quick link');
+	}
+}
 
 const EDIT_KEY = id => `roeshare:edit:${id}`;
 const MAX_CHUNK_RETRIES = 3;
@@ -760,20 +787,8 @@ uploadBtn.addEventListener('click', doUpload);
 // without typing the password. The token is fetched on demand and is derived
 // from the server secret, not the password itself.
 function wireQuickLink() {
-	const btn = $('#quick-link');
-	if (!btn || !config || !config.uploadPasswordRequired) return;
-	btn.classList.remove('rl-hidden');
-	btn.addEventListener('click', async () => {
-		btn.disabled = true;
-		try {
-			const res = await api.get('/api/upload/link');
-			if (res && res.url) await copyText(res.url);
-			else toastErr('Quick link is unavailable');
-		} catch (e) {
-			toastErr('Could not create a quick link');
-		}
-		btn.disabled = false;
-	});
+	if (!config || !config.uploadPasswordRequired) return;
+	sidebar.node('quicklink')?.classList.remove('rl-hidden');
 }
 
 // ---- Init ------------------------------------------------------------------

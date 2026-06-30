@@ -6,6 +6,9 @@ import {
 	formatBytes, timeUntil, fileGlyph, previewKind,
 } from './shared.js';
 import { importKey, decryptFile, decryptString } from './e2e.js';
+import { mountSidebar } from '/js/sidebar.js';
+
+mountSidebar();
 
 const root = $('#view');
 

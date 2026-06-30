@@ -8,9 +8,10 @@ import {
 	toast, toastOk, toastErr, openModal,
 	formatBytes, formatDate, timeUntil, copyText,
 } from '/js/shared.js';
+import { mountSidebar } from '/js/sidebar.js';
 
 const view = $('#view');
-const adminEl = $('#admin');
+let sidebar; // rail handle from mountSidebar()
 
 // Current shares-table query state.
 const state = {
@@ -58,7 +59,6 @@ function viewHead(title, subtitle, actions) {
 
 // ---- Sidebar / routing -----------------------------------------------------
 
-const COLLAPSE_KEY = 'roeshare_admin_collapsed';
 const VIEWS = { overview: renderOverview, shares: renderShares, server: renderServer, logs: renderLogs };
 
 // Per-view teardown (e.g. stop the logs poll) run before switching away.
@@ -72,42 +72,10 @@ function currentView() {
 function navigate() {
 	if (cleanup) { cleanup(); cleanup = null; }
 	const name = currentView();
-	$$('.rl-side-item[data-view]').forEach(b => b.classList.toggle('is-active', b.dataset.view === name));
-	adminEl.classList.remove('is-open'); // close the mobile drawer on navigation
+	if (sidebar) sidebar.setActive(name);
 	view.scrollTop = 0;
 	window.scrollTo(0, 0);
 	VIEWS[name]();
-}
-
-function wireSidebar() {
-	// Section buttons drive the hash; hashchange does the actual render.
-	$$('.rl-side-item[data-view]').forEach(btn => {
-		btn.addEventListener('click', () => { location.hash = `#/${btn.dataset.view}`; });
-	});
-
-	// Collapse (desktop icon-only rail), remembered across visits.
-	const collapseBtn = $('#side-collapse');
-	const collapseIco = $('.rl-side-ico', collapseBtn);
-	const syncCollapse = mini => {
-		collapseIco.innerHTML = mini ? '&#10217;' : '&#10216;'; // > when collapsed, < when expanded
-		collapseBtn.setAttribute('aria-label', mini ? 'Expand sidebar' : 'Collapse sidebar');
-	};
-	const startMini = localStorage.getItem(COLLAPSE_KEY) === '1';
-	if (startMini) adminEl.classList.add('is-mini');
-	syncCollapse(startMini);
-	collapseBtn.addEventListener('click', () => {
-		const mini = adminEl.classList.toggle('is-mini');
-		syncCollapse(mini);
-		try { localStorage.setItem(COLLAPSE_KEY, mini ? '1' : '0'); } catch {}
-	});
-
-	// Mobile drawer.
-	$('#side-toggle').addEventListener('click', () => adminEl.classList.add('is-open'));
-	$('#side-backdrop').addEventListener('click', () => adminEl.classList.remove('is-open'));
-
-	$('#side-logout').addEventListener('click', logout);
-
-	window.addEventListener('hashchange', navigate);
 }
 
 async function logout() {
@@ -130,7 +98,27 @@ async function boot() {
 	} catch {
 		/* network hiccup: fall through and let the views surface the error */
 	}
-	wireSidebar();
+
+	// The shared rail, with the dashboard sections on top and an account footer.
+	const go = id => () => { location.hash = `#/${id}`; };
+	sidebar = mountSidebar({
+		active: currentView(),
+		groups: [
+			{ label: 'Dashboard', items: [
+				{ id: 'overview', label: 'Overview', icon: 'overview', onClick: go('overview') },
+				{ id: 'shares', label: 'Shares', icon: 'shares', onClick: go('shares') },
+				{ id: 'server', label: 'Server', icon: 'server', onClick: go('server') },
+				{ id: 'logs', label: 'Logs', icon: 'logs', onClick: go('logs') },
+			] },
+			{ label: 'Browse', items: [
+				{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
+				{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
+			] },
+		],
+		account: { name: 'Admin', onLogout: logout },
+	});
+
+	window.addEventListener('hashchange', navigate);
 	navigate();
 }
 

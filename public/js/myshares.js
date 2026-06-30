@@ -6,6 +6,9 @@
 // views never inflate the share's view count.
 
 import { el, $, api, ApiError, toastErr, toastOk, copyText, openModal, formatBytes, timeUntil } from '/js/shared.js';
+import { mountSidebar } from '/js/sidebar.js';
+
+mountSidebar({ active: 'mine' });
 
 const root = $('#mine');
 const EDIT_PREFIX = 'roeshare:edit:';

@@ -1,7 +1,12 @@
 // Standalone lock page. Verifies the upload password; on success the server sets
 // the upload cookie and we reload, at which point the server serves the real
-// upload page (and only then is the portal's code available). No shared imports,
-// so this page reveals nothing about the upload portal.
+// upload page (and only then is the portal's code available). It imports only
+// the generic, already-public sidebar/shared helpers - never the upload portal's
+// own code - so it still reveals nothing about the portal.
+
+import { mountSidebar } from '/js/sidebar.js';
+
+mountSidebar({ active: 'upload' });
 
 const form = document.getElementById('lock-form');
 const input = document.getElementById('lock-password');
