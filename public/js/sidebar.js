@@ -18,11 +18,9 @@ export const ICONS = {
 	shares: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 3.2 3 7.6l9 4.4 9-4.4-9-4.4z\"/><polyline points=\"3 12 12 16.4 21 12\"/><polyline points=\"3 16.4 12 20.8 21 16.4\"/></svg>",
 	server: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><rect x=\"3\" y=\"4\" width=\"18\" height=\"7\" rx=\"2\"/><rect x=\"3\" y=\"13\" width=\"18\" height=\"7\" rx=\"2\"/><line x1=\"7\" y1=\"7.5\" x2=\"7.01\" y2=\"7.5\"/><line x1=\"7\" y1=\"16.5\" x2=\"7.01\" y2=\"16.5\"/></svg>",
 	logs: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><line x1=\"9\" y1=\"6\" x2=\"20\" y2=\"6\"/><line x1=\"9\" y1=\"12\" x2=\"20\" y2=\"12\"/><line x1=\"9\" y1=\"18\" x2=\"20\" y2=\"18\"/><line x1=\"4\" y1=\"6\" x2=\"4.01\" y2=\"6\"/><line x1=\"4\" y1=\"12\" x2=\"4.01\" y2=\"12\"/><line x1=\"4\" y1=\"18\" x2=\"4.01\" y2=\"18\"/></svg>",
-	user: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"12\" cy=\"8\" r=\"3.5\"/><path d=\"M5.5 20a6.5 6.5 0 0 1 13 0\"/></svg>",
 	logout: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M9 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3\"/><path d=\"m16 17 5-5-5-5\"/><path d=\"M21 12H9\"/></svg>",
 	collapse: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m13 17-5-5 5-5\"/><path d=\"m18 17-5-5 5-5\"/></svg>",
 	menu: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 7h16\"/><path d=\"M4 12h16\"/><path d=\"M4 17h16\"/></svg>",
-	link: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\"/><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\"/></svg>",
 	key: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><circle cx=\"7.5\" cy=\"15.5\" r=\"4.5\"/><path d=\"m10.7 12.3 8.3-8.3\"/><path d=\"m16 5 2.5 2.5\"/><path d=\"m13.5 7.5 2.5 2.5\"/></svg>",
 	book: "<svg viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M4 5.5A1.5 1.5 0 0 1 5.5 4H18a2 2 0 0 1 2 2v13a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V5.5z\"/><path d=\"M8 4v14\"/><line x1=\"11\" y1=\"8.5\" x2=\"17\" y2=\"8.5\"/><line x1=\"11\" y1=\"12\" x2=\"17\" y2=\"12\"/></svg>",
 };
@@ -91,7 +89,7 @@ function brandInner() {
 function navItem(item, activeId) {
 	const inner = [svgIcon(item.icon), el('span', { class: 'rl-side-label' }, item.label)];
 	const active = item.id && item.id === activeId;
-	const cls = `rl-side-item${active ? ' is-active' : ''}${item.hidden ? ' rl-hidden' : ''}`;
+	const cls = `rl-side-item${active ? ' is-active' : ''}`;
 	if (item.href) {
 		return el('a', { class: cls, href: item.href, 'data-id': item.id || '' }, ...inner);
 	}
@@ -110,7 +108,11 @@ function navItem(item, activeId) {
  *   groups    - extra nav groups rendered below Share. Each group:
  *               { label?, items: [{ id, label, icon, href } | { id, label, icon, onClick }, ...] }
  *               With none, a single Admin link is shown.
- *   account   - { name, onLogout } to render the footer account row (admin only)
+ *   account   - { name, onLogout } to render the footer logout (admin page only)
+ *
+ * On the public pages a single "Admin" link is shown to everyone (it routes to
+ * /admin, i.e. the login screen for non-admins); once /api/admin/me confirms a
+ * signed-in admin, that link is swapped for the full admin nav plus a logout.
  *
  * returns { node(id), setActive(id) }
  */
@@ -124,12 +126,15 @@ export function mountSidebar({ active, groups, account } = {}) {
 		share.items.push({ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' });
 	}
 	// Share first, always; then the page's groups. On the public pages (no groups
-	// passed) the FULL admin dashboard sections are rendered as links into /admin,
-	// hidden until /api/admin/me confirms the visitor is an admin - so a signed-in
-	// admin gets the same nav everywhere, and everyone else sees none of it.
+	// passed) we show a lone "Admin" link to everyone, plus the full admin sections
+	// (as links into /admin) hidden until /api/admin/me confirms the visitor is an
+	// admin - at which point the lone link is hidden and the full nav revealed.
 	const showsDefaultAdmin = !(groups && groups.length);
 	const publicAdmin = showsDefaultAdmin
-		? ADMIN_GROUPS.map(g => ({ label: g.label, adminGated: true, items: g.items.map(it => ({ ...it, href: `/admin#/${it.id}` })) }))
+		? [
+				{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' }] },
+				...ADMIN_GROUPS.map(g => ({ label: g.label, adminGated: true, items: g.items.map(it => ({ ...it, href: `/admin#/${it.id}` })) })),
+		  ]
 		: [];
 	const allGroups = [share, ...(showsDefaultAdmin ? publicAdmin : groups)];
 
@@ -180,13 +185,18 @@ export function mountSidebar({ active, groups, account } = {}) {
 
 	const aside = el('aside', { class: 'rl-side' }, brand, nav, foot);
 
-	// Reveal the admin sections if this visitor is logged in as an admin, so the
-	// full panel nav is available everywhere (upload, view, My shares), not just on
-	// the dashboard itself.
-	if (showsDefaultAdmin && adminGatedNodes.length) {
+	// If this visitor is a signed-in admin, swap the lone "Admin" link for the full
+	// panel nav (and footer logout), so the rail is identical everywhere. Non-admins
+	// keep just the "Admin" link, which routes them to the login screen.
+	if (showsDefaultAdmin) {
+		const adminLink = nav.querySelector('.rl-side-item[data-id="admin"]');
 		fetch('/api/admin/me', { headers: { Accept: 'application/json' } })
 			.then(r => (r.ok ? r.json() : null))
-			.then(me => { if (me && me.admin) adminGatedNodes.forEach(n => n.classList.remove('rl-hidden')); })
+			.then(me => {
+				if (!me || !me.admin) return;
+				adminLink?.classList.add('rl-hidden');
+				adminGatedNodes.forEach(n => n.classList.remove('rl-hidden'));
+			})
 			.catch(() => {});
 	}
 
