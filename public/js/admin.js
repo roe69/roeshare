@@ -1816,11 +1816,24 @@ const LOG_LEVELS = {
 };
 
 function logRow(l) {
-	const lvl = LOG_LEVELS[String(l.level || 'info').toLowerCase()] || LOG_LEVELS.info;
-	return el('div', { class: 'rl-logrow' },
+	// Trim outer whitespace so console banners (which use a leading newline / two
+	// leading spaces for the terminal) line up flush-left here; internal newlines
+	// of multi-line entries are kept by pre-wrap.
+	const msg = String(l.msg ?? '').trim();
+	if (!msg) return null; // skip blank lines (e.g. console.log('')) - they'd be an empty badge row
+
+	const key = String(l.level || 'info').toLowerCase();
+	const lvl = LOG_LEVELS[key] || LOG_LEVELS.info;
+	const isErr = key === 'error';
+	const isWarn = key === 'warn' || key === 'warning';
+	// A coloured left rail + faint tint makes warnings/errors pop without noise.
+	const accent = isErr ? 'var(--rl-danger)' : isWarn ? 'var(--rl-warning)' : 'transparent';
+	const tint = isErr ? 'rgba(var(--rl-danger-rgb),0.08)' : isWarn ? 'rgba(var(--rl-warning-rgb),0.08)' : 'transparent';
+
+	return el('div', { class: 'rl-logrow', style: `border-left:2px solid ${accent};background:${tint};padding-left:var(--rl-space-2)` },
 		el('span', { class: 'rl-mono rl-dim', style: 'white-space:nowrap;font-variant-numeric:tabular-nums' }, new Date(l.ts).toLocaleTimeString()),
-		el('span', { class: `rl-badge ${lvl.cls}`, style: 'font-size:10px;min-width:52px;justify-content:center;text-transform:uppercase' }, lvl.label),
-		el('span', { class: 'rl-mono', style: 'white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0;color:var(--rl-text-form)' }, l.msg),
+		el('span', { class: `rl-badge ${lvl.cls}`, style: 'font-size:10px;min-width:44px;justify-content:center;text-transform:uppercase' }, lvl.label),
+		el('span', { class: 'rl-mono', style: 'white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;min-width:0;color:var(--rl-text-form)' }, msg),
 	);
 }
 
@@ -1837,7 +1850,8 @@ function renderLogs() {
 			// never interrupted by the live stream.
 			const pinned = logBox.scrollHeight - logBox.scrollTop - logBox.clientHeight < 48;
 			const frag = document.createDocumentFragment();
-			(logs || []).forEach(l => frag.append(logRow(l)));
+			(logs || []).forEach(l => { const row = logRow(l); if (row) frag.append(row); });
+			if (!frag.childNodes.length) frag.append(el('p', { class: 'rl-dim', style: 'padding:var(--rl-space-2)' }, 'No log output yet.'));
 			logBox.replaceChildren(frag);
 			if (pinned) logBox.scrollTop = logBox.scrollHeight;
 		} catch { /* keep the last rows on a transient error */ }
