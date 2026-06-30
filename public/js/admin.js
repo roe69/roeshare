@@ -1391,6 +1391,11 @@ function renderApiDocs() {
 			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Create a key in the API keys tab, then send it as a bearer token on every request. Either header works:'),
 			docCode('Authorization: Bearer rsk_<id>_<secret>\nX-Api-Key: rsk_<id>_<secret>'),
 			el('p', { class: 'rl-help' }, 'A key is shown in full only once, at creation. Missing, invalid, revoked, or expired keys get a 401.'),
+			el('p', { class: 'rl-help' },
+				'Key holders can also sign in at ',
+				el('a', { href: '/api', target: '_blank', rel: 'noopener', style: 'color:var(--rl-primary)' }, '/api'),
+				' with the key name + token to list, download, and delete that key\'s shares in the browser.',
+			),
 		),
 
 		limitsPanel,

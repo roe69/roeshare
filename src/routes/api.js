@@ -15,7 +15,7 @@
 
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, requestOrigin } from '../lib/http.js';
+import { json, error, requestOrigin, cookie, clearCookie, requestScheme } from '../lib/http.js';
 import { hashPassword } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
 import { writeChunk, totalUsage, deleteShareFiles } from '../lib/storage.js';
@@ -23,7 +23,7 @@ import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
 import { slugError } from '../lib/slug.js';
-import { authenticate, recordKeyUsage, effectiveCaps, clampExpiry } from '../lib/apikeys.js';
+import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE } from '../lib/apikeys.js';
 
 const getShareById = db.query('SELECT id FROM shares WHERE id = ?');
 const insertShare = db.query(
@@ -173,6 +173,33 @@ async function createShare(ctx, key, opts) {
 }
 
 export default function apiV1(router) {
+	// ---- Browser portal session (name + token login) -----------------------
+	// Lets a key holder sign in to the web portal and manage the key's shares.
+	router.post('/api/v1/login', async ctx => {
+		const limited = enforce('apikey-login', ctx.ip, 10, 5 * 60 * 1000);
+		if (limited) return limited;
+		const body = (await readJson(ctx.req)) || {};
+		const token = typeof body.token === 'string' ? body.token.trim() : '';
+		const name = typeof body.name === 'string' ? body.name.trim() : '';
+		const key = verifyApiKey(token);
+		// Both fields must check out: the token must be valid (and not revoked/
+		// expired) AND match the given name, so it reads like a name + secret login.
+		if (!key || name.toLowerCase() !== String(key.name).toLowerCase()) {
+			return error(403, 'That name and token do not match an active key');
+		}
+		const setCookie = cookie(APIKEY_COOKIE, issueApiKeySession(key.id), {
+			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url) === 'https',
+		});
+		return json({ id: key.id, name: key.name }, { headers: { 'Set-Cookie': setCookie } });
+	});
+
+	router.get('/api/v1/session', ctx => {
+		const key = readApiKeySession(ctx.req);
+		return json({ session: key ? { id: key.id, name: key.name } : null });
+	});
+
+	router.post('/api/v1/logout', () => json({ ok: true }, { headers: { 'Set-Cookie': clearCookie(APIKEY_COOKIE) } }));
+
 	// ---- Key check ---------------------------------------------------------
 	// A cheap endpoint a client can hit to confirm its key works.
 	router.get('/api/v1/me', ctx => {

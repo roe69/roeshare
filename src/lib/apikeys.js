@@ -15,8 +15,13 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { randomId } from './ids.js';
+import { signToken, verifyToken } from './crypto.js';
+import { parseCookies } from './http.js';
 
 const KEY_PREFIX = 'rsk';
+// Cookie holding a signed API-key web session, set after a name + token login so
+// a key holder can browse their own shares in the browser (see routes/api.js).
+export const APIKEY_COOKIE = 'roeshare_apikey';
 
 const insertKey = db.query(
 	`INSERT INTO api_keys (id, name, key_hash, created_at, expires_at, max_file_size, max_share_size, max_shares, max_expiry, allow_slug, allow_password)
@@ -164,10 +169,29 @@ export function readApiKey(req) {
 	return x ? x.trim() : null;
 }
 
-// Authenticate a request in one step. On success the key's last_used_at is
-// stamped and the row is returned; otherwise null.
+// A signed cookie for the browser portal. It only names the key id; the row is
+// re-fetched and re-checked (revoke/expiry) on every use, so revoking a key kills
+// its sessions immediately.
+export function issueApiKeySession(keyId) {
+	return signToken({ scope: 'apikey', kid: keyId }, config.adminSessionTtl);
+}
+
+export function readApiKeySession(req) {
+	const token = parseCookies(req)[APIKEY_COOKIE];
+	if (!token) return null;
+	const p = verifyToken(token);
+	if (!p || p.scope !== 'apikey' || !p.kid) return null;
+	const row = getKey.get(p.kid);
+	if (!row || row.revoked_at != null) return null;
+	if (row.expires_at != null && row.expires_at < now()) return null;
+	return row;
+}
+
+// Authenticate a request in one step - by bearer/X-Api-Key token, or by the
+// portal session cookie. On success the key's last_used_at is stamped and the row
+// is returned; otherwise null.
 export function authenticate(req) {
-	const key = verifyApiKey(readApiKey(req));
+	const key = verifyApiKey(readApiKey(req)) || readApiKeySession(req);
 	if (key) touchKey.run(now(), key.id);
 	return key;
 }

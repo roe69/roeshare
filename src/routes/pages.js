@@ -79,6 +79,8 @@ export default function pages(router) {
 	});
 	router.get('/s/:id', () => servePage('view.html'));
 	router.get('/mine', () => servePage('myshares.html'));
+	// API-key portal: sign in with a key name + token to manage that key's shares.
+	router.get('/api', () => servePage('apikey.html'));
 
 	// Admin auth is an explicit two-route flow:
 	//   /login - the password form (always available, ungated).

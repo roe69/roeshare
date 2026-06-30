@@ -8,7 +8,7 @@ import { db, now } from '../db.js';
 import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/http.js';
 import { safeEqual } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
-import { verifyApiKey, readApiKey } from '../lib/apikeys.js';
+import { verifyApiKey, readApiKey, readApiKeySession } from '../lib/apikeys.js';
 import { blobFile, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
@@ -63,7 +63,7 @@ function accessCheck(share, req, url) {
 	const editToken = req.headers.get('x-edit-token');
 	let owner = !!editToken && safeEqual(editToken, share.edit_token);
 	if (!owner && share.api_key_id) {
-		const key = verifyApiKey(readApiKey(req));
+		const key = verifyApiKey(readApiKey(req)) || readApiKeySession(req);
 		if (key && key.id === share.api_key_id) owner = true;
 	}
 	if (owner || !share.password_hash) return { ok: true, owner };

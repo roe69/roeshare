@@ -132,7 +132,13 @@ export function mountSidebar({ active, groups, account } = {}) {
 	const showsDefaultAdmin = !(groups && groups.length);
 	const publicAdmin = showsDefaultAdmin
 		? [
-				{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' }] },
+				{ items: [
+					// Both are shown to everyone: "Admin" routes to the password login (and
+					// is swapped for the full admin nav once you are a signed-in admin);
+					// "API" routes to the key portal (sign in with a key name + token).
+					{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' },
+					{ id: 'api', label: 'API', icon: 'key', href: '/api' },
+				] },
 				...ADMIN_GROUPS.map(g => ({ label: g.label, adminGated: true, items: g.items.map(it => ({ ...it, href: `/admin#/${it.id}` })) })),
 		  ]
 		: [];

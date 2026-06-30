@@ -150,7 +150,16 @@ default true). Enforced at share creation and file registration.
 - `DELETE /api/admin/api-keys/:id` (admin) -> hard delete the key row. `{ ok: true }` (shares it created are untouched).
 
 ### Programmatic API (`/api/v1`, `src/routes/api.js`)
-Auth: `Authorization: Bearer rsk_...` or `X-Api-Key: rsk_...`. `401` when missing/invalid/revoked/expired.
+Auth: `Authorization: Bearer rsk_...` or `X-Api-Key: rsk_...`, OR the portal session
+cookie below. `401` when missing/invalid/revoked/expired.
+
+Browser portal (so a key holder can manage their shares at `/api`):
+- `POST /api/v1/login` body `{ name, token }` -> sets the `roeshare_apikey` session cookie when the token is valid AND its key name matches `name`; `{ id, name }`. Else `403`. Rate-limited.
+- `GET /api/v1/session` -> `{ session: { id, name } | null }`.
+- `POST /api/v1/logout` -> clears the cookie.
+The cookie authenticates every `/api/v1` endpoint and is accepted as the owner on
+`/api/shares/:id/files/:fileId/download` (and preview/zip), so the portal can list,
+download, and delete without re-sending the token.
 Shares created here are attributed via `shares.api_key_id` and count toward the
 key's `uploadCount`/`bytesUploaded`. The key's own limits/scopes apply on top of the
 server caps: exceeding a byte cap is `413`; hitting the share cap, or using a disallowed

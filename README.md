@@ -300,3 +300,6 @@ download cap or burn a one-time share, so caps/one-time set for recipients do no
 get in the way of your own restores. The admin panel's **API keys** tab shows each
 key's shares, usage, and a filtered view of everything it created; the **API docs**
 page includes a full backup workflow example (push, list, restore, rotate).
+
+Key holders can also sign in at **`/api`** with the key name and token to list,
+download, and delete that key's shares from the browser - no admin access needed.
