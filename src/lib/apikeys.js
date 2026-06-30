@@ -39,6 +39,18 @@ function sha256(s) {
 	return createHash('sha256').update(String(s)).digest();
 }
 
+// The six limit/scope column values, in the order both insert and update expect.
+function limitColumns(limits = {}) {
+	return [
+		limits.max_file_size ?? null,
+		limits.max_share_size ?? null,
+		limits.max_shares ?? null,
+		limits.max_expiry ?? null,
+		limits.allow_slug ?? 1,
+		limits.allow_password ?? 1,
+	];
+}
+
 // The scopes/limits of a key row, in the camelCase shape the API/UI use.
 function limitsOf(k) {
 	return {
@@ -118,19 +130,7 @@ export function createApiKey(name, expiresAt = null, limits = {}) {
 	const id = randomId(12);
 	const secret = randomId(40);
 	const token = `${KEY_PREFIX}_${id}_${secret}`;
-	insertKey.run(
-		id,
-		name,
-		sha256(secret).toString('hex'),
-		now(),
-		expiresAt,
-		limits.max_file_size ?? null,
-		limits.max_share_size ?? null,
-		limits.max_shares ?? null,
-		limits.max_expiry ?? null,
-		limits.allow_slug ?? 1,
-		limits.allow_password ?? 1,
-	);
+	insertKey.run(id, name, sha256(secret).toString('hex'), now(), expiresAt, ...limitColumns(limits));
 	return { id, name, token, prefix: `${KEY_PREFIX}_${id}`, expiresAt };
 }
 
@@ -223,16 +223,7 @@ export function getApiKey(id) {
 export function updateApiKey(id, name, limits) {
 	const k = getKey.get(id);
 	if (!k) return false;
-	updateQ.run(
-		name,
-		limits.max_file_size ?? null,
-		limits.max_share_size ?? null,
-		limits.max_shares ?? null,
-		limits.max_expiry ?? null,
-		limits.allow_slug ?? 1,
-		limits.allow_password ?? 1,
-		id,
-	);
+	updateQ.run(name, ...limitColumns(limits), id);
 	return true;
 }
 
