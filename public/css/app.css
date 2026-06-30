@@ -86,7 +86,7 @@ body {
 }
 .rl-container {
 	width: 100%;
-	max-width: 880px;
+	max-width: 1040px;
 	margin: 0 auto;
 	padding: var(--rl-space-4) var(--rl-space-4) var(--rl-space-8);
 }
@@ -1116,10 +1116,14 @@ body {
 	text-overflow: ellipsis;
 }
 
-/* ----- Dashboard main column ----- */
+/* ----- Dashboard main column -----
+   Wide enough to fill a 2K screen (the content grids reflow to use the space);
+   capped and centred so a 4K screen stays balanced rather than over-stretched. */
 .rl-admin-main {
+	width: 100%;
+	max-width: 2400px;
+	margin-inline: auto;
 	padding: var(--rl-space-5) var(--rl-space-6) var(--rl-space-10);
-	max-width: 1400px;
 }
 .rl-view-head {
 	display: flex;

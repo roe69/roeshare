@@ -279,11 +279,12 @@ async function loadOverview(biggestHost, uploadersHost, expiringHost, lifetimeHo
 	}
 	biggestHost.replaceChildren(panelHead('Biggest shares', true), bigList);
 
-	// Top uploaders (power users) - aggregated by creator IP.
+	// Top uploaders (power users) - aggregated by creator IP. The table is
+	// fixed-layout so a long IPv6 address truncates instead of forcing a scroll.
 	const up = data.topUploaders || [];
 	const upBody = el('tbody', {},
 		...(up.length ? up.map(u => el('tr', {},
-			el('td', {}, el('span', { class: 'rl-mono rl-truncate', style: 'display:inline-block;max-width:120px', title: u.ip || 'unknown' }, u.ip || el('span', { class: 'rl-dim' }, 'unknown'))),
+			el('td', {}, el('span', { class: 'rl-mono rl-truncate', style: 'display:block', title: u.ip || 'unknown' }, u.ip || 'unknown')),
 			el('td', { class: 'rl-col-num' }, String(u.shareCount)),
 			el('td', { class: 'rl-col-num' }, formatBytes(u.totalSize)),
 			el('td', { class: 'rl-col-num' }, String(u.downloads)),
@@ -291,16 +292,14 @@ async function loadOverview(biggestHost, uploadersHost, expiringHost, lifetimeHo
 	);
 	uploadersHost.replaceChildren(
 		panelHead('Top uploaders'),
-		el('div', { style: 'overflow-x:auto' },
-			el('table', { class: 'rl-table' },
-				el('thead', {}, el('tr', {},
-					el('th', {}, 'IP'),
-					el('th', { class: 'rl-col-num' }, 'Shares'),
-					el('th', { class: 'rl-col-num' }, 'Size'),
-					el('th', { class: 'rl-col-num' }, 'DLs'),
-				)),
-				upBody,
-			),
+		el('table', { class: 'rl-table', style: 'table-layout:fixed;width:100%' },
+			el('thead', {}, el('tr', {},
+				el('th', {}, 'IP'),
+				el('th', { class: 'rl-col-num', style: 'width:4.5rem' }, 'Shares'),
+				el('th', { class: 'rl-col-num', style: 'width:5rem' }, 'Size'),
+				el('th', { class: 'rl-col-num', style: 'width:3.5rem' }, 'DLs'),
+			)),
+			upBody,
 		),
 	);
 
