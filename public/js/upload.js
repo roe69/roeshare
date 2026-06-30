@@ -5,19 +5,10 @@ import { el, $, api, ApiError, toast, toastOk, toastErr, copyText, formatBytes, 
 import { generateKey, encryptBytes, encryptString, ENC_OVERHEAD } from '/js/e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
 
-// The shared rail. quickLink adds a hidden "Quick link" item to the Share group
-// that wireQuickLink() reveals when an upload password is configured.
-const sidebar = mountSidebar({ active: 'upload', quickLink: copyQuickLink });
-
-async function copyQuickLink() {
-	try {
-		const res = await api.get('/api/upload/link');
-		if (res && res.url) await copyText(res.url);
-		else toastErr('Quick link is unavailable');
-	} catch {
-		toastErr('Could not create a quick link');
-	}
-}
+// The shared rail. The quick-access upload link is an admin-only control (it
+// lives in the admin Server settings, by the upload password it depends on), so
+// the upload page does not surface it.
+mountSidebar({ active: 'upload' });
 
 const EDIT_KEY = id => `roeshare:edit:${id}`;
 const MAX_CHUNK_RETRIES = 3;
@@ -769,17 +760,7 @@ async function doUpload() {
 
 uploadBtn.addEventListener('click', doUpload);
 
-// ---- Quick-access link -----------------------------------------------------
-// When an upload password is configured, reveal a header button that copies an
-// instant-login link (?token=...) so a trusted person can reach the upload page
-// without typing the password. The token is fetched on demand and is derived
-// from the server secret, not the password itself.
-function wireQuickLink() {
-	if (!config || !config.uploadPasswordRequired) return;
-	sidebar.node('quicklink')?.classList.remove('rl-hidden');
-}
-
 // ---- Init ------------------------------------------------------------------
 wireConditionalOptions();
 wireValidation();
-loadConfig().then(wireQuickLink);
+loadConfig();

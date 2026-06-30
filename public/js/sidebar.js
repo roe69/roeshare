@@ -81,12 +81,10 @@ function navItem(item, activeId) {
  *               { label?, items: [{ id, label, icon, href } | { id, label, icon, onClick }, ...] }
  *               With none, a single Admin link is shown.
  *   account   - { name, onLogout } to render the footer account row (admin only)
- *   quickLink - onClick handler; adds a hidden "Quick link" item to the Share
- *               group that the caller reveals via node('quicklink')
  *
  * returns { node(id), setActive(id) }
  */
-export function mountSidebar({ active, groups, account, quickLink } = {}) {
+export function mountSidebar({ active, groups, account } = {}) {
 	const share = { label: 'Share', items: [
 		{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
 	] };
@@ -95,7 +93,6 @@ export function mountSidebar({ active, groups, account, quickLink } = {}) {
 	if (active === 'mine' || hasOwnedShares()) {
 		share.items.push({ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' });
 	}
-	if (quickLink) share.items.push({ id: 'quicklink', label: 'Quick link', icon: 'link', hidden: true, onClick: quickLink });
 	// Share first, always; then the page's groups (or a lone Admin link).
 	const allGroups = [share, ...(groups && groups.length ? groups : [{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' }] }])];
 

@@ -167,13 +167,13 @@ function renderOverview() {
 	const lifetimeHost = card(), biggestHost = card(), uploadersHost = card(), instanceHost = card(), expiringHost = card();
 
 	view.replaceChildren(
-		viewHead('Overview', 'Current totals up top; the panels below are all-time and survive deleted shares.'),
+		viewHead('Overview', 'Live instance status and current totals first; all-time figures and leaderboards (which survive deleted shares) below.'),
 		statsRow,
 		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--rl-space-3);margin-top:var(--rl-space-3)' },
+			instanceHost,
 			lifetimeHost,
 			uploadersHost,
 			biggestHost,
-			instanceHost,
 			expiringHost,
 		),
 	);
@@ -1443,7 +1443,7 @@ function settingRow(f, inputs) {
 			controls.push(el('label', { class: 'rl-row', style: 'gap:var(--rl-space-1);font-size:var(--rl-text-sm)' }, clearBox, el('span', {}, 'Clear')));
 		}
 		inputs.set(f.key, { input, type: 'secret', clearBox });
-		return el('div', { class: 'rl-field' },
+		return el('div', { class: 'rl-field', dataset: { settingKey: f.key } },
 			el('label', { class: 'rl-label' }, label),
 			el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' }, ...controls),
 			// SECRET keeps its full red warning; the others get a short hint.
@@ -1560,23 +1560,29 @@ function confirmRestart() {
 	});
 }
 
-function renderServer() {
-	const quickHost = el('div', { class: 'rl-field' });
+// The quick-access upload link (admin only). It is only meaningful when an upload
+// password is configured, so it lives right under the UPLOAD_PASSWORD field. The
+// link carries a derived token, never the password itself.
+function uploadLinkControl() {
+	const host = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2);margin-top:var(--rl-space-2)' }, el('span', { class: 'rl-spinner' }));
 	(async () => {
 		try {
 			const r = await api.get('/api/admin/upload-link');
 			if (r && r.enabled) {
-				const btn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Copy quick-access upload link');
+				const btn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', type: 'button' }, 'Copy quick-access link');
 				btn.addEventListener('click', () => copyText(r.url));
-				quickHost.replaceChildren(btn, el('p', { class: 'rl-help' }, 'Instant-login link for the upload page (uses a derived token, never the password).'));
+				host.replaceChildren(btn, el('p', { class: 'rl-help' }, 'Instant-login link for the upload page (uses a derived token, never the password).'));
 			} else {
-				quickHost.replaceChildren(el('p', { class: 'rl-help' }, 'Set an upload password to enable a quick-access link.'));
+				host.replaceChildren(el('p', { class: 'rl-help' }, 'Set an upload password (and restart) to enable a quick-access upload link.'));
 			}
 		} catch {
-			quickHost.replaceChildren(el('p', { class: 'rl-dim' }, 'Quick link unavailable.'));
+			host.replaceChildren(el('p', { class: 'rl-dim' }, 'Quick link unavailable.'));
 		}
 	})();
+	return host;
+}
 
+function renderServer() {
 	const banner = el('div', { class: 'rl-alert rl-alert-warning rl-hidden' }, 'Saved. Restart to apply.');
 	const formHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' });
 	const instanceStrip = el('div', { class: 'rl-card rl-card-pad-sm rl-stack', style: 'gap:var(--rl-space-2)' });
@@ -1626,6 +1632,10 @@ function renderServer() {
 			if (extra.length) groups.push(group('Other', extra));
 			formHost.replaceChildren(...groups);
 
+			// The quick-access upload link sits with the upload password it depends on.
+			const pwField = formHost.querySelector('[data-setting-key="UPLOAD_PASSWORD"]');
+			if (pwField) pwField.append(uploadLinkControl());
+
 			const ro = data.readOnly || {};
 			const chip = (l, v) => el('span', { class: 'rl-help' }, l + ' ', el('span', { class: 'rl-mono' }, v));
 			instanceStrip.replaceChildren(
@@ -1645,12 +1655,8 @@ function renderServer() {
 
 	view.replaceChildren(
 		viewHead('Server', 'Settings save to disk and apply on the next restart, not live.'),
+		el('div', { style: 'margin-bottom:var(--rl-space-3)' }, instanceStrip),
 		el('div', { class: 'rl-card rl-stack' },
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Quick access'),
-			quickHost,
-		),
-		el('div', { style: 'margin-top:var(--rl-space-3)' }, instanceStrip),
-		el('div', { class: 'rl-card rl-stack', style: 'margin-top:var(--rl-space-3)' },
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Settings'),
 			formHost,
 			actionBar,
