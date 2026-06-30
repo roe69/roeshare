@@ -125,13 +125,13 @@ function boot() {
 function statCard(label, value, extra) {
 	return el('div', { class: 'rl-card rl-card-pad-sm' },
 		el('div', { class: 'rl-eyebrow', style: 'margin-bottom:var(--rl-space-2)' }, label),
-		el('div', { style: 'font-size:var(--rl-text-3xl);font-weight:var(--rl-weight-bold);line-height:1.1' }, value),
+		el('div', { style: 'font-size:var(--rl-text-2xl);font-weight:var(--rl-weight-bold);line-height:1.1' }, value),
 		extra ? el('div', { style: 'margin-top:var(--rl-space-3)' }, extra) : false,
 	);
 }
 
 function infoRow(label, value) {
-	return el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-4);font-size:var(--rl-text-sm)' },
+	return el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);font-size:var(--rl-text-sm)' },
 		el('span', { class: 'rl-muted' }, label),
 		el('span', { class: 'rl-mono rl-truncate', style: 'max-width:60%;text-align:right' }, value),
 	);
@@ -163,7 +163,7 @@ function shareRowBtn(s, right) {
 function renderOverview() {
 	const statsRow = el('div', {
 		id: 'stats',
-		style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--rl-space-4)',
+		style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--rl-space-3)',
 	});
 	const biggestHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
 	const uploadersHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
@@ -173,7 +173,7 @@ function renderOverview() {
 	view.replaceChildren(
 		viewHead('Overview', 'A snapshot of this RoeShare instance.'),
 		statsRow,
-		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:var(--rl-space-4);margin-top:var(--rl-space-4)' },
+		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--rl-space-3);margin-top:var(--rl-space-3)' },
 			biggestHost,
 			uploadersHost,
 			instanceHost,
@@ -274,7 +274,7 @@ async function loadOverview(biggestHost, uploadersHost, expiringHost) {
 	const up = data.topUploaders || [];
 	const upBody = el('tbody', {},
 		...(up.length ? up.map(u => el('tr', {},
-			el('td', {}, el('span', { class: 'rl-mono rl-truncate', style: 'display:inline-block;max-width:160px', title: u.ip || 'unknown' }, u.ip || el('span', { class: 'rl-dim' }, 'unknown'))),
+			el('td', {}, el('span', { class: 'rl-mono rl-truncate', style: 'display:inline-block;max-width:120px', title: u.ip || 'unknown' }, u.ip || el('span', { class: 'rl-dim' }, 'unknown'))),
 			el('td', { class: 'rl-col-num' }, String(u.shareCount)),
 			el('td', { class: 'rl-col-num' }, formatBytes(u.totalSize)),
 			el('td', { class: 'rl-col-num' }, String(u.downloads)),
@@ -288,7 +288,7 @@ async function loadOverview(biggestHost, uploadersHost, expiringHost) {
 					el('th', {}, 'IP'),
 					el('th', { class: 'rl-col-num' }, 'Shares'),
 					el('th', { class: 'rl-col-num' }, 'Size'),
-					el('th', { class: 'rl-col-num' }, 'Downloads'),
+					el('th', { class: 'rl-col-num' }, 'DLs'),
 				)),
 				upBody,
 			),
@@ -996,7 +996,7 @@ function renderServer() {
 			grid.append(node);
 		}
 		return el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
-			el('div', { class: 'rl-eyebrow', style: 'margin-top:var(--rl-space-4);padding-bottom:var(--rl-space-2);border-bottom:var(--rl-border-thin) solid var(--rl-border)' }, title),
+			el('div', { class: 'rl-eyebrow', style: 'margin-top:var(--rl-space-3);padding-bottom:var(--rl-space-2);border-bottom:var(--rl-border-thin) solid var(--rl-border)' }, title),
 			grid,
 		);
 	};
@@ -1023,7 +1023,7 @@ function renderServer() {
 			const chip = (l, v) => el('span', { class: 'rl-help' }, l + ' ', el('span', { class: 'rl-mono' }, v));
 			instanceStrip.replaceChildren(
 				el('div', { class: 'rl-eyebrow' }, 'Fixed by the container'),
-				el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-4)' }, chip('Host', `${ro.HOST}:${ro.PORT}`), chip('Data', ro.DATA_DIR)),
+				el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-3)' }, chip('Host', `${ro.HOST}:${ro.PORT}`), chip('Data', ro.DATA_DIR)),
 			);
 		} catch (err) {
 			formHost.replaceChildren(el('p', { class: 'rl-dim' }, 'Could not load settings.'));
@@ -1042,8 +1042,8 @@ function renderServer() {
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Quick access'),
 			quickHost,
 		),
-		el('div', { style: 'margin-top:var(--rl-space-4)' }, instanceStrip),
-		el('div', { class: 'rl-card rl-stack', style: 'margin-top:var(--rl-space-4)' },
+		el('div', { style: 'margin-top:var(--rl-space-3)' }, instanceStrip),
+		el('div', { class: 'rl-card rl-stack', style: 'margin-top:var(--rl-space-3)' },
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Settings'),
 			formHost,
 			actionBar,

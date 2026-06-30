@@ -79,8 +79,8 @@
 	   via OSRS-style <col=RRGGBB> tags - see src/config.js. Nothing to set here. */
 
 	/* ---------- Admin sidebar rail ---------- */
-	--rl-side-width: 220px;
-	--rl-side-mini-width: 56px;
+	--rl-side-width: 200px;
+	--rl-side-mini-width: 52px;
 
 	/* ---------- Semantic: Surfaces ---------- */
 	--rl-bg: #000000;

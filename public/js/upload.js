@@ -10,12 +10,12 @@ import { mountSidebar } from '/js/sidebar.js';
 const sidebar = mountSidebar({
 	active: 'upload',
 	groups: [
-		{ label: 'Browse', items: [
+		{ label: 'Share', items: [
 			{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
 			{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
 			{ id: 'quicklink', label: 'Copy quick link', icon: 'link', hidden: true, onClick: copyQuickLink },
 		] },
-		{ label: 'Manage', items: [
+		{ items: [
 			{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' },
 		] },
 	],
