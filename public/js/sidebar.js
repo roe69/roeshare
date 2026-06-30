@@ -93,8 +93,12 @@ export function mountSidebar({ active, groups, account } = {}) {
 	if (active === 'mine' || hasOwnedShares()) {
 		share.items.push({ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' });
 	}
-	// Share first, always; then the page's groups (or a lone Admin link).
-	const allGroups = [share, ...(groups && groups.length ? groups : [{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' }] }])];
+	// Share first, always; then the page's groups, or - on the public pages - a
+	// lone Admin link. That link starts hidden and is revealed only for an
+	// authenticated admin (see below), so a regular uploader is never shown a link
+	// that would just bounce them to /login.
+	const showsDefaultAdmin = !(groups && groups.length);
+	const allGroups = [share, ...(showsDefaultAdmin ? [{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin', hidden: true }] }] : groups)];
 
 	const nav = el('nav', { class: 'rl-side-nav', 'aria-label': 'Navigation' });
 	for (const group of allGroups) {
@@ -129,6 +133,16 @@ export function mountSidebar({ active, groups, account } = {}) {
 	foot.append(footRow);
 
 	const aside = el('aside', { class: 'rl-side' }, brand, nav, foot);
+
+	// Reveal the Admin link if this visitor is logged in as an admin, so the admin
+	// panel stays one click away from the upload/view/My-shares pages.
+	if (showsDefaultAdmin) {
+		fetch('/api/admin/me', { headers: { Accept: 'application/json' } })
+			.then(r => (r.ok ? r.json() : null))
+			.then(me => { if (me && me.admin) aside.querySelector('[data-id="admin"]')?.classList.remove('rl-hidden'); })
+			.catch(() => {});
+	}
+
 	const toggle = el('button', { class: 'rl-side-toggle', type: 'button', 'aria-label': 'Open menu' }, svgIcon('menu'));
 	const backdrop = el('div', { class: 'rl-side-backdrop' });
 
