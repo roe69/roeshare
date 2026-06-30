@@ -161,17 +161,16 @@ function renderOverview() {
 		id: 'stats',
 		style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--rl-space-3)',
 	});
-	const biggestHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
-	const uploadersHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
-	const instanceHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
-	const expiringHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
+	const card = () => el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
+	const lifetimeHost = card(), biggestHost = card(), uploadersHost = card(), instanceHost = card(), expiringHost = card();
 
 	view.replaceChildren(
-		viewHead('Overview', 'A snapshot of this RoeShare instance.'),
+		viewHead('Overview', 'Current totals up top; the panels below are all-time and survive deleted shares.'),
 		statsRow,
 		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--rl-space-3);margin-top:var(--rl-space-3)' },
-			biggestHost,
+			lifetimeHost,
 			uploadersHost,
+			biggestHost,
 			instanceHost,
 			expiringHost,
 		),
@@ -179,7 +178,7 @@ function renderOverview() {
 
 	loadStats();
 	loadInstance(instanceHost);
-	loadOverview(biggestHost, uploadersHost, expiringHost);
+	loadOverview(biggestHost, uploadersHost, expiringHost, lifetimeHost);
 }
 
 async function loadStats() {
@@ -243,19 +242,33 @@ function formatUptime(s) {
 	return `${Math.floor(s)}s`;
 }
 
-// Fill the three leaderboard panels (biggest shares, top uploaders, expiring
-// soon) from one request. A failure shows a per-panel notice, never a blank page.
-async function loadOverview(biggestHost, uploadersHost, expiringHost) {
+// Fill the overview panels from one request. A failure shows a per-panel notice,
+// never a blank page.
+async function loadOverview(biggestHost, uploadersHost, expiringHost, lifetimeHost) {
 	let data;
 	try {
 		data = await api.get('/api/admin/overview');
 	} catch {
 		const fail = title => [panelHead(title), el('p', { class: 'rl-dim' }, 'Could not load.')];
+		lifetimeHost.replaceChildren(...fail('All time'));
 		biggestHost.replaceChildren(...fail('Biggest shares'));
 		uploadersHost.replaceChildren(...fail('Top uploaders'));
 		expiringHost.replaceChildren(...fail('Expiring soon'));
 		return;
 	}
+
+	// All-time totals - persist past deletion.
+	const lt = data.lifetime || {};
+	lifetimeHost.replaceChildren(
+		panelHead('All time'),
+		el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
+			infoRow('Shares created', String(lt.shares ?? 0)),
+			infoRow('Files uploaded', String(lt.files ?? 0)),
+			infoRow('Data uploaded', formatBytes(lt.bytes ?? 0)),
+			infoRow('Downloads', String(lt.downloads ?? 0)),
+			infoRow('Views', String(lt.views ?? 0)),
+		),
+	);
 
 	// Biggest shares - clickable rows, size + downloads on the right.
 	const big = data.biggestShares || [];

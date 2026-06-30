@@ -54,6 +54,23 @@ db.exec(`
 		ua        TEXT
 	);
 
+	-- Lifetime counters that accumulate as events happen and are NEVER decremented,
+	-- so historical totals survive a share being expired, burned, or deleted.
+	CREATE TABLE IF NOT EXISTS metrics (
+		key   TEXT PRIMARY KEY,
+		value INTEGER NOT NULL DEFAULT 0
+	);
+
+	-- Per-uploader (by IP) lifetime stats, likewise persistent across deletion.
+	CREATE TABLE IF NOT EXISTS uploaders (
+		ip         TEXT PRIMARY KEY,
+		shares     INTEGER NOT NULL DEFAULT 0,
+		bytes      INTEGER NOT NULL DEFAULT 0,
+		downloads  INTEGER NOT NULL DEFAULT 0,
+		first_seen INTEGER,
+		last_seen  INTEGER
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_files_share ON files(share_id);
 	CREATE INDEX IF NOT EXISTS idx_shares_expires ON shares(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_events_share ON download_events(share_id);
@@ -72,6 +89,29 @@ for (const stmt of [
 	} catch {
 		/* column already exists */
 	}
+}
+
+// One-time seed of the lifetime tables from whatever shares already exist (live
+// or soft-deleted), so the historical view is populated on the first run after
+// this feature ships rather than starting empty. Detected by an empty `metrics`.
+if (db.query('SELECT COUNT(*) AS n FROM metrics').get().n === 0) {
+	const s = db.query('SELECT COUNT(*) AS shares, COALESCE(SUM(view_count),0) AS views, COALESCE(SUM(download_count),0) AS downloads FROM shares').get();
+	const f = db.query('SELECT COUNT(*) AS files, COALESCE(SUM(size),0) AS bytes FROM files').get();
+	const set = db.query('INSERT INTO metrics(key, value) VALUES (?, ?)');
+	const seed = db.transaction(() => {
+		set.run('shares_created', s.shares);
+		set.run('files_uploaded', f.files);
+		set.run('bytes_uploaded', f.bytes);
+		set.run('downloads', s.downloads);
+		set.run('views', s.views);
+		db.query(`INSERT INTO uploaders(ip, shares, bytes, downloads, first_seen, last_seen)
+			SELECT COALESCE(s.creator_ip, 'unknown'), COUNT(DISTINCT s.id),
+				COALESCE(SUM(sz.total), 0), COALESCE(SUM(s.download_count), 0),
+				MIN(s.created_at), MAX(s.created_at)
+			FROM shares s LEFT JOIN (SELECT share_id, SUM(size) AS total FROM files GROUP BY share_id) sz ON sz.share_id = s.id
+			GROUP BY COALESCE(s.creator_ip, 'unknown')`).run();
+	});
+	seed();
 }
 
 export const now = () => Math.floor(Date.now() / 1000);

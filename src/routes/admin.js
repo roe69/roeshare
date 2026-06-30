@@ -12,6 +12,7 @@ import { hashPassword } from '../lib/crypto.js';
 import { slugError } from '../lib/slug.js';
 import { getLogs } from '../lib/logbuffer.js';
 import { ALLOWED_KEYS, ALLOWLIST, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
+import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
 
 // The editable settings keys mapped to their current effective (booted) values,
 // for pre-filling the editor. Secret keys are reported only as set/unset.
@@ -337,17 +338,15 @@ export default router => {
 			)
 			.all();
 
-		// Sum per-share size from a pre-grouped subquery so SUM(download_count) is
-		// not multiplied by the files-per-share fan-out.
-		const topUploaders = db
-			.query(
-				`SELECT s.creator_ip AS ip, COUNT(DISTINCT s.id) AS shareCount,
-					COALESCE(SUM(sz.total), 0) AS totalSize, COALESCE(SUM(s.download_count), 0) AS downloads, MAX(s.created_at) AS lastUpload
-				FROM shares s LEFT JOIN (SELECT share_id, SUM(size) AS total FROM files GROUP BY share_id) sz ON sz.share_id = s.id
-				WHERE s.deleted_at IS NULL
-				GROUP BY s.creator_ip ORDER BY totalSize DESC LIMIT 8`,
-			)
-			.all();
+		// Top uploaders come from the persistent lifetime table, so they are not
+		// lost when a share is deleted. Mapped to the existing client field names.
+		const topUploaders = lifetimeUploaders(8).map(u => ({
+			ip: u.ip,
+			shareCount: u.shares,
+			totalSize: u.bytes,
+			downloads: u.downloads,
+			lastUpload: u.lastSeen,
+		}));
 
 		const expiringSoon = db
 			.query(
@@ -358,7 +357,10 @@ export default router => {
 			)
 			.all();
 
-		return json({ biggestShares, topUploaders, expiringSoon });
+		// Lifetime totals (all-time, surviving deletion) for the Overview.
+		const lifetime = lifetimeMetrics();
+
+		return json({ biggestShares, topUploaders, expiringSoon, lifetime });
 	});
 
 	// ---- Server operations -------------------------------------------------

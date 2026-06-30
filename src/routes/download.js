@@ -10,6 +10,7 @@ import { safeEqual } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
 import { blobFile, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
+import { bumpMetric, bumpUploader } from '../lib/stats.js';
 
 // Only these MIME types are ever served inline (rendered in the browser on our
 // own origin). Everything else - HTML, SVG-with-doubt, scripts, office docs - is
@@ -65,11 +66,14 @@ function accessCheck(share, req, url) {
 	return { ok: false, owner };
 }
 
-function recordDownload(shareId, fileId, ip, ua) {
+function recordDownload(shareId, fileId, ip, ua, creatorIp) {
 	const ts = now();
 	if (fileId) incFileDownload.run(fileId);
 	incShareDownload.run(shareId);
 	insertEvent.run(shareId, fileId, ts, ip ?? null, ua ?? null);
+	// Lifetime stats, credited to the uploader (persist past deletion).
+	bumpMetric('downloads');
+	bumpUploader(creatorIp, { downloads: 1 });
 }
 
 function limitReached(share) {
@@ -195,7 +199,7 @@ export default function download(router) {
 			(controlled ? !(range && range.invalid) : range === null || (!range.invalid && range.start === 0));
 		let makeBody;
 		if (counted) {
-			recordDownload(share.id, file.id, ip, req.headers.get('user-agent'));
+			recordDownload(share.id, file.id, ip, req.headers.get('user-agent'), share.creator_ip);
 			if (share.one_time) {
 				softDeleteShare.run(now(), share.id);
 				makeBody = src => cleanupStream(src, () => burnBlobs(share.id));
@@ -228,7 +232,7 @@ export default function download(router) {
 
 		// HEAD probes (auto-routed to this GET handler) must not count or burn.
 		const counted = req.method === 'GET';
-		if (counted) recordDownload(share.id, null, ip, req.headers.get('user-agent'));
+		if (counted) recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip);
 
 		let body = createZipStream(entries);
 		if (counted && share.one_time) {

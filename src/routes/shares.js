@@ -7,6 +7,7 @@ import { db, now } from '../db.js';
 import { json, error, cookie, requestOrigin, requestScheme } from '../lib/http.js';
 import { hashPassword, verifyPassword, safeEqual } from '../lib/crypto.js';
 import { uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, uploadLinkToken, UPLOAD_COOKIE } from '../lib/auth.js';
+import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { newShareId, newToken } from '../lib/ids.js';
 import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
@@ -153,6 +154,9 @@ export default function shares(router) {
 		const ua = (ctx.req.headers.get('user-agent') || '').slice(0, 512) || null;
 
 		insertShare.run(id, title, now(), expiresAt, passwordHash, maxDownloads, oneTime, editToken, ctx.ip ?? null, ua, e2e);
+		// Lifetime stats (persist past deletion).
+		bumpMetric('shares_created');
+		bumpUploader(ctx.ip, { shares: 1 });
 
 		return json(
 			{
@@ -206,7 +210,10 @@ export default function shares(router) {
 		// Count a view when a non-owner opens the share (the page loads its
 		// metadata once). Owners checking their own share never inflate the count.
 		const counted = !owner;
-		if (counted) incShareView.run(share.id);
+		if (counted) {
+			incShareView.run(share.id);
+			bumpMetric('views');
+		}
 
 		const files = getFiles.all(share.id);
 		const totalSize = files.reduce((sum, f) => sum + f.size, 0);

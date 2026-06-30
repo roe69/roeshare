@@ -11,6 +11,7 @@ import { safeEqual } from '../lib/crypto.js';
 import { writeChunk, totalUsage } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
 import { newIv } from '../lib/filecrypt.js';
+import { bumpMetric, bumpUploader } from '../lib/stats.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
@@ -121,6 +122,12 @@ export default function uploads(router) {
 		const received = await writeChunk(share.id, file.id, offset, chunk, file.iv);
 		const complete = received === file.size ? 1 : 0;
 		updateReceived.run(received, complete, file.id);
+		// Lifetime stats when a file first finishes (persist past deletion).
+		if (complete && !file.complete) {
+			bumpMetric('files_uploaded');
+			bumpMetric('bytes_uploaded', file.size);
+			bumpUploader(share.creator_ip, { bytes: file.size });
+		}
 		return json({ received, complete: !!complete });
 	});
 }
