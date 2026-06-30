@@ -84,7 +84,13 @@ db.exec(`
 		expires_at     INTEGER,                 -- null = never
 		revoked_at     INTEGER,                 -- null = active
 		upload_count   INTEGER NOT NULL DEFAULT 0, -- shares created with this key
-		bytes_uploaded INTEGER NOT NULL DEFAULT 0
+		bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+		max_file_size  INTEGER,                 -- per-file byte cap (null = server default)
+		max_share_size INTEGER,                 -- per-share byte cap (null = server default)
+		max_shares     INTEGER,                 -- lifetime share cap (null = unlimited)
+		max_expiry     INTEGER,                 -- max share lifetime in seconds (null = no cap)
+		allow_slug     INTEGER NOT NULL DEFAULT 1, -- may set custom share links
+		allow_password INTEGER NOT NULL DEFAULT 1  -- may set share passwords
 	);
 
 	CREATE INDEX IF NOT EXISTS idx_files_share ON files(share_id);
@@ -102,6 +108,13 @@ for (const stmt of [
 	// Attributes a share to the API key that created it (null = created via the
 	// web portal). Lets the admin panel show per-key usage and list a key's shares.
 	'ALTER TABLE shares ADD COLUMN api_key_id TEXT',
+	// Per-key limits/scopes (added after api_keys shipped without them).
+	'ALTER TABLE api_keys ADD COLUMN max_file_size INTEGER',
+	'ALTER TABLE api_keys ADD COLUMN max_share_size INTEGER',
+	'ALTER TABLE api_keys ADD COLUMN max_shares INTEGER',
+	'ALTER TABLE api_keys ADD COLUMN max_expiry INTEGER',
+	'ALTER TABLE api_keys ADD COLUMN allow_slug INTEGER NOT NULL DEFAULT 1',
+	'ALTER TABLE api_keys ADD COLUMN allow_password INTEGER NOT NULL DEFAULT 1',
 ]) {
 	try {
 		db.exec(stmt);

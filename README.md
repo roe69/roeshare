@@ -236,8 +236,16 @@ Other servers and scripts can upload without a browser session using an API key.
 Create and manage keys in the admin panel under **API keys**: each key is a
 bearer token of the form `rsk_<id>_<secret>` shown in full exactly once at
 creation (only a SHA-256 hash is stored, so it cannot be recovered - revoke and
-reissue if lost). Keys can be given an expiry, revoked, or deleted, and the panel
-tracks each key's share count, bytes uploaded, and last use.
+reissue if lost). Keys can be given an expiry, revoked (and later reinstated), or
+deleted, and the panel tracks each key's share count, bytes uploaded, and last use.
+A built-in **API docs** page in the panel lists every endpoint with copy-ready
+examples and the instance's current limits.
+
+Each key can be scoped below the instance limits: per-file and per-share byte
+caps, a lifetime cap on how many shares it may create, a maximum share lifetime
+(forcing its shares to expire within a window), and toggles for whether it may set
+custom slugs or share passwords. A request that exceeds a cap or uses a disallowed
+scope is rejected (`413` for size, `403` for scope/limit).
 
 Authenticate with `Authorization: Bearer rsk_...` (or the `X-Api-Key` header).
 Two flows:

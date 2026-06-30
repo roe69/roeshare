@@ -6,19 +6,30 @@
 // Only SHA-256(secret) is stored, so the database row can never recover a usable
 // key. The secret has ~230 bits of entropy, so a fast hash (not argon2) is the
 // right tradeoff: it is verified on every API request and is not brute-forceable.
+//
+// Each key carries optional per-key limits/scopes (byte caps, a lifetime share
+// cap, a max share expiry, and whether it may set custom slugs / passwords),
+// enforced at share creation and file registration.
 
 import { createHash, timingSafeEqual } from 'node:crypto';
+import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { randomId } from './ids.js';
 
 const KEY_PREFIX = 'rsk';
 
-const insertKey = db.query('INSERT INTO api_keys (id, name, key_hash, created_at, expires_at) VALUES (?, ?, ?, ?, ?)');
+const insertKey = db.query(
+	`INSERT INTO api_keys (id, name, key_hash, created_at, expires_at, max_file_size, max_share_size, max_shares, max_expiry, allow_slug, allow_password)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+);
 const getKey = db.query('SELECT * FROM api_keys WHERE id = ?');
 const touchKey = db.query('UPDATE api_keys SET last_used_at = ? WHERE id = ?');
 const bumpKey = db.query('UPDATE api_keys SET upload_count = upload_count + ?, bytes_uploaded = bytes_uploaded + ? WHERE id = ?');
 const revokeQ = db.query('UPDATE api_keys SET revoked_at = ? WHERE id = ?');
 const deleteQ = db.query('DELETE FROM api_keys WHERE id = ?');
+const updateQ = db.query(
+	`UPDATE api_keys SET name = ?, max_file_size = ?, max_share_size = ?, max_shares = ?, max_expiry = ?, allow_slug = ?, allow_password = ? WHERE id = ?`,
+);
 const listQ = db.query(
 	`SELECT k.*, (SELECT COUNT(*) FROM shares s WHERE s.api_key_id = k.id AND s.deleted_at IS NULL) AS live_shares
 	 FROM api_keys k ORDER BY k.created_at DESC`,
@@ -26,6 +37,18 @@ const listQ = db.query(
 
 function sha256(s) {
 	return createHash('sha256').update(String(s)).digest();
+}
+
+// The scopes/limits of a key row, in the camelCase shape the API/UI use.
+function limitsOf(k) {
+	return {
+		maxFileSize: k.max_file_size ?? null,
+		maxShareSize: k.max_share_size ?? null,
+		maxShares: k.max_shares ?? null,
+		maxExpiry: k.max_expiry ?? null,
+		allowSlug: k.allow_slug !== 0,
+		allowPassword: k.allow_password !== 0,
+	};
 }
 
 // Public, secret-free view of a key row for the admin UI.
@@ -41,21 +64,79 @@ function mapKey(k) {
 		uploadCount: k.upload_count,
 		bytesUploaded: k.bytes_uploaded,
 		liveShares: k.live_shares ?? 0,
+		limits: limitsOf(k),
 	};
 }
 
-// Create a key. Returns the public id/prefix plus the full token, which the
-// caller must surface to the operator ONCE - it is not recoverable afterwards.
-export function createApiKey(name, expiresAt = null) {
+// Validate + normalize an admin-supplied limits/scopes object into the six DB
+// column values. Byte caps are clamped to the server maxima (a key can only ever
+// be MORE restrictive than the instance). Returns { values } or { error }.
+export function sanitizeLimits(src = {}) {
+	const out = {};
+
+	const byteCap = (val, serverMax, label) => {
+		if (val === undefined || val === null || val === '') return null;
+		const n = Number(val);
+		if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return { error: `Invalid ${label}` };
+		if (n === 0) return null; // 0 = "no override", inherit the server default
+		return Math.min(n, serverMax);
+	};
+
+	let v = byteCap(src.maxFileSize, config.maxFileSize, 'max file size');
+	if (v && v.error) return v;
+	out.max_file_size = v;
+
+	v = byteCap(src.maxShareSize, config.maxShareSize, 'max share size');
+	if (v && v.error) return v;
+	out.max_share_size = v;
+
+	out.max_shares = null;
+	if (src.maxShares !== undefined && src.maxShares !== null && src.maxShares !== '') {
+		const n = Number(src.maxShares);
+		if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return { error: 'Invalid max shares' };
+		out.max_shares = n > 0 ? n : null;
+	}
+
+	out.max_expiry = null;
+	if (src.maxExpiry !== undefined && src.maxExpiry !== null && src.maxExpiry !== '') {
+		const n = Number(src.maxExpiry);
+		if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return { error: 'Invalid max expiry' };
+		out.max_expiry = n > 0 ? n : null;
+	}
+
+	// Scopes default to allowed when omitted.
+	out.allow_slug = src.allowSlug === false || src.allowSlug === 0 || src.allowSlug === '0' ? 0 : 1;
+	out.allow_password = src.allowPassword === false || src.allowPassword === 0 || src.allowPassword === '0' ? 0 : 1;
+
+	return { values: out };
+}
+
+// Create a key. `limits` is a sanitized column object (see sanitizeLimits). Returns
+// the public id/prefix plus the full token, which the caller must surface to the
+// operator ONCE - it is not recoverable afterwards.
+export function createApiKey(name, expiresAt = null, limits = {}) {
 	const id = randomId(12);
 	const secret = randomId(40);
 	const token = `${KEY_PREFIX}_${id}_${secret}`;
-	insertKey.run(id, name, sha256(secret).toString('hex'), now(), expiresAt);
+	insertKey.run(
+		id,
+		name,
+		sha256(secret).toString('hex'),
+		now(),
+		expiresAt,
+		limits.max_file_size ?? null,
+		limits.max_share_size ?? null,
+		limits.max_shares ?? null,
+		limits.max_expiry ?? null,
+		limits.allow_slug ?? 1,
+		limits.allow_password ?? 1,
+	);
 	return { id, name, token, prefix: `${KEY_PREFIX}_${id}`, expiresAt };
 }
 
-// Parse and verify a presented token. Returns the raw key row, or null when the
-// token is malformed, unknown, revoked, expired, or the secret does not match.
+// Parse and verify a presented token. Returns the raw key row (including limit
+// columns), or null when the token is malformed, unknown, revoked, expired, or
+// the secret does not match.
 export function verifyApiKey(token) {
 	if (typeof token !== 'string') return null;
 	const parts = token.split('_');
@@ -97,6 +178,35 @@ export function recordKeyUsage(id, { shares = 0, bytes = 0 } = {}) {
 	if (shares || bytes) bumpKey.run(shares, bytes, id);
 }
 
+// ---- Enforcement helpers (used by routes/api.js and routes/uploads.js) -----
+
+// The raw key row by id (with limit columns), or null. Used by the resumable
+// upload path to enforce a key's caps on file registration.
+export function apiKeyRow(id) {
+	return id ? getKey.get(id) : null;
+}
+
+// Effective per-file and per-share byte caps for a key row: the key's override
+// when set, else the server default; never above the server default.
+export function effectiveCaps(row) {
+	const ff = row?.max_file_size;
+	const fs = row?.max_share_size;
+	return {
+		maxFileSize: ff ? Math.min(ff, config.maxFileSize) : config.maxFileSize,
+		maxShareSize: fs ? Math.min(fs, config.maxShareSize) : config.maxShareSize,
+	};
+}
+
+// Clamp a requested expiry (epoch seconds, or null=never) to the key's max
+// lifetime. A key with a max_expiry forces even "never" shares to expire.
+export function clampExpiry(row, expiresAt) {
+	const cap = row?.max_expiry;
+	if (!cap) return expiresAt;
+	const limit = now() + cap;
+	if (expiresAt == null) return limit;
+	return Math.min(expiresAt, limit);
+}
+
 // ---- Admin management ------------------------------------------------------
 
 export function listApiKeys() {
@@ -108,12 +218,38 @@ export function getApiKey(id) {
 	return k ? mapKey(k) : null;
 }
 
+// Update a key's name and limits/scopes (the full set is always written).
+// Returns false if the key does not exist.
+export function updateApiKey(id, name, limits) {
+	const k = getKey.get(id);
+	if (!k) return false;
+	updateQ.run(
+		name,
+		limits.max_file_size ?? null,
+		limits.max_share_size ?? null,
+		limits.max_shares ?? null,
+		limits.max_expiry ?? null,
+		limits.allow_slug ?? 1,
+		limits.allow_password ?? 1,
+		id,
+	);
+	return true;
+}
+
 // Revoke (disable) a key without deleting it, preserving its usage history.
 // Returns false if the key does not exist.
 export function revokeApiKey(id) {
 	const k = getKey.get(id);
 	if (!k) return false;
 	if (k.revoked_at == null) revokeQ.run(now(), id);
+	return true;
+}
+
+// Reinstate a revoked key (clear revoked_at). Returns false if it does not exist.
+export function reinstateApiKey(id) {
+	const k = getKey.get(id);
+	if (!k) return false;
+	if (k.revoked_at != null) revokeQ.run(null, id);
 	return true;
 }
 

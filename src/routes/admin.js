@@ -13,7 +13,7 @@ import { slugError } from '../lib/slug.js';
 import { getLogs } from '../lib/logbuffer.js';
 import { ALLOWED_KEYS, ALLOWLIST, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
 import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
-import { listApiKeys, getApiKey, createApiKey, revokeApiKey, deleteApiKey } from '../lib/apikeys.js';
+import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, deleteApiKey, sanitizeLimits } from '../lib/apikeys.js';
 
 // The editable settings keys mapped to their current effective (booted) values,
 // for pre-filling the editor. Secret keys are reported only as set/unset.
@@ -390,9 +390,24 @@ export default router => {
 			if (n > 0) expiresAt = now() + Math.trunc(n);
 		}
 
+		const lim = sanitizeLimits(body.limits || {});
+		if (lim.error) return error(400, lim.error);
+
 		// The token is returned exactly once here; afterwards only its hash exists.
-		const made = createApiKey(name, expiresAt);
+		const made = createApiKey(name, expiresAt, lim.values);
 		return json({ id: made.id, name: made.name, token: made.token, prefix: made.prefix, expiresAt }, 201);
+	});
+
+	// Edit a key's name and limits/scopes (does not touch the secret or expiry).
+	router.patch('/api/admin/api-keys/:id', async ({ req, params }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const body = await readBody(req);
+		const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
+		if (!name) return error(400, 'A name is required');
+		const lim = sanitizeLimits(body.limits || {});
+		if (lim.error) return error(400, lim.error);
+		if (!updateApiKey(params.id, name, lim.values)) return error(404, 'Not found');
+		return json({ ok: true });
 	});
 
 	router.get('/api/admin/api-keys/:id', ({ req, params }) => {
@@ -414,6 +429,12 @@ export default router => {
 	router.post('/api/admin/api-keys/:id/revoke', ({ req, params }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		if (!revokeApiKey(params.id)) return error(404, 'Not found');
+		return json({ ok: true });
+	});
+
+	router.post('/api/admin/api-keys/:id/reinstate', ({ req, params }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		if (!reinstateApiKey(params.id)) return error(404, 'Not found');
 		return json({ ok: true });
 	});
 

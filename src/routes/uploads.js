@@ -12,7 +12,7 @@ import { writeChunk, totalUsage } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
-import { recordKeyUsage } from '../lib/apikeys.js';
+import { recordKeyUsage, apiKeyRow, effectiveCaps } from '../lib/apikeys.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
@@ -65,13 +65,17 @@ export default function uploads(router) {
 		if (!Number.isFinite(size) || size < 0 || !Number.isInteger(size)) return error(400, 'Invalid size');
 		const mime = typeof body?.mime === 'string' && body.mime ? body.mime : 'application/octet-stream';
 
-		if (size > config.maxFileSize) return error(413, 'File exceeds the per-file size limit');
+		// When the share was created via an API key, its per-file/per-share caps
+		// apply on top of the server limits (clamped, never larger).
+		const caps = share.api_key_id ? effectiveCaps(apiKeyRow(share.api_key_id)) : { maxFileSize: config.maxFileSize, maxShareSize: config.maxShareSize };
+
+		if (size > caps.maxFileSize) return error(413, 'File exceeds the per-file size limit');
 
 		const agg = shareTotal.get(share.id);
 		// Cap the number of files so a flood of (e.g. zero-byte) registrations
 		// cannot bloat the files table and the metadata/admin code paths.
 		if (agg.count >= config.maxFilesPerShare) return error(413, 'Too many files in this share');
-		if (agg.total + size > config.maxShareSize) return error(413, 'Share exceeds the per-share size limit');
+		if (agg.total + size > caps.maxShareSize) return error(413, 'Share exceeds the per-share size limit');
 
 		if (config.maxTotalSize > 0 && (await totalUsage()) + size > config.maxTotalSize) {
 			return error(413, 'Server storage limit reached');

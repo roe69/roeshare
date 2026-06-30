@@ -23,7 +23,7 @@ import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
 import { slugError } from '../lib/slug.js';
-import { authenticate, recordKeyUsage } from '../lib/apikeys.js';
+import { authenticate, recordKeyUsage, effectiveCaps, clampExpiry } from '../lib/apikeys.js';
 
 const getShareById = db.query('SELECT id FROM shares WHERE id = ?');
 const insertShare = db.query(
@@ -94,8 +94,19 @@ function parseOptions(src) {
 	return { values: out };
 }
 
+// Check a key's scopes/limits against the requested options. Returns an error
+// message when the request is not permitted, else null. (Byte caps are enforced
+// separately against the actual upload size.)
+function scopeError(key, opts) {
+	if (key.max_shares != null && key.upload_count >= key.max_shares) return 'This key has reached its share limit';
+	if (opts.slug && key.allow_slug === 0) return 'This key may not set custom links';
+	if (opts.passwordPlain && key.allow_password === 0) return 'This key may not set passwords';
+	return null;
+}
+
 // Insert a share row attributed to `key`. Returns { id, editToken } or
-// { conflict } when a requested slug is already taken.
+// { conflict } when a requested slug is already taken. Applies the key's max
+// share lifetime to the expiry.
 async function createShare(ctx, key, opts) {
 	let id;
 	if (opts.slug) {
@@ -105,11 +116,12 @@ async function createShare(ctx, key, opts) {
 		id = newShareId();
 	}
 
+	const expiresAt = clampExpiry(key, opts.expiresAt);
 	const passwordHash = opts.passwordPlain ? await hashPassword(opts.passwordPlain) : null;
 	const editToken = newToken();
 	const ua = (ctx.req.headers.get('user-agent') || `API key: ${key.name}`).slice(0, 512);
 
-	insertShare.run(id, opts.title, now(), opts.expiresAt, passwordHash, opts.maxDownloads, opts.oneTime, editToken, ctx.ip ?? null, ua, key.id);
+	insertShare.run(id, opts.title, now(), expiresAt, passwordHash, opts.maxDownloads, opts.oneTime, editToken, ctx.ip ?? null, ua, key.id);
 	// Lifetime stats (persist past deletion), plus the per-key tally.
 	bumpMetric('shares_created');
 	bumpUploader(ctx.ip, { shares: 1 });
@@ -146,17 +158,23 @@ export default function apiV1(router) {
 		const parsed = parseOptions(body);
 		if (parsed.error) return error(400, parsed.error);
 
+		const denied = scopeError(key, parsed.values);
+		if (denied) return error(403, denied);
+
 		const made = await createShare(ctx, key, parsed.values);
 		if (made.conflict) return error(409, made.conflict);
 
+		// Advertise the caps this key actually operates under, so the client sizes
+		// its chunks/files correctly.
+		const caps = effectiveCaps(key);
 		return json(
 			{
 				id: made.id,
 				editToken: made.editToken,
 				url: `${requestOrigin(ctx.req, ctx.url)}/${made.id}`,
 				chunkSize: config.chunkSize,
-				maxFileSize: config.maxFileSize,
-				maxShareSize: config.maxShareSize,
+				maxFileSize: caps.maxFileSize,
+				maxShareSize: caps.maxShareSize,
 			},
 			201,
 		);
@@ -189,12 +207,18 @@ export default function apiV1(router) {
 		});
 		if (parsed.error) return error(400, parsed.error);
 
+		const denied = scopeError(key, parsed.values);
+		if (denied) return error(403, denied);
+
 		// Buffer the body (bounded by the server's maxRequestBodySize) and enforce
 		// caps BEFORE creating any rows, so a rejected upload leaves nothing behind.
+		// The key's own per-file/per-share caps apply on top of the server limits.
+		const caps = effectiveCaps(key);
 		const buf = new Uint8Array(await ctx.req.arrayBuffer());
 		const size = buf.length;
 		if (size === 0) return error(400, 'Empty request body');
-		if (size > config.maxFileSize) return error(413, 'File exceeds the per-file size limit');
+		if (size > caps.maxFileSize) return error(413, 'File exceeds this key\'s per-file size limit');
+		if (size > caps.maxShareSize) return error(413, 'File exceeds this key\'s per-share size limit');
 		if (config.maxTotalSize > 0 && (await totalUsage()) + size > config.maxTotalSize) {
 			return error(413, 'Server storage limit reached');
 		}

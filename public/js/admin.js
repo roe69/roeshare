@@ -59,7 +59,7 @@ function viewHead(title, subtitle, actions) {
 
 // ---- Sidebar / routing -----------------------------------------------------
 
-const VIEWS = { overview: renderOverview, shares: renderShares, apikeys: renderApiKeys, server: renderServer, logs: renderLogs };
+const VIEWS = { overview: renderOverview, shares: renderShares, apikeys: renderApiKeys, apidocs: renderApiDocs, server: renderServer, logs: renderLogs };
 
 // Per-view teardown (e.g. stop the logs poll) run before switching away.
 let cleanup = null;
@@ -100,6 +100,7 @@ function boot() {
 				{ id: 'overview', label: 'Overview', icon: 'overview', onClick: go('overview') },
 				{ id: 'shares', label: 'Shares', icon: 'shares', onClick: go('shares') },
 				{ id: 'apikeys', label: 'API keys', icon: 'key', onClick: go('apikeys') },
+				{ id: 'apidocs', label: 'API docs', icon: 'book', onClick: go('apidocs') },
 				{ id: 'server', label: 'Server', icon: 'server', onClick: go('server') },
 				{ id: 'logs', label: 'Logs', icon: 'logs', onClick: go('logs') },
 			] },
@@ -767,6 +768,94 @@ function keyStatus(k) {
 	return { label: 'Active', cls: 'rl-badge-success', active: true };
 }
 
+// Preset caps for a key's maximum share lifetime (seconds; '' = no cap).
+const KEY_LIFETIME_OPTS = [
+	{ label: 'No cap', value: '' },
+	{ label: '1 hour', value: String(3600) },
+	{ label: '1 day', value: String(86400) },
+	{ label: '7 days', value: String(7 * 86400) },
+	{ label: '30 days', value: String(30 * 86400) },
+	{ label: '90 days', value: String(90 * 86400) },
+];
+
+// A bytes input (number + unit) that reads back as an integer byte count, or null
+// when blank (meaning "inherit the server default"). Reuses splitBytes/BYTE_UNITS.
+function byteField(initialBytes) {
+	const seed = initialBytes ? splitBytes(initialBytes) : { value: '', unit: 1048576 };
+	const num = el('input', { class: 'rl-input', type: 'number', min: 0, step: 'any', value: seed.value, placeholder: 'Server default', style: 'flex:1;min-width:0' });
+	const unit = el('select', { class: 'rl-select', style: 'max-width:84px' }, ...BYTE_UNITS.map(([n, v]) => el('option', { value: v }, n)));
+	unit.value = String(seed.unit);
+	const get = () => {
+		const raw = num.value.trim();
+		if (raw === '') return null;
+		const b = Math.round(parseFloat(raw) * Number(unit.value));
+		return Number.isFinite(b) && b > 0 ? b : null;
+	};
+	return { node: el('div', { class: 'rl-row', style: 'gap:var(--rl-space-2)' }, num, unit), get };
+}
+
+// Build the limits/scopes form, seeded from a key's current limits. Returns the
+// node plus collect(), which yields the camelCase object the API expects.
+function scopeControls(initial = {}) {
+	const fileCap = byteField(initial.maxFileSize);
+	const shareCap = byteField(initial.maxShareSize);
+	const maxShares = el('input', { class: 'rl-input', type: 'number', min: 1, step: 1, value: initial.maxShares || '', placeholder: 'Unlimited' });
+
+	const lifetime = el('select', { class: 'rl-select' }, ...KEY_LIFETIME_OPTS.map(o => el('option', { value: o.value }, o.label)));
+	// Seed to the matching preset; an off-preset value gets its own option so it is
+	// never silently lost when re-saving.
+	if (initial.maxExpiry) {
+		if (!KEY_LIFETIME_OPTS.some(o => o.value === String(initial.maxExpiry))) {
+			lifetime.append(el('option', { value: String(initial.maxExpiry) }, `${Math.round(initial.maxExpiry / 86400)} days`));
+		}
+		lifetime.value = String(initial.maxExpiry);
+	}
+
+	const allowSlug = el('input', { type: 'checkbox' });
+	allowSlug.checked = initial.allowSlug !== false;
+	const allowPassword = el('input', { type: 'checkbox' });
+	allowPassword.checked = initial.allowPassword !== false;
+
+	const node = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+		el('div', { class: 'rl-optgrid' },
+			editField('Max file size', fileCap.node, 'Per file. Blank uses the server limit.'),
+			editField('Max share size', shareCap.node, 'Per share. Blank uses the server limit.'),
+			editField('Max total shares', maxShares, 'Lifetime cap on shares this key can create.'),
+			editField('Max share lifetime', lifetime, 'Forces shares from this key to expire within this window.'),
+		),
+		el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' },
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, allowSlug, el('span', {}, 'Allow custom share links (slugs)')),
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, allowPassword, el('span', {}, 'Allow setting share passwords')),
+		),
+	);
+
+	const collect = () => {
+		const mx = parseInt(maxShares.value, 10);
+		return {
+			maxFileSize: fileCap.get(),
+			maxShareSize: shareCap.get(),
+			maxShares: Number.isFinite(mx) && mx > 0 ? mx : null,
+			maxExpiry: lifetime.value ? Number(lifetime.value) : null,
+			allowSlug: allowSlug.checked,
+			allowPassword: allowPassword.checked,
+		};
+	};
+
+	return { node, collect };
+}
+
+// A short human summary of a key's non-default limits, for the table.
+function limitsSummary(limits = {}) {
+	const bits = [];
+	if (limits.maxFileSize) bits.push(`file ${formatBytes(limits.maxFileSize)}`);
+	if (limits.maxShareSize) bits.push(`share ${formatBytes(limits.maxShareSize)}`);
+	if (limits.maxShares) bits.push(`${limits.maxShares} shares`);
+	if (limits.maxExpiry) bits.push(`${timeUntil(Math.floor(Date.now() / 1000) + limits.maxExpiry)} max`);
+	if (limits.allowSlug === false) bits.push('no slugs');
+	if (limits.allowPassword === false) bits.push('no passwords');
+	return bits;
+}
+
 let keysTbody;
 
 function renderApiKeys() {
@@ -775,12 +864,13 @@ function renderApiKeys() {
 		...KEY_EXPIRY_OPTS.map(o => el('option', { value: o.value }, o.label)),
 	);
 	const createBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Create key');
+	const scopes = scopeControls();
 	const submit = async () => {
 		const name = nameInput.value.trim();
 		if (!name) { toastErr('Give the key a name first'); nameInput.focus(); return; }
 		createBtn.disabled = true;
 		try {
-			const made = await api.post('/api/admin/api-keys', { name, expiresIn: expirySelect.value || undefined });
+			const made = await api.post('/api/admin/api-keys', { name, expiresIn: expirySelect.value || undefined, limits: scopes.collect() });
 			nameInput.value = '';
 			expirySelect.value = '';
 			showNewKeyModal(made);
@@ -793,6 +883,13 @@ function renderApiKeys() {
 	};
 	createBtn.addEventListener('click', submit);
 	nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+
+	// Limits/scopes live in a collapsed section so the common case (name + expiry)
+	// stays a single calm row.
+	const advanced = el('details', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+		el('summary', { style: 'cursor:pointer;color:var(--rl-muted);font-size:var(--rl-text-sm);user-select:none' }, 'Limits & scopes (optional)'),
+		scopes.node,
+	);
 
 	const createCard = el('div', { class: 'rl-card rl-stack' },
 		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Create a key'),
@@ -808,6 +905,7 @@ function renderApiKeys() {
 			),
 			createBtn,
 		),
+		advanced,
 	);
 
 	keysTbody = el('tbody');
@@ -880,14 +978,24 @@ function keyRow(k) {
 			class: 'rl-btn rl-btn-ghost rl-btn-sm',
 			onclick: e => { e.stopPropagation(); confirmRevoke(k); },
 		}, 'Revoke') : false,
+		k.revokedAt ? el('button', {
+			class: 'rl-btn rl-btn-secondary rl-btn-sm',
+			onclick: e => { e.stopPropagation(); confirmReinstate(k); },
+		}, 'Reinstate') : false,
 		el('button', {
 			class: 'rl-btn rl-btn-danger rl-btn-sm',
 			onclick: e => { e.stopPropagation(); confirmDeleteKey(k); },
 		}, 'Delete'),
 	);
 
+	const summary = limitsSummary(k.limits);
+	const nameCell = el('td', {},
+		el('span', { style: 'font-weight:var(--rl-weight-semibold)' }, k.name),
+		summary.length ? el('div', { class: 'rl-dim', style: 'font-size:var(--rl-text-xs)' }, summary.join(' · ')) : false,
+	);
+
 	const tr = el('tr', { class: 'rl-card-interactive', style: 'cursor:pointer' },
-		el('td', {}, el('span', { style: 'font-weight:var(--rl-weight-semibold)' }, k.name)),
+		nameCell,
 		el('td', {}, prefix),
 		el('td', { class: 'rl-col-w' }, formatDate(k.createdAt)),
 		el('td', { class: 'rl-col-w' }, k.lastUsedAt ? formatDate(k.lastUsedAt) : el('span', { class: 'rl-dim' }, 'Never')),
@@ -964,7 +1072,29 @@ function confirmRevoke(k) {
 	});
 }
 
-function confirmDeleteKey(k) {
+function confirmReinstate(k) {
+	openModal({
+		title: 'Reinstate key',
+		body: el('p', {}, `Reinstate "${k.name}"? It will be able to upload again immediately.${k.expiresAt && k.expiresAt * 1000 < Date.now() ? ' Note: it is also past its expiry, so it stays inactive until you extend it.' : ''}`),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Reinstate', variant: 'primary',
+				onClick: async () => {
+					try {
+						await api.post(`/api/admin/api-keys/${encodeURIComponent(k.id)}/reinstate`, {});
+						toastOk('Key reinstated');
+						loadKeys();
+					} catch (err) {
+						toastErr(err);
+					}
+				},
+			},
+		],
+	});
+}
+
+function confirmDeleteKey(k, onDone) {
 	openModal({
 		title: 'Delete key',
 		body: el('p', {}, `Permanently delete "${k.name}"? This removes the key and its usage record. Shares it already created are not affected.`),
@@ -977,6 +1107,7 @@ function confirmDeleteKey(k) {
 						await api.del(`/api/admin/api-keys/${encodeURIComponent(k.id)}`);
 						toastOk('Key deleted');
 						loadKeys();
+						onDone?.();
 					} catch (err) {
 						toastErr(err);
 					}
@@ -988,10 +1119,12 @@ function confirmDeleteKey(k) {
 
 async function openKeyDetail(id) {
 	const bodyHost = el('div', { class: 'rl-center', style: 'padding:var(--rl-space-6)' }, el('span', { class: 'rl-spinner' }));
-	openModal({ title: 'API key', body: bodyHost });
+	const modal = openModal({ title: 'API key', body: bodyHost });
 	try {
 		const k = await api.get(`/api/admin/api-keys/${encodeURIComponent(id)}`);
 		const st = keyStatus(k);
+
+		// Recent shares this key created.
 		const sharesHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
 		const shares = k.shares || [];
 		if (!shares.length) sharesHost.append(el('p', { class: 'rl-dim' }, 'No shares created with this key yet.'));
@@ -1005,6 +1138,33 @@ async function openKeyDetail(id) {
 					`${formatBytes(s.totalSize)}${s.deleted ? ' - deleted' : ''}`),
 			));
 		}
+
+		// Editable name + limits/scopes.
+		const nameInput = el('input', { class: 'rl-input', type: 'text', value: k.name, maxlength: 100 });
+		const scopes = scopeControls(k.limits || {});
+		const saveBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Save changes');
+		saveBtn.addEventListener('click', async () => {
+			const name = nameInput.value.trim();
+			if (!name) { toastErr('Name cannot be empty'); return; }
+			saveBtn.disabled = true;
+			try {
+				await api.patch(`/api/admin/api-keys/${encodeURIComponent(k.id)}`, { name, limits: scopes.collect() });
+				toastOk('Key updated');
+				loadKeys();
+				modal.close();
+			} catch (err) {
+				saveBtn.disabled = false;
+				toastErr(err);
+			}
+		});
+
+		// Lifecycle actions adapt to the key's state.
+		const lifecycle = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' },
+			k.revokedAt
+				? el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); confirmReinstate(k); } }, 'Reinstate')
+				: el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => { modal.close(); confirmRevoke(k); } }, 'Revoke'),
+			el('button', { class: 'rl-btn rl-btn-danger rl-btn-sm', onclick: () => confirmDeleteKey(k, () => modal.close()) }, 'Delete'),
+		);
 
 		bodyHost.replaceChildren(
 			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1);margin-bottom:var(--rl-space-4)' },
@@ -1021,12 +1181,170 @@ async function openKeyDetail(id) {
 				infoRow('Shares created', String(k.uploadCount ?? 0)),
 				infoRow('Data uploaded', formatBytes(k.bytesUploaded ?? 0)),
 			),
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, `Recent shares (${shares.length})`),
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Limits & scopes'),
+			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+				editField('Name', nameInput),
+				scopes.node,
+				el('div', { class: 'rl-row', style: 'justify-content:flex-end' }, saveBtn),
+			),
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-6)' }, `Recent shares (${shares.length})`),
 			sharesHost,
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-6)' }, 'Lifecycle'),
+			lifecycle,
 		);
 	} catch (err) {
 		bodyHost.replaceChildren(el('p', { class: 'rl-dim' }, (err && err.message) || 'Could not load key.'));
 	}
+}
+
+// ===========================================================================
+// API docs
+// ===========================================================================
+
+const METHOD_CLS = { GET: 'rl-badge-success', POST: 'rl-badge-gold', PATCH: 'rl-badge-warning', DELETE: 'rl-badge-danger' };
+
+// A read-only code block with a Copy button.
+function docCode(text) {
+	return el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' },
+		el('pre', {
+			class: 'rl-mono',
+			style: 'white-space:pre-wrap;word-break:break-word;margin:0;padding:var(--rl-space-3);background:var(--rl-bg-tertiary,var(--rl-bg-secondary));border:var(--rl-border-thin) solid var(--rl-border);border-radius:var(--rl-radius-sm);font-size:var(--rl-text-xs)',
+		}, text),
+		el('div', { class: 'rl-row', style: 'justify-content:flex-end' },
+			el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => copyText(text) }, 'Copy'),
+		),
+	);
+}
+
+function endpointCard(method, path, desc, extra) {
+	return el('div', { class: 'rl-card rl-card-pad-sm rl-stack', style: 'gap:var(--rl-space-2)' },
+		el('div', { class: 'rl-row', style: 'gap:var(--rl-space-2);align-items:center;flex-wrap:wrap' },
+			el('span', { class: `rl-badge ${METHOD_CLS[method] || 'rl-badge-neutral'}`, style: 'min-width:56px;justify-content:center' }, method),
+			el('span', { class: 'rl-mono', style: 'font-size:var(--rl-text-sm);word-break:break-all' }, path),
+		),
+		el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, desc),
+		extra || false,
+	);
+}
+
+// A compact "name - description" parameter list.
+function paramList(rows) {
+	return el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
+		...rows.map(([name, desc]) => el('div', { style: 'font-size:var(--rl-text-sm)' },
+			el('span', { class: 'rl-mono', style: 'color:var(--rl-text-form)' }, name),
+			el('span', { class: 'rl-dim' }, ` - ${desc}`),
+		)),
+	);
+}
+
+function renderApiDocs() {
+	const origin = location.origin;
+	const tok = 'rsk_<id>_<secret>';
+
+	const oneShot = [
+		`curl -X POST "${origin}/api/v1/upload?title=My%20file" \\`,
+		`  -H "Authorization: Bearer ${tok}" \\`,
+		`  -H "X-Filename: report.pdf" \\`,
+		`  --data-binary @report.pdf`,
+	].join('\n');
+
+	const resumable = [
+		'# 1. Create a share, capture its id + editToken',
+		`RESP=$(curl -s -X POST "${origin}/api/v1/shares" \\`,
+		`  -H "Authorization: Bearer ${tok}" \\`,
+		`  -H "Content-Type: application/json" \\`,
+		`  -d '{"title":"Big upload"}')`,
+		'ID=$(echo "$RESP" | jq -r .id); ET=$(echo "$RESP" | jq -r .editToken)',
+		'',
+		'# 2. Register the file (declare its name + size)',
+		`curl -X POST "${origin}/api/shares/$ID/files" \\`,
+		'  -H "X-Edit-Token: $ET" -H "Content-Type: application/json" \\',
+		'  -d \'{"name":"big.iso","size":1073741824,"mime":"application/octet-stream"}\'',
+		'',
+		'# 3. PATCH each chunk at its byte offset, then finalize',
+		`curl -X PATCH "${origin}/api/shares/$ID/files/$FILE_ID?offset=0" \\`,
+		'  -H "X-Edit-Token: $ET" --data-binary @chunk0',
+		`curl -X POST "${origin}/api/shares/$ID/finalize" -H "X-Edit-Token: $ET"`,
+	].join('\n');
+
+	const limitsPanel = el('div', { class: 'rl-card rl-stack' },
+		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'This instance'),
+		el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' }, panelSpinner()),
+	);
+	(async () => {
+		const host = limitsPanel.lastChild;
+		try {
+			const c = await api.get('/api/config');
+			host.replaceChildren(
+				infoRow('Base URL', c.baseUrl || origin),
+				infoRow('Max file size', formatBytes(c.maxFileSize)),
+				infoRow('Max share size', formatBytes(c.maxShareSize)),
+				infoRow('Upload chunk size', formatBytes(c.chunkSize)),
+				infoRow('Default expiry', c.defaultExpiry ? timeUntil(Math.floor(Date.now() / 1000) + c.defaultExpiry) : 'Never'),
+			);
+		} catch {
+			host.replaceChildren(el('p', { class: 'rl-dim' }, 'Could not load server limits.'));
+		}
+	})();
+
+	view.replaceChildren(
+		viewHead('API docs', 'Programmatic upload API for other servers and scripts.', el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { location.hash = '#/apikeys'; } }, 'Manage keys')),
+
+		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Authentication'),
+			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Create a key in the API keys tab, then send it as a bearer token on every request. Either header works:'),
+			docCode('Authorization: Bearer rsk_<id>_<secret>\nX-Api-Key: rsk_<id>_<secret>'),
+			el('p', { class: 'rl-help' }, 'A key is shown in full only once, at creation. Missing, invalid, revoked, or expired keys get a 401.'),
+		),
+
+		limitsPanel,
+
+		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Endpoints'),
+			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+				endpointCard('GET', '/api/v1/me', 'Verify a key and read its name and usage. Handy as a health check.'),
+				endpointCard('POST', '/api/v1/upload', 'One-shot upload: the request body IS the file. Returns a finished share. Bounded by the server max request body size.',
+					el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' },
+						paramList([
+							['X-Filename', 'header (or ?filename=) - required, the file name'],
+							['?title ?slug ?password', 'optional share options (query params)'],
+							['?expiresIn ?maxDownloads ?oneTime ?mime', 'optional share options (query params)'],
+						]),
+						el('p', { class: 'rl-help' }, 'Returns { id, url, fileId, name, size }.'),
+					),
+				),
+				endpointCard('POST', '/api/v1/shares', 'Create a share for the resumable flow and get back an editToken plus this key\'s effective caps. Use for large files.',
+					el('p', { class: 'rl-help' }, 'Body (JSON, all optional): title, slug, password, expiresIn, maxDownloads, oneTime. Returns { id, editToken, url, chunkSize, maxFileSize, maxShareSize }.')),
+				endpointCard('POST', '/api/shares/:id/files', 'Register a file on the share (declare name, size, mime). Auth: X-Edit-Token header.'),
+				endpointCard('PATCH', '/api/shares/:id/files/:fileId?offset=N', 'Upload one chunk of raw bytes at byte offset N. Resume from the server-reported offset after an interruption.'),
+				endpointCard('POST', '/api/shares/:id/finalize', 'Mark the share complete once every file is fully uploaded.'),
+			),
+		),
+
+		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Example: one-shot upload'),
+			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Send a whole file in a single request and get back a share URL.'),
+			docCode(oneShot),
+		),
+
+		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Example: resumable upload'),
+			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'For large files: create a share, then register, chunk, and finalize.'),
+			docCode(resumable),
+		),
+
+		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Limits & scopes'),
+			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Each key can be restricted below the instance limits in the API keys tab:'),
+			paramList([
+				['Max file size / share size', 'per-file and per-share byte caps, clamped to the server limits'],
+				['Max total shares', 'a lifetime cap on how many shares the key can create'],
+				['Max share lifetime', 'forces every share from the key to expire within a window'],
+				['Allow custom links / passwords', 'toggles whether the key may set slugs or share passwords'],
+			]),
+			el('p', { class: 'rl-help' }, 'A request that exceeds a cap or uses a disallowed scope gets a 403 (scope/limit) or 413 (size).'),
+		),
+	);
 }
 
 // ===========================================================================

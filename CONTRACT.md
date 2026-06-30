@@ -135,16 +135,25 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 API keys let other servers/scripts upload without a browser session. A key is a
 bearer token `rsk_<id>_<secret>`; only `sha256(secret)` is stored (`src/lib/apikeys.js`).
 The `id` is the public lookup key and the recognizable prefix.
-- `GET /api/admin/api-keys` (admin) -> `{ keys: [{ id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt, uploadCount, bytesUploaded, liveShares }] }`.
-- `POST /api/admin/api-keys` (admin) body `{ name, expiresIn? (sec, 0/omit=never) }` -> `201 { id, name, token, prefix, expiresAt }`. `token` is the FULL key and is returned ONCE.
-- `GET /api/admin/api-keys/:id` (admin) -> the key plus `shares: [{ id, title, createdAt, deleted, totalSize }]` (last ~20 it created).
-- `POST /api/admin/api-keys/:id/revoke` (admin) -> `{ ok: true }` (sets `revoked_at`; reversible only by reissuing).
+Each key carries optional limits/scopes (`limits` object, all optional):
+`maxFileSize`/`maxShareSize` (bytes, clamped to the server maxima, 0/blank=inherit),
+`maxShares` (lifetime share cap, null=unlimited), `maxExpiry` (seconds; forces every
+share from the key to expire within this window), `allowSlug`/`allowPassword` (bool,
+default true). Enforced at share creation and file registration.
+- `GET /api/admin/api-keys` (admin) -> `{ keys: [{ id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt, uploadCount, bytesUploaded, liveShares, limits }] }`.
+- `POST /api/admin/api-keys` (admin) body `{ name, expiresIn? (sec, 0/omit=never), limits? }` -> `201 { id, name, token, prefix, expiresAt }`. `token` is the FULL key and is returned ONCE.
+- `PATCH /api/admin/api-keys/:id` (admin) body `{ name, limits }` -> `{ ok: true }`. Edits the name and the full limits/scopes set (does not touch the secret or expiry).
+- `GET /api/admin/api-keys/:id` (admin) -> the key (incl `limits`) plus `shares: [{ id, title, createdAt, deleted, totalSize }]` (last ~20 it created).
+- `POST /api/admin/api-keys/:id/revoke` (admin) -> `{ ok: true }` (sets `revoked_at`).
+- `POST /api/admin/api-keys/:id/reinstate` (admin) -> `{ ok: true }` (clears `revoked_at`; a key past its expiry stays inactive until extended).
 - `DELETE /api/admin/api-keys/:id` (admin) -> hard delete the key row. `{ ok: true }` (shares it created are untouched).
 
 ### Programmatic API (`/api/v1`, `src/routes/api.js`)
 Auth: `Authorization: Bearer rsk_...` or `X-Api-Key: rsk_...`. `401` when missing/invalid/revoked/expired.
 Shares created here are attributed via `shares.api_key_id` and count toward the
-key's `uploadCount`/`bytesUploaded`. Same per-file/per-share/total caps as the portal.
+key's `uploadCount`/`bytesUploaded`. The key's own limits/scopes apply on top of the
+server caps: exceeding a byte cap is `413`; hitting the share cap, or using a disallowed
+slug/password scope, is `403`; the key's `maxExpiry` clamps the share's expiry.
 - `GET /api/v1/me` -> `{ id, name, createdAt, lastUsedAt, expiresAt, uploadCount, bytesUploaded }`. Cheap key check.
 - `POST /api/v1/shares` body `{ title?, slug?, password?, expiresIn?, maxDownloads?, oneTime? }`
   -> `201 { id, editToken, url, chunkSize, maxFileSize, maxShareSize }`. Then drive the standard
