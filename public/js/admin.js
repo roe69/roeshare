@@ -364,6 +364,32 @@ function renderShares() {
 		loadShares();
 	});
 
+	// Filter by the API key that created the shares. Populated from the keys list;
+	// reflects (and can clear) any filter arrived at via a key's "View all".
+	const keySelect = el('select', { class: 'rl-select', style: 'max-width:220px' }, el('option', { value: '' }, 'All API keys'));
+	keySelect.addEventListener('change', () => {
+		state.apiKey = keySelect.value || null;
+		state.apiKeyName = keySelect.value ? keySelect.options[keySelect.selectedIndex].textContent : null;
+		loadShares();
+	});
+	(async () => {
+		try {
+			const { keys } = await api.get('/api/admin/api-keys');
+			const opts = [el('option', { value: '' }, 'All API keys')];
+			let present = false;
+			for (const k of keys || []) {
+				opts.push(el('option', { value: k.id }, k.name));
+				if (k.id === state.apiKey) present = true;
+			}
+			// Keep showing a filter whose key was since deleted, so it is not lost silently.
+			if (state.apiKey && !present) opts.push(el('option', { value: state.apiKey }, state.apiKeyName || state.apiKey));
+			keySelect.replaceChildren(...opts);
+			keySelect.value = state.apiKey || '';
+		} catch {
+			/* leave the default single option */
+		}
+	})();
+
 	const bulkBtn = el('button', {
 		id: 'bulk-delete', class: 'rl-btn rl-btn-danger', disabled: true,
 		onclick: bulkDelete,
@@ -372,6 +398,7 @@ function renderShares() {
 	const toolbar = el('div', { class: 'rl-toolbar', style: 'margin-bottom:var(--rl-space-4)' },
 		searchInput,
 		sortSelect,
+		keySelect,
 		el('span', { class: 'rl-spacer' }),
 		bulkBtn,
 	);
@@ -406,23 +433,9 @@ function renderShares() {
 		),
 	);
 
-	// When scoped to one API key, show a removable filter chip above the table.
-	let filterChip = false;
-	if (state.apiKey) {
-		filterChip = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2);align-items:center;margin-bottom:var(--rl-space-3)' },
-			el('span', { class: 'rl-muted', style: 'font-size:var(--rl-text-sm)' }, 'Filtered to API key'),
-			el('span', { class: 'rl-badge rl-badge-gold' }, state.apiKeyName || state.apiKey),
-			el('button', {
-				class: 'rl-btn rl-btn-secondary rl-btn-sm',
-				onclick: () => { state.apiKey = null; state.apiKeyName = null; renderShares(); },
-			}, 'Clear filter'),
-		);
-	}
-
 	view.replaceChildren(
-		viewHead('Shares', state.apiKey ? 'Shares created by this API key.' : 'Browse, edit, and delete every share on this instance.'),
+		viewHead('Shares', 'Browse, edit, and delete shares. Filter by the API key that created them.'),
 		toolbar,
-		filterChip,
 		el('div', { class: 'rl-card', style: 'padding:0;overflow:hidden' }, table),
 	);
 
@@ -834,7 +847,8 @@ function byteField(initialBytes) {
 
 // Build the limits/scopes form, seeded from a key's current limits. Returns the
 // node plus collect(), which yields the camelCase object the API expects.
-function scopeControls(initial = {}) {
+// opts.single forces a one-column layout (for narrow contexts like the modal).
+function scopeControls(initial = {}, opts = {}) {
 	const fileCap = byteField(initial.maxFileSize);
 	const shareCap = byteField(initial.maxShareSize);
 	const maxShares = el('input', { class: 'rl-input', type: 'number', min: 1, step: 1, value: initial.maxShares || '', placeholder: 'Unlimited' });
@@ -854,13 +868,16 @@ function scopeControls(initial = {}) {
 	const allowPassword = el('input', { type: 'checkbox' });
 	allowPassword.checked = initial.allowPassword !== false;
 
+	const fields = [
+		editField('Max file size', fileCap.node, 'Per file. Blank uses the server limit.'),
+		editField('Max share size', shareCap.node, 'Per share. Blank uses the server limit.'),
+		editField('Max total shares', maxShares, 'Lifetime cap on shares this key can create.'),
+		editField('Max share lifetime', lifetime, 'Forces shares from this key to expire within this window.'),
+	];
 	const node = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
-		el('div', { class: 'rl-optgrid' },
-			editField('Max file size', fileCap.node, 'Per file. Blank uses the server limit.'),
-			editField('Max share size', shareCap.node, 'Per share. Blank uses the server limit.'),
-			editField('Max total shares', maxShares, 'Lifetime cap on shares this key can create.'),
-			editField('Max share lifetime', lifetime, 'Forces shares from this key to expire within this window.'),
-		),
+		opts.single
+			? el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' }, ...fields)
+			: el('div', { class: 'rl-optgrid' }, ...fields),
 		el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' },
 			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, allowSlug, el('span', {}, 'Allow custom share links (slugs)')),
 			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, allowPassword, el('span', {}, 'Allow setting share passwords')),
@@ -1158,28 +1175,46 @@ function confirmDeleteKey(k, onDone) {
 async function openKeyDetail(id) {
 	const bodyHost = el('div', { class: 'rl-center', style: 'padding:var(--rl-space-6)' }, el('span', { class: 'rl-spinner' }));
 	const modal = openModal({ title: 'API key', body: bodyHost });
+
+	// A light section label (small uppercase), much calmer than an <h2>.
+	const sec = t => el('span', { class: 'rl-eyebrow' }, t);
+
 	try {
 		const k = await api.get(`/api/admin/api-keys/${encodeURIComponent(id)}`);
 		const st = keyStatus(k);
-
-		// Recent shares this key created.
-		const sharesHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
 		const shares = k.shares || [];
-		if (!shares.length) sharesHost.append(el('p', { class: 'rl-dim' }, 'No shares created with this key yet.'));
-		else for (const s of shares) {
-			sharesHost.append(el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);font-size:var(--rl-text-sm)' },
-				el('a', {
-					href: `${location.origin}/${s.id}`, target: '_blank', rel: 'noopener',
-					class: 'rl-truncate', style: 'color:var(--rl-primary);text-decoration:none',
-				}, s.title || s.id),
-				el('span', { class: 'rl-dim', style: 'flex-shrink:0;font-size:var(--rl-text-xs)' },
-					`${formatBytes(s.totalSize)}${s.deleted ? ' - deleted' : ''}`),
-			));
-		}
 
-		// Editable name + limits/scopes.
+		// Header: name + status, and a click-to-copy key id.
+		const header = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
+			el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center' },
+				el('strong', { style: 'font-size:var(--rl-text-lg)' }, k.name),
+				el('span', { class: `rl-badge ${st.cls}` }, st.label),
+			),
+			el('button', {
+				class: 'rl-mono', title: 'Copy key id',
+				style: 'background:transparent;border:0;padding:0;text-align:left;cursor:pointer;font-size:var(--rl-text-xs);color:var(--rl-primary)',
+				onclick: () => copyText(k.prefix),
+			}, `${k.prefix}_...`),
+		);
+
+		const stats = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
+			infoRow('Created', formatDate(k.createdAt)),
+			infoRow('Last used', k.lastUsedAt ? formatDate(k.lastUsedAt) : 'Never'),
+			infoRow('Expires', k.expiresAt ? `${formatDate(k.expiresAt)} (${timeUntil(k.expiresAt)})` : 'Never'),
+			infoRow('Shares created', String(k.uploadCount ?? 0)),
+			infoRow('Data uploaded', formatBytes(k.bytesUploaded ?? 0)),
+		);
+
+		// Limits shown as a read-only summary; editing is opt-in (collapsed below).
+		const summary = limitsSummary(k.limits || {});
+		const limitsLine = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-1);align-items:center' },
+			...(summary.length
+				? summary.map(b => el('span', { class: 'rl-badge rl-badge-neutral' }, b))
+				: [el('span', { class: 'rl-dim', style: 'font-size:var(--rl-text-sm)' }, 'No extra restrictions - uses the server defaults.')]),
+		);
+
 		const nameInput = el('input', { class: 'rl-input', type: 'text', value: k.name, maxlength: 100 });
-		const scopes = scopeControls(k.limits || {});
+		const scopes = scopeControls(k.limits || {}, { single: true });
 		const saveBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Save changes');
 		saveBtn.addEventListener('click', async () => {
 			const name = nameInput.value.trim();
@@ -1195,8 +1230,25 @@ async function openKeyDetail(id) {
 				toastErr(err);
 			}
 		});
+		const editDetails = el('details', {},
+			el('summary', { style: 'cursor:pointer;color:var(--rl-muted);font-size:var(--rl-text-sm);user-select:none' }, 'Edit name, limits & scopes'),
+			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3);margin-top:var(--rl-space-3)' },
+				editField('Name', nameInput),
+				scopes.node,
+				el('div', { class: 'rl-row', style: 'justify-content:flex-end' }, saveBtn),
+			),
+		);
 
-		// Lifecycle actions adapt to the key's state.
+		// Recent shares (a few), with a jump to the filtered Shares view.
+		const sharesHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
+		if (!shares.length) sharesHost.append(el('p', { class: 'rl-dim', style: 'font-size:var(--rl-text-sm)' }, 'No shares created with this key yet.'));
+		else for (const s of shares.slice(0, 5)) {
+			sharesHost.append(el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);font-size:var(--rl-text-sm)' },
+				el('a', { href: `${location.origin}/${s.id}`, target: '_blank', rel: 'noopener', class: 'rl-truncate', style: 'color:var(--rl-primary);text-decoration:none' }, s.title || s.id),
+				el('span', { class: 'rl-dim', style: 'flex-shrink:0;font-size:var(--rl-text-xs)' }, `${formatBytes(s.totalSize)}${s.deleted ? ' - deleted' : ''}`),
+			));
+		}
+
 		const lifecycle = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' },
 			k.revokedAt
 				? el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); confirmReinstate(k); } }, 'Reinstate')
@@ -1204,35 +1256,24 @@ async function openKeyDetail(id) {
 			el('button', { class: 'rl-btn rl-btn-danger rl-btn-sm', onclick: () => confirmDeleteKey(k, () => modal.close()) }, 'Delete'),
 		);
 
+		// Left-aligned content (drop the spinner host's rl-center, which was
+		// centering the whole form).
+		bodyHost.className = 'rl-stack';
+		bodyHost.style.cssText = 'gap:var(--rl-space-4)';
 		bodyHost.replaceChildren(
-			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1);margin-bottom:var(--rl-space-4)' },
-				el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center' },
-					el('strong', {}, k.name),
-					el('span', { class: `rl-badge ${st.cls}` }, st.label),
-				),
-				el('div', { class: 'rl-mono rl-dim', style: 'font-size:var(--rl-text-xs)' }, `${k.prefix}_...`),
-			),
-			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1);margin-bottom:var(--rl-space-4)' },
-				infoRow('Created', formatDate(k.createdAt)),
-				infoRow('Last used', k.lastUsedAt ? formatDate(k.lastUsedAt) : 'Never'),
-				infoRow('Expires', k.expiresAt ? `${formatDate(k.expiresAt)} (${timeUntil(k.expiresAt)})` : 'Never'),
-				infoRow('Shares created', String(k.uploadCount ?? 0)),
-				infoRow('Data uploaded', formatBytes(k.bytesUploaded ?? 0)),
-			),
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Limits & scopes'),
-			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
-				editField('Name', nameInput),
-				scopes.node,
-				el('div', { class: 'rl-row', style: 'justify-content:flex-end' }, saveBtn),
-			),
-			el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center;margin-top:var(--rl-space-6)' },
-				el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, `Recent shares (${shares.length})`),
+			header,
+			stats,
+			sec('Limits & scopes'),
+			limitsLine,
+			editDetails,
+			el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center' },
+				sec('Recent shares'),
 				k.uploadCount > 0
 					? el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); showSharesForKey(k.id, k.name); } }, 'View all in Shares')
 					: false,
 			),
 			sharesHost,
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-6)' }, 'Lifecycle'),
+			sec('Lifecycle'),
 			lifecycle,
 		);
 	} catch (err) {
