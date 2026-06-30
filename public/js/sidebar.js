@@ -35,6 +35,21 @@ function svgIcon(key, cls) {
 
 const COLLAPSE_KEY = 'roeshare_side_collapsed';
 
+// Shares this browser owns are tracked by the edit tokens saved at upload time
+// (same prefix as myshares.js). The "My shares" nav item is only shown when at
+// least one exists, so a fresh visitor is not pointed at an empty page.
+const EDIT_PREFIX = 'roeshare:edit:';
+function hasOwnedShares() {
+	try {
+		for (let i = 0; i < localStorage.length; i++) {
+			if (localStorage.key(i)?.startsWith(EDIT_PREFIX)) return true;
+		}
+	} catch {
+		/* localStorage unavailable: treat as none */
+	}
+	return false;
+}
+
 // Brand HTML (colour spans rendered from APP_NAME's <col=> tags, server-side) is
 // templated into <template id="rl-brand"> on every page, so the wordmark renders
 // without an extra request.
@@ -74,8 +89,12 @@ function navItem(item, activeId) {
 export function mountSidebar({ active, groups, account, quickLink } = {}) {
 	const share = { label: 'Share', items: [
 		{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
-		{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
 	] };
+	// Only surface "My shares" when this browser actually has shares to manage
+	// (or we are already on that page), so it never leads to an empty list.
+	if (active === 'mine' || hasOwnedShares()) {
+		share.items.push({ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' });
+	}
 	if (quickLink) share.items.push({ id: 'quicklink', label: 'Quick link', icon: 'link', hidden: true, onClick: quickLink });
 	// Share first, always; then the page's groups (or a lone Admin link).
 	const allGroups = [share, ...(groups && groups.length ? groups : [{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' }] }])];

@@ -465,11 +465,11 @@ function renderRow(s) {
 
 	const actions = el('div', { class: 'rl-row', style: 'gap:var(--rl-space-1);justify-content:flex-end' },
 		el('button', {
-			class: 'rl-btn rl-btn-ghost rl-btn-sm', title: 'Copy link',
+			class: 'rl-btn rl-btn-secondary rl-btn-sm', title: 'Copy link',
 			onclick: e => { e.stopPropagation(); copyText(shareUrl(s.id)); },
 		}, 'Copy'),
 		el('a', {
-			class: 'rl-btn rl-btn-ghost rl-btn-sm', href: shareUrl(s.id), target: '_blank', rel: 'noopener',
+			class: 'rl-btn rl-btn-secondary rl-btn-sm', href: shareUrl(s.id), target: '_blank', rel: 'noopener',
 			onclick: e => e.stopPropagation(),
 		}, 'Open'),
 		el('button', {
@@ -602,7 +602,7 @@ function renderDetail(modal, d, id) {
 		el('div', { class: 'rl-row', style: 'justify-content:space-between' },
 			el('strong', {}, d.title || id),
 			el('a', {
-				class: 'rl-btn rl-btn-ghost rl-btn-sm', href: shareUrl(id), target: '_blank', rel: 'noopener',
+				class: 'rl-btn rl-btn-secondary rl-btn-sm', href: shareUrl(id), target: '_blank', rel: 'noopener',
 			}, 'Open'),
 		),
 		el('div', { class: 'rl-mono rl-dim', style: 'font-size:var(--rl-text-xs)' }, id),
@@ -975,7 +975,7 @@ function keyRow(k) {
 
 	const actions = el('div', { class: 'rl-row', style: 'gap:var(--rl-space-1);justify-content:flex-end' },
 		st.active ? el('button', {
-			class: 'rl-btn rl-btn-ghost rl-btn-sm',
+			class: 'rl-btn rl-btn-secondary rl-btn-sm',
 			onclick: e => { e.stopPropagation(); confirmRevoke(k); },
 		}, 'Revoke') : false,
 		k.revokedAt ? el('button', {
@@ -1162,7 +1162,7 @@ async function openKeyDetail(id) {
 		const lifecycle = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' },
 			k.revokedAt
 				? el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); confirmReinstate(k); } }, 'Reinstate')
-				: el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => { modal.close(); confirmRevoke(k); } }, 'Revoke'),
+				: el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); confirmRevoke(k); } }, 'Revoke'),
 			el('button', { class: 'rl-btn rl-btn-danger rl-btn-sm', onclick: () => confirmDeleteKey(k, () => modal.close()) }, 'Delete'),
 		);
 
