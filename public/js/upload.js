@@ -5,21 +5,9 @@ import { el, $, api, ApiError, toast, toastOk, toastErr, copyText, formatBytes, 
 import { generateKey, encryptBytes, encryptString, ENC_OVERHEAD } from '/js/e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
 
-// The rail with a hidden "Copy quick link" item that wireQuickLink() reveals
-// when an upload password is configured.
-const sidebar = mountSidebar({
-	active: 'upload',
-	groups: [
-		{ label: 'Share', items: [
-			{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
-			{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
-			{ id: 'quicklink', label: 'Copy quick link', icon: 'link', hidden: true, onClick: copyQuickLink },
-		] },
-		{ items: [
-			{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' },
-		] },
-	],
-});
+// The shared rail. quickLink adds a hidden "Quick link" item to the Share group
+// that wireQuickLink() reveals when an upload password is configured.
+const sidebar = mountSidebar({ active: 'upload', quickLink: copyQuickLink });
 
 async function copyQuickLink() {
 	try {

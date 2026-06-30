@@ -53,36 +53,33 @@ function navItem(item, activeId) {
 	return btn;
 }
 
-// Share is always the first group on every page so Upload / My shares never
-// move when navigating between the dashboard and the site pages.
-function defaultGroups() {
-	return [
-		{ label: 'Share', items: [
-			{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
-			{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
-		] },
-		{ items: [
-			{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' },
-		] },
-	];
-}
-
 /**
- * Build and mount the rail. Returns helpers for the page to drive it.
+ * Build and mount the rail. The "Share" group (Upload / My shares) is ALWAYS
+ * rendered first on every page, so those items never move; pages can only add
+ * groups BELOW it. Returns helpers for the page to drive it.
  *
  * opts:
- *   active   - id of the current nav item (for highlight)
- *   groups   - nav groups; defaults to the site links. Each group:
- *              { label?, items: [{ id, label, icon, href } | { id, label, icon, onClick }, ...] }
- *   account  - { name, onLogout } to render the footer account row (admin only)
+ *   active    - id of the current nav item (for highlight)
+ *   groups    - extra nav groups rendered below Share. Each group:
+ *               { label?, items: [{ id, label, icon, href } | { id, label, icon, onClick }, ...] }
+ *               With none, a single Admin link is shown.
+ *   account   - { name, onLogout } to render the footer account row (admin only)
+ *   quickLink - onClick handler; adds a hidden "Quick link" item to the Share
+ *               group that the caller reveals via node('quicklink')
  *
  * returns { node(id), setActive(id) }
  */
-export function mountSidebar({ active, groups, account } = {}) {
-	const useGroups = groups && groups.length ? groups : defaultGroups();
+export function mountSidebar({ active, groups, account, quickLink } = {}) {
+	const share = { label: 'Share', items: [
+		{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
+		{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
+	] };
+	if (quickLink) share.items.push({ id: 'quicklink', label: 'Quick link', icon: 'link', hidden: true, onClick: quickLink });
+	// Share first, always; then the page's groups (or a lone Admin link).
+	const allGroups = [share, ...(groups && groups.length ? groups : [{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin' }] }])];
 
 	const nav = el('nav', { class: 'rl-side-nav', 'aria-label': 'Navigation' });
-	for (const group of useGroups) {
+	for (const group of allGroups) {
 		if (group.label) nav.append(el('span', { class: 'rl-side-group' }, group.label));
 		for (const item of group.items) nav.append(navItem(item, active));
 	}

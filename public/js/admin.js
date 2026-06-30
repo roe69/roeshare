@@ -92,14 +92,10 @@ async function logout() {
 function boot() {
 	// The shared rail, with the dashboard sections on top and an account footer.
 	const go = id => () => { location.hash = `#/${id}`; };
+	// Share is rendered first automatically; we just add the Admin section below.
 	sidebar = mountSidebar({
 		active: currentView(),
 		groups: [
-			// Share stays the top group, matching the site pages, so these never move.
-			{ label: 'Share', items: [
-				{ id: 'upload', label: 'Upload', icon: 'upload', href: '/' },
-				{ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' },
-			] },
 			{ label: 'Admin', items: [
 				{ id: 'overview', label: 'Overview', icon: 'overview', onClick: go('overview') },
 				{ id: 'shares', label: 'Shares', icon: 'shares', onClick: go('shares') },
