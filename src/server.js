@@ -3,6 +3,7 @@
 
 import './lib/logbuffer.js'; // first, so console capture covers the earliest boot logs
 import { join, normalize, sep } from 'node:path';
+import { statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { config } from './config.js';
 import { db, now } from './db.js';
@@ -37,28 +38,34 @@ const STATIC_TYPES = {
 };
 
 // In-memory static cache: each asset is read once, hashed for an ETag, and its
-// brotli/gzip variants are computed lazily and kept. Repeat requests serve from
-// RAM with conditional (304) support and no disk or re-compression cost.
-// (Editing files under public/ requires a restart to take effect.)
+// brotli/gzip variants are computed lazily and kept. The entry is re-read when
+// the file's mtime changes, so editing or re-pulling a file under public/ takes
+// effect WITHOUT a server restart (no more stale assets from a long-lived cache).
 const staticCache = new Map();
 
 async function staticEntry(full, type) {
-	let e = staticCache.get(full);
-	if (e) return e;
+	let mtime = 0;
+	try { mtime = statSync(full).mtimeMs; } catch { /* fall through to a fresh read */ }
+	const cached = staticCache.get(full);
+	if (cached && cached.mtime === mtime) return cached;
+
 	const identity = Buffer.from(await Bun.file(full).arrayBuffer());
 	const etag = '"' + createHash('sha1').update(identity).digest('base64url').slice(0, 20) + '"';
-	// `no-cache` = the browser may cache but MUST revalidate against the ETag on
-	// every request, so a deploy's new CSS/JS is picked up immediately (unchanged
-	// assets just get a tiny 304). Assets are not fingerprinted, so a positive
-	// max-age would serve stale files - e.g. an old app.css missing new classes -
-	// for the whole TTL after a deploy.
-	e = { type, etag, identity, enc: {}, cacheControl: 'no-cache' };
+	// JS/CSS are served `no-store`: never cached by the browser, so an ES module
+	// can never load a fresh file next to a stale import (the bug behind "I have
+	// to hard-refresh"). Other assets (images, fonts) use `no-cache` - cacheable
+	// but revalidated via the ETag, with cheap 304s when unchanged.
+	const ext = full.slice(full.lastIndexOf('.'));
+	const cacheControl = ext === '.js' || ext === '.mjs' || ext === '.css' ? 'no-store' : 'no-cache';
+	const e = { type, etag, identity, enc: {}, mtime, cacheControl };
 	staticCache.set(full, e);
 	return e;
 }
 
 function staticResponse(req, e) {
-	if (req.headers.get('if-none-match') === e.etag) {
+	// Only the revalidated (no-cache) assets take part in 304s; no-store assets
+	// are never cached, so the browser never conditionally requests them.
+	if (e.cacheControl === 'no-cache' && req.headers.get('if-none-match') === e.etag) {
 		return new Response(null, { status: 304, headers: { ETag: e.etag, 'Cache-Control': e.cacheControl } });
 	}
 	const headers = { 'Content-Type': e.type, ETag: e.etag, 'Cache-Control': e.cacheControl, ...SECURITY_HEADERS };

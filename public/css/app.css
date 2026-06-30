@@ -1270,13 +1270,15 @@ body {
 	border-top: var(--rl-border-thin) solid var(--rl-border);
 }
 
+/* Same inset, gap and icon size as a nav row, so the user icon lines up exactly
+   with the nav icons above and the collapse icon below. */
 .rl-side-account {
 	display: flex;
 	align-items: center;
 	gap: var(--rl-space-2);
-	height: 38px;
+	height: 34px;
 	margin: var(--rl-space-1) var(--rl-space-2) 0;
-	padding: 0 var(--rl-space-2);
+	padding: 0 var(--rl-space-3);
 	border-radius: var(--rl-radius-sm);
 	min-width: 0;
 }
@@ -1284,16 +1286,14 @@ body {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 26px;
-	height: 26px;
+	width: 18px;
+	height: 18px;
 	flex-shrink: 0;
-	border-radius: var(--rl-radius-sm);
-	background: rgba(255, 255, 255, 0.05);
 	color: var(--rl-text-muted);
 }
 .rl-side-user svg {
-	width: 17px;
-	height: 17px;
+	width: 18px;
+	height: 18px;
 }
 .rl-side-who {
 	flex: 1;
