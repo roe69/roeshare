@@ -1,8 +1,11 @@
-// Admin login gate. This is the ONLY admin script served to an unauthenticated
+// Admin login page (/login). The ONLY admin script served to an unauthenticated
 // visitor; it holds no dashboard markup or logic. On success the cookie is set
-// and we reload /admin, which the server then answers with the real dashboard.
+// and we go to /admin, which the server then answers with the real dashboard.
 
 import { $, api, ApiError, toastErr } from '/js/shared.js';
+import { mountSidebar } from '/js/sidebar.js';
+
+mountSidebar({ active: 'admin' });
 
 const form = $('#login-form');
 const input = $('#login-password');

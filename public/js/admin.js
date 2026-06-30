@@ -84,21 +84,12 @@ async function logout() {
 	} catch (err) {
 		toastErr(err);
 	}
-	location.href = '/admin';
+	location.href = '/login';
 }
 
 // ---- Boot ------------------------------------------------------------------
 
-async function boot() {
-	// The server already gated this page, but the cookie could have lapsed
-	// between the page load and now; bounce to the login page if so.
-	try {
-		const me = await api.get('/api/admin/me');
-		if (!me || !me.admin) { location.href = '/admin'; return; }
-	} catch {
-		/* network hiccup: fall through and let the views surface the error */
-	}
-
+function boot() {
 	// The shared rail, with the dashboard sections on top and an account footer.
 	const go = id => () => { location.hash = `#/${id}`; };
 	sidebar = mountSidebar({
@@ -119,7 +110,11 @@ async function boot() {
 	});
 
 	window.addEventListener('hashchange', navigate);
+	// Render the current view immediately (no spinner while we wait on the
+	// network); the server already gated this page. Then confirm the session in
+	// the background and bounce to /login only if the cookie has since lapsed.
 	navigate();
+	api.get('/api/admin/me').then(me => { if (!me || !me.admin) location.href = '/login'; }).catch(() => {});
 }
 
 // ===========================================================================

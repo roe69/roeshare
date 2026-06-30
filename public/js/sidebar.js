@@ -127,6 +127,10 @@ export function mountSidebar({ active, groups, account } = {}) {
 		try { localStorage.setItem(COLLAPSE_KEY, mini ? '1' : '0'); } catch {}
 	});
 
+	// Enable transitions only after the initial (possibly collapsed) layout has
+	// painted, so navigating between pages never animates the rail on arrival.
+	requestAnimationFrame(() => document.body.classList.add('rl-side-ready'));
+
 	// ---- Mobile drawer ------------------------------------------------------
 	const closeDrawer = () => document.body.classList.remove('rl-side-open');
 	toggle.addEventListener('click', () => document.body.classList.add('rl-side-open'));

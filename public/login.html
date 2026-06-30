@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1">
-	<title>Admin - {{APP_TITLE}}</title>
+	<title>Admin login - {{APP_TITLE}}</title>
 	<link rel="icon" href="/favicon.ico" sizes="any">
 	<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
 	<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
@@ -11,16 +11,10 @@
 	<meta name="theme-color" content="#ff9f09">
 	<link rel="stylesheet" href="/css/app.css">
 </head>
-<body>
+<body class="rl-side-on">
 	<div class="rl-aurora"></div>
+	<template id="rl-brand">{{APP_NAME}}</template>
 	<div class="rl-app">
-		<header class="rl-header">
-			<a class="rl-wordmark" href="/"><img class="rl-wordmark-logo" src="/favicon-32x32.png" alt="" width="24" height="24" /><span>{{APP_NAME}}</span></a>
-			<nav class="rl-nav">
-				<a class="rl-navlink" href="/">Upload</a>
-				<a class="rl-navlink" href="/mine">My shares</a>
-			</nav>
-		</header>
 		<main class="rl-container">
 			<div style="max-width:380px;margin:var(--rl-space-12) auto 0">
 				<form id="login-form" class="rl-card rl-stack">
@@ -37,6 +31,6 @@
 			</div>
 		</main>
 	</div>
-	<script type="module" src="/js/admin-login.js"></script>
+	<script type="module" src="/js/login.js"></script>
 </body>
 </html>

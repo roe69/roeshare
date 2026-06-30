@@ -79,11 +79,16 @@ export default function pages(router) {
 	});
 	router.get('/s/:id', () => servePage('view.html'));
 	router.get('/mine', () => servePage('myshares.html'));
-	// The dashboard shell (and its code) is served only to an authenticated
-	// admin; everyone else gets the login-only page, so the management markup
-	// never leaves the server unauthorized. The matching /js/admin.js is gated
-	// the same way in the static handler.
-	router.get('/admin', ({ req }) => servePage(isAdmin(req) ? 'admin.html' : 'admin-login.html', { 'Cache-Control': 'no-store' }));
+
+	// Admin auth is an explicit two-route flow:
+	//   /login - the password form (always available, ungated).
+	//   /admin - the dashboard, only for an authenticated admin; anyone else is
+	//            redirected to /login (never served the dashboard shell). The
+	//            matching /js/admin.js is gated the same way in the static handler,
+	//            so the management markup/code never leaves the server unauthorized.
+	const redirect = to => new Response(null, { status: 302, headers: { Location: to, 'Cache-Control': 'no-store' } });
+	router.get('/login', ({ req }) => (isAdmin(req) ? redirect('/admin') : servePage('login.html', { 'Cache-Control': 'no-store' })));
+	router.get('/admin', ({ req }) => (isAdmin(req) ? servePage('admin.html', { 'Cache-Control': 'no-store' }) : redirect('/login')));
 
 	// The web app manifest is templated too, so the PWA/install name follows
 	// APP_TITLE. Registered as a route (runs before the static handler) so the

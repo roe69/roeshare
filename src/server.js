@@ -82,7 +82,7 @@ async function serveStatic(req, pathname) {
 	// unauthorized visitor gets a 404 for it, so the source never leaks.
 	if (pathname === '/js/upload.js' && !hasUploadAccess(req)) return null;
 	// Likewise, the admin dashboard's code is served only to a logged-in admin.
-	// The login page uses the separate, ungated /js/admin-login.js instead.
+	// The /login page uses the separate, ungated /js/login.js instead.
 	if (pathname === '/js/admin.js' && !isAdmin(req)) return null;
 	const rel = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
 	const full = join(PUBLIC_DIR, rel);

@@ -90,9 +90,6 @@ body {
 	margin: 0 auto;
 	padding: var(--rl-space-5) var(--rl-space-5) var(--rl-space-10);
 }
-.rl-container-wide {
-	max-width: 1400px;
-}
 .rl-stack {
 	display: flex;
 	flex-direction: column;
@@ -129,74 +126,6 @@ body {
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
-}
-
-/* ---------- Header / wordmark ---------- */
-.rl-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: var(--rl-space-4);
-	padding: var(--rl-space-2) var(--rl-space-5);
-	border-bottom: var(--rl-border-thin) solid var(--rl-border);
-}
-.rl-wordmark {
-	display: inline-flex;
-	align-items: center;
-	line-height: 1; /* text box = em-height, so it centres cleanly against the logo and nav */
-	font-weight: var(--rl-weight-extrabold);
-	font-size: var(--rl-text-xl);
-	letter-spacing: var(--rl-tracking-tight);
-	text-decoration: none;
-	color: var(--rl-brand-1);
-}
-.rl-wordmark-logo {
-	width: 20px;
-	height: 20px;
-	margin-right: var(--rl-space-2);
-	border-radius: var(--rl-radius-xs);
-	flex-shrink: 0;
-}
-/* The emphasised brand segment. Its colour is a single token so the brand can
-   be re-themed by editing --rl-brand-2 alone (see tokens.css). */
-.rl-wordmark b {
-	font-weight: inherit;
-	color: var(--rl-brand-2);
-}
-
-/* Header nav: quick links (My shares, Admin, quick-access) next to the wordmark. */
-.rl-nav {
-	display: flex;
-	align-items: center;
-	gap: var(--rl-space-1);
-	flex-wrap: wrap;
-}
-.rl-navlink {
-	display: inline-flex;
-	align-items: center;
-	gap: var(--rl-space-2);
-	padding: var(--rl-space-2) var(--rl-space-3);
-	min-height: 32px; /* match .rl-btn-sm so navlinks and header buttons are the same height */
-	line-height: 1; /* drop inherited 1.5 leading so text centres in the box */
-	border-radius: var(--rl-radius-sm);
-	font-size: var(--rl-text-sm);
-	font-weight: var(--rl-weight-semibold);
-	color: var(--rl-text-muted);
-	text-decoration: none;
-	background: transparent;
-	border: var(--rl-border-thin) solid transparent;
-	cursor: pointer;
-	font-family: var(--rl-font);
-	transition: var(--rl-transition);
-}
-.rl-navlink:hover {
-	color: var(--rl-gold-200);
-	background: rgba(var(--rl-primary-rgb), 0.1);
-	border-color: rgba(var(--rl-primary-rgb), 0.3);
-}
-.rl-navlink:focus-visible {
-	outline: var(--rl-focus-outline);
-	outline-offset: var(--rl-focus-ring-offset);
 }
 
 /* ---------- Typography helpers ---------- */
@@ -1033,19 +962,29 @@ body {
 	backdrop-filter: blur(8px);
 	-webkit-backdrop-filter: blur(8px);
 	border-right: var(--rl-border-thin) solid var(--rl-border);
-	transition:
-		width var(--rl-duration-fast) var(--rl-ease),
-		transform var(--rl-duration-fast) var(--rl-ease);
 	overflow: hidden;
 }
 
-/* Content offset: every page's .rl-app shifts right of the rail. */
+/* Content offset: every page's .rl-app shifts right of the rail. The body
+   carries rl-side-on from first paint (static class in the HTML), so the space
+   is reserved before the rail mounts and the page never reflows on navigation. */
 .rl-side-on .rl-app {
 	margin-left: var(--rl-side-width);
-	transition: margin-left var(--rl-duration-fast) var(--rl-ease);
 }
 .rl-side-on.rl-side-mini .rl-app {
 	margin-left: var(--rl-side-mini-width);
+}
+
+/* Animate width/offset only once the rail has mounted (rl-side-ready, added a
+   frame later), so the initial layout - including a remembered collapsed state -
+   snaps into place without an animate-on-load. */
+.rl-side-ready .rl-side {
+	transition:
+		width var(--rl-duration-fast) var(--rl-ease),
+		transform var(--rl-duration-fast) var(--rl-ease);
+}
+.rl-side-ready .rl-app {
+	transition: margin-left var(--rl-duration-fast) var(--rl-ease);
 }
 
 /* ----- Brand ----- */
@@ -1390,6 +1329,10 @@ body {
 @media (max-width: 600px) {
 	.rl-container {
 		padding: var(--rl-space-4) var(--rl-space-3) var(--rl-space-10);
+	}
+	.rl-admin-main {
+		padding-left: var(--rl-space-4);
+		padding-right: var(--rl-space-4);
 	}
 	input,
 	textarea,
