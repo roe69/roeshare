@@ -166,12 +166,17 @@ export default function download(router) {
 	router.get('/api/shares/:id/files/:fileId/preview', async ({ req, url, params }) => {
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
-		if (!accessCheck(share, req, url).ok) return error(403, 'Password required');
-		// A one-time share is "burn after first retrieval"; serving its full bytes
-		// inline (repeatedly, without counting) would defeat that, so preview is
-		// disabled for one-time shares - the recipient downloads to retrieve.
-		if (share.one_time) return error(403, 'Preview is disabled for one-time shares');
-		if (limitReached(share)) return error(410, 'Download limit reached');
+		const { ok, owner } = accessCheck(share, req, url);
+		if (!ok) return error(403, 'Password required');
+		// The owner (edit token or the API key that created the share) manages and
+		// restores their own share, so these gates do not apply to them. For everyone
+		// else: a one-time share is "burn after first retrieval", so serving its
+		// full bytes inline (repeatedly, without counting) would defeat that;
+		// likewise the download cap must hold.
+		if (!owner) {
+			if (share.one_time) return error(403, 'Preview is disabled for one-time shares');
+			if (limitReached(share)) return error(410, 'Download limit reached');
+		}
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
@@ -184,11 +189,13 @@ export default function download(router) {
 	router.get('/api/shares/:id/files/:fileId/download', async ({ req, url, params, ip }) => {
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
-		if (!accessCheck(share, req, url).ok) return error(403, 'Password required');
+		const { ok, owner } = accessCheck(share, req, url);
+		if (!ok) return error(403, 'Password required');
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
-		if (limitReached(share)) return error(410, 'Download limit reached');
+		// The owner's own reads (edit token or owning API key) never hit the cap.
+		if (!owner && limitReached(share)) return error(410, 'Download limit reached');
 
 		// Count exactly one download per delivery. For an uncontrolled share we
 		// only count deliveries that include the start of the file (no Range, or a
@@ -197,10 +204,13 @@ export default function download(router) {
 		// count EVERY GET delivery, including partial ranges, because otherwise a
 		// "Range: bytes=1-" request would fetch (almost) the whole file without
 		// counting or burning - bypassing the cap / one-time guarantee.
-		// HEAD probes (auto-routed to this GET handler) never count or burn.
+		// HEAD probes (auto-routed to this GET handler) never count or burn, and the
+		// owner is exempt entirely so a restore never counts against the cap or burns
+		// a one-time share.
 		const range = parseRange(req.headers.get('range'), blobFile(share.id, file.id).size);
 		const controlled = share.one_time || share.max_downloads !== null;
 		const counted =
+			!owner &&
 			req.method === 'GET' &&
 			(controlled ? !(range && range.invalid) : range === null || (!range.invalid && range.start === 0));
 		let makeBody;
@@ -219,12 +229,13 @@ export default function download(router) {
 	router.get('/api/shares/:id/download-all', async ({ req, url, params, ip }) => {
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
-		if (!accessCheck(share, req, url).ok) return error(403, 'Password required');
+		const { ok, owner } = accessCheck(share, req, url);
+		if (!ok) return error(403, 'Password required');
 		// Zip is built server-side, which is impossible for E2E shares (the server
 		// has neither the key nor the real filenames). The client downloads each
 		// encrypted file and decrypts it instead.
 		if (share.e2e) return error(409, 'Zip download is not available for end-to-end encrypted shares');
-		if (limitReached(share)) return error(410, 'Download limit reached');
+		if (!owner && limitReached(share)) return error(410, 'Download limit reached');
 
 		const files = getCompleteFiles.all(share.id);
 		// Nothing to deliver: do not count a download or burn a one-time share on
@@ -236,8 +247,9 @@ export default function download(router) {
 			size: f.size,
 		}));
 
-		// HEAD probes (auto-routed to this GET handler) must not count or burn.
-		const counted = req.method === 'GET';
+		// HEAD probes (auto-routed to this GET handler) must not count or burn, and
+		// the owner is exempt entirely (their own restore never counts or burns).
+		const counted = !owner && req.method === 'GET';
 		if (counted) recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip);
 
 		let body = createZipStream(entries);

@@ -270,8 +270,17 @@ export default function apiV1(router) {
 
 		const fileId = newFileId();
 		const iv = newIv();
+		// Write the bytes BEFORE recording the file as complete, so a write failure
+		// never leaves a phantom "complete" row pointing at a missing/partial blob.
+		try {
+			await writeChunk(made.id, fileId, 0, buf, iv);
+		} catch (e) {
+			console.error('one-shot upload write failed for', made.id, e);
+			softDeleteShare.run(now(), made.id);
+			await deleteShareFiles(made.id).catch(() => {});
+			return error(500, 'Could not store the file');
+		}
 		insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv);
-		await writeChunk(made.id, fileId, 0, buf, iv);
 		setFinalized.run(made.id);
 
 		// File-completion stats (the chunked flow records these in uploads.js; the
@@ -311,12 +320,19 @@ export default function apiV1(router) {
 		const filterArgs = search ? [key.id, like, like] : [key.id];
 
 		const total = db.query(`SELECT COUNT(*) AS n FROM shares ${where}`).get(...filterArgs).n;
-		const rows = db.query(`SELECT * FROM shares ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...filterArgs, limit, offset);
+		// File count/size come from correlated subqueries in the one query (no N+1).
+		// Uses the unaliased `shares` table so the same `where` string and the count
+		// query above both apply unchanged.
+		const rows = db
+			.query(
+				`SELECT shares.*,
+					(SELECT COUNT(*) FROM files f WHERE f.share_id = shares.id) AS fileCount,
+					(SELECT COALESCE(SUM(f.size), 0) FROM files f WHERE f.share_id = shares.id) AS totalSize
+				FROM shares ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
+			)
+			.all(...filterArgs, limit, offset);
 		const origin = requestOrigin(ctx.req, ctx.url);
-		const shares = rows.map(s => {
-			const agg = db.query('SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS total FROM files WHERE share_id = ?').get(s.id);
-			return { ...shareView(s, origin), fileCount: agg.n, totalSize: agg.total };
-		});
+		const shares = rows.map(s => ({ ...shareView(s, origin), fileCount: s.fileCount, totalSize: s.totalSize }));
 		return json({ shares, total, limit, offset });
 	});
 

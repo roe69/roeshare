@@ -292,7 +292,11 @@ drive an external backup system end to end:
   needs no per-share password. Downloads are range-aware for resumable restores.
 - `DELETE /api/v1/shares/:id` removes an old backup (rotation).
 
-Use a key with no expiry (or a long max lifetime) so scheduled backups are not
-swept, and the admin panel's **API keys** tab shows each key's shares, usage, and a
-filtered view of everything it created. The **API docs** page includes a full backup
-workflow example (push, list, restore, rotate).
+Create backup shares with `expiresIn=0` (never expire) and manage retention
+yourself with `DELETE` - otherwise a share takes the server's default expiry and
+is swept. Do not set a max share lifetime on a backup key, since that would
+force-expire its shares. The owner's own restores never count against a share's
+download cap or burn a one-time share, so caps/one-time set for recipients do not
+get in the way of your own restores. The admin panel's **API keys** tab shows each
+key's shares, usage, and a filtered view of everything it created; the **API docs**
+page includes a full backup workflow example (push, list, restore, rotate).

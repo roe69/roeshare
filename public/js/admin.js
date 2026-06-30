@@ -1313,8 +1313,9 @@ function renderApiDocs() {
 	const backup = [
 		'KEY="Authorization: Bearer rsk_<id>_<secret>"',
 		'',
-		'# Push tonight\'s backup',
-		`curl -s -X POST "${origin}/api/v1/upload?title=db-$(date +%F)" \\`,
+		'# Push tonight\'s backup. expiresIn=0 means "never expire" - without it a',
+		'# share takes the server default expiry (e.g. 7 days) and would be swept.',
+		`curl -s -X POST "${origin}/api/v1/upload?title=db-$(date +%F)&expiresIn=0" \\`,
 		'  -H "$KEY" -H "X-Filename: db-$(date +%F).sql.gz" \\',
 		'  --data-binary @db.sql.gz',
 		'',
@@ -1409,7 +1410,7 @@ function renderApiDocs() {
 
 		el('div', { class: 'rl-card rl-stack' },
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Example: backup workflow'),
-			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Push, list, restore, and rotate using only the API key. Pair it with a no-expiry key (or a long max lifetime) so backups are not swept.'),
+			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Push, list, restore, and rotate using only the API key. Send expiresIn=0 so backups never auto-expire, and manage retention yourself with DELETE. Do not put a max share lifetime on a backup key - that would force-expire its shares.'),
 			docCode(backup),
 		),
 
