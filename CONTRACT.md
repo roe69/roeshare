@@ -131,6 +131,30 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 - `DELETE /api/admin/shares/:id/files/:fileId` (admin) -> delete one file (blob + row). `{ ok: true }`.
 - `GET /api/admin/stats` (admin) -> `{ shareCount, fileCount, totalSize, downloadTotal, storageUsed, maxTotalSize }`.
 
+### API keys (admin manages; programs use)
+API keys let other servers/scripts upload without a browser session. A key is a
+bearer token `rsk_<id>_<secret>`; only `sha256(secret)` is stored (`src/lib/apikeys.js`).
+The `id` is the public lookup key and the recognizable prefix.
+- `GET /api/admin/api-keys` (admin) -> `{ keys: [{ id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt, uploadCount, bytesUploaded, liveShares }] }`.
+- `POST /api/admin/api-keys` (admin) body `{ name, expiresIn? (sec, 0/omit=never) }` -> `201 { id, name, token, prefix, expiresAt }`. `token` is the FULL key and is returned ONCE.
+- `GET /api/admin/api-keys/:id` (admin) -> the key plus `shares: [{ id, title, createdAt, deleted, totalSize }]` (last ~20 it created).
+- `POST /api/admin/api-keys/:id/revoke` (admin) -> `{ ok: true }` (sets `revoked_at`; reversible only by reissuing).
+- `DELETE /api/admin/api-keys/:id` (admin) -> hard delete the key row. `{ ok: true }` (shares it created are untouched).
+
+### Programmatic API (`/api/v1`, `src/routes/api.js`)
+Auth: `Authorization: Bearer rsk_...` or `X-Api-Key: rsk_...`. `401` when missing/invalid/revoked/expired.
+Shares created here are attributed via `shares.api_key_id` and count toward the
+key's `uploadCount`/`bytesUploaded`. Same per-file/per-share/total caps as the portal.
+- `GET /api/v1/me` -> `{ id, name, createdAt, lastUsedAt, expiresAt, uploadCount, bytesUploaded }`. Cheap key check.
+- `POST /api/v1/shares` body `{ title?, slug?, password?, expiresIn?, maxDownloads?, oneTime? }`
+  -> `201 { id, editToken, url, chunkSize, maxFileSize, maxShareSize }`. Then drive the standard
+  resumable endpoints (`POST /api/shares/:id/files`, PATCH chunks, `POST .../finalize`) with `X-Edit-Token`. Use for large files.
+- `POST /api/v1/upload` one-shot: request body IS the file bytes; filename via the
+  `X-Filename` header (or `?filename=`); options as query params (`title`, `slug`,
+  `password`, `expiresIn`, `maxDownloads`, `oneTime`, `mime`). Creates + finalizes a
+  single-file share. -> `201 { id, url, fileId, name, size }`. Bounded by the server's
+  max request body size (so for files beyond that, use the resumable flow above).
+
 ### Pages (`src/routes/pages.js`)
 - `GET /` -> serve `public/upload.html`.
 - `GET /s/:id` -> serve `public/view.html`.

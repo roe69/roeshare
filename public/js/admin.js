@@ -59,7 +59,7 @@ function viewHead(title, subtitle, actions) {
 
 // ---- Sidebar / routing -----------------------------------------------------
 
-const VIEWS = { overview: renderOverview, shares: renderShares, server: renderServer, logs: renderLogs };
+const VIEWS = { overview: renderOverview, shares: renderShares, apikeys: renderApiKeys, server: renderServer, logs: renderLogs };
 
 // Per-view teardown (e.g. stop the logs poll) run before switching away.
 let cleanup = null;
@@ -99,6 +99,7 @@ function boot() {
 			{ label: 'Admin', items: [
 				{ id: 'overview', label: 'Overview', icon: 'overview', onClick: go('overview') },
 				{ id: 'shares', label: 'Shares', icon: 'shares', onClick: go('shares') },
+				{ id: 'apikeys', label: 'API keys', icon: 'key', onClick: go('apikeys') },
 				{ id: 'server', label: 'Server', icon: 'server', onClick: go('server') },
 				{ id: 'logs', label: 'Logs', icon: 'logs', onClick: go('logs') },
 			] },
@@ -746,6 +747,286 @@ function fileRow(modal, shareId, f, filesHost) {
 		}, 'Delete'),
 	);
 	return row;
+}
+
+// ===========================================================================
+// API keys
+// ===========================================================================
+
+const KEY_EXPIRY_OPTS = [
+	{ label: 'Never expires', value: '' },
+	{ label: '30 days', value: String(30 * 86400) },
+	{ label: '90 days', value: String(90 * 86400) },
+	{ label: '1 year', value: String(365 * 86400) },
+];
+
+// Derive a key's display status from its revoke/expiry timestamps.
+function keyStatus(k) {
+	if (k.revokedAt) return { label: 'Revoked', cls: 'rl-badge-danger', active: false };
+	if (k.expiresAt && k.expiresAt * 1000 < Date.now()) return { label: 'Expired', cls: 'rl-badge-neutral', active: false };
+	return { label: 'Active', cls: 'rl-badge-success', active: true };
+}
+
+let keysTbody;
+
+function renderApiKeys() {
+	const nameInput = el('input', { class: 'rl-input', type: 'text', maxlength: 100, placeholder: 'e.g. backup-server', style: 'flex:1;min-width:160px' });
+	const expirySelect = el('select', { class: 'rl-select', style: 'max-width:180px' },
+		...KEY_EXPIRY_OPTS.map(o => el('option', { value: o.value }, o.label)),
+	);
+	const createBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Create key');
+	const submit = async () => {
+		const name = nameInput.value.trim();
+		if (!name) { toastErr('Give the key a name first'); nameInput.focus(); return; }
+		createBtn.disabled = true;
+		try {
+			const made = await api.post('/api/admin/api-keys', { name, expiresIn: expirySelect.value || undefined });
+			nameInput.value = '';
+			expirySelect.value = '';
+			showNewKeyModal(made);
+			loadKeys();
+		} catch (err) {
+			toastErr(err);
+		} finally {
+			createBtn.disabled = false;
+		}
+	};
+	createBtn.addEventListener('click', submit);
+	nameInput.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
+
+	const createCard = el('div', { class: 'rl-card rl-stack' },
+		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Create a key'),
+		el('p', { class: 'rl-help', style: 'margin-top:0' }, 'The full key is shown only once, right after you create it. Store it somewhere safe; if it is lost, revoke it and make a new one.'),
+		el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2);align-items:flex-end' },
+			el('div', { class: 'rl-field', style: 'flex:1;min-width:200px;margin:0' },
+				el('label', { class: 'rl-label' }, 'Name'),
+				nameInput,
+			),
+			el('div', { class: 'rl-field', style: 'margin:0' },
+				el('label', { class: 'rl-label' }, 'Expiry'),
+				expirySelect,
+			),
+			createBtn,
+		),
+	);
+
+	keysTbody = el('tbody');
+	const table = el('div', { style: 'overflow-x:auto' },
+		el('table', { class: 'rl-table' },
+			el('thead', {},
+				el('tr', {},
+					el('th', {}, 'Name'),
+					el('th', {}, 'Key'),
+					el('th', { class: 'rl-col-w' }, 'Created'),
+					el('th', { class: 'rl-col-w' }, 'Last used'),
+					el('th', { class: 'rl-col-w' }, 'Expires'),
+					el('th', { class: 'rl-col-num' }, 'Shares'),
+					el('th', { class: 'rl-col-num' }, 'Data'),
+					el('th', {}, 'Status'),
+					el('th', { style: 'text-align:right' }, 'Actions'),
+				),
+			),
+			keysTbody,
+		),
+	);
+
+	view.replaceChildren(
+		viewHead('API keys', 'Let other servers and scripts upload programmatically. See the request examples after creating a key.'),
+		createCard,
+		el('div', { class: 'rl-card', style: 'padding:0;overflow:hidden;margin-top:var(--rl-space-3)' }, table),
+	);
+
+	loadKeys();
+}
+
+function keysColspanRow(content) {
+	return el('tr', {}, el('td', { colspan: 9 }, content));
+}
+
+async function loadKeys() {
+	if (!keysTbody) return;
+	keysTbody.replaceChildren(keysColspanRow(
+		el('div', { class: 'rl-center', style: 'padding:var(--rl-space-6)' }, el('span', { class: 'rl-spinner' })),
+	));
+	try {
+		const { keys } = await api.get('/api/admin/api-keys');
+		if (!keys || !keys.length) {
+			keysTbody.replaceChildren(keysColspanRow(
+				el('div', { class: 'rl-empty' },
+					el('div', { class: 'rl-empty-icon' }, '\u{1F511}'),
+					el('p', {}, 'No API keys yet. Create one above to allow programmatic uploads.'),
+				),
+			));
+			return;
+		}
+		keysTbody.replaceChildren(...keys.map(keyRow));
+	} catch (err) {
+		toastErr(err);
+		keysTbody.replaceChildren(keysColspanRow(el('p', { class: 'rl-dim rl-center' }, 'Could not load API keys.')));
+	}
+}
+
+function keyRow(k) {
+	const st = keyStatus(k);
+
+	const prefix = el('button', {
+		class: 'rl-mono', title: 'Copy key id',
+		style: 'background:transparent;border:0;padding:0;color:var(--rl-primary);cursor:pointer;font-size:var(--rl-text-xs)',
+		onclick: e => { e.stopPropagation(); copyText(k.prefix); },
+	}, `${k.prefix}_...`);
+
+	const actions = el('div', { class: 'rl-row', style: 'gap:var(--rl-space-1);justify-content:flex-end' },
+		st.active ? el('button', {
+			class: 'rl-btn rl-btn-ghost rl-btn-sm',
+			onclick: e => { e.stopPropagation(); confirmRevoke(k); },
+		}, 'Revoke') : false,
+		el('button', {
+			class: 'rl-btn rl-btn-danger rl-btn-sm',
+			onclick: e => { e.stopPropagation(); confirmDeleteKey(k); },
+		}, 'Delete'),
+	);
+
+	const tr = el('tr', { class: 'rl-card-interactive', style: 'cursor:pointer' },
+		el('td', {}, el('span', { style: 'font-weight:var(--rl-weight-semibold)' }, k.name)),
+		el('td', {}, prefix),
+		el('td', { class: 'rl-col-w' }, formatDate(k.createdAt)),
+		el('td', { class: 'rl-col-w' }, k.lastUsedAt ? formatDate(k.lastUsedAt) : el('span', { class: 'rl-dim' }, 'Never')),
+		el('td', { class: 'rl-col-w' }, k.expiresAt ? timeUntil(k.expiresAt) : 'Never'),
+		el('td', { class: 'rl-col-num' }, String(k.uploadCount ?? 0)),
+		el('td', { class: 'rl-col-num' }, formatBytes(k.bytesUploaded ?? 0)),
+		el('td', {}, el('span', { class: `rl-badge ${st.cls}` }, st.label)),
+		el('td', { style: 'text-align:right' }, actions),
+	);
+	tr.addEventListener('click', () => openKeyDetail(k.id));
+	return tr;
+}
+
+// One-time reveal of a freshly minted token, with copy-able request examples.
+function showNewKeyModal(made) {
+	const origin = location.origin;
+	const tokenBox = el('div', {
+		class: 'rl-mono',
+		style: 'user-select:all;word-break:break-all;padding:var(--rl-space-3);background:var(--rl-bg-tertiary,var(--rl-bg-secondary));border:var(--rl-border-thin) solid var(--rl-border);border-radius:var(--rl-radius-sm);font-size:var(--rl-text-sm)',
+	}, made.token);
+
+	const curl = [
+		`curl -X POST "${origin}/api/v1/upload?title=My%20file" \\`,
+		`  -H "Authorization: Bearer ${made.token}" \\`,
+		`  -H "X-Filename: report.pdf" \\`,
+		`  --data-binary @report.pdf`,
+	].join('\n');
+	const curlBox = el('pre', {
+		class: 'rl-mono',
+		style: 'white-space:pre-wrap;word-break:break-word;margin:0;padding:var(--rl-space-3);background:var(--rl-bg-tertiary,var(--rl-bg-secondary));border:var(--rl-border-thin) solid var(--rl-border);border-radius:var(--rl-radius-sm);font-size:var(--rl-text-xs)',
+	}, curl);
+
+	const body = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+		el('div', { class: 'rl-alert rl-alert-warning' }, 'Copy this key now. For security it is not stored and cannot be shown again.'),
+		el('div', { class: 'rl-field' },
+			el('label', { class: 'rl-label' }, `Key "${made.name}"`),
+			tokenBox,
+			el('div', { class: 'rl-row', style: 'gap:var(--rl-space-2);margin-top:var(--rl-space-2)' },
+				el('button', { class: 'rl-btn rl-btn-primary rl-btn-sm', onclick: () => copyText(made.token) }, 'Copy key'),
+			),
+		),
+		el('div', { class: 'rl-field' },
+			el('label', { class: 'rl-label' }, 'One-shot upload example'),
+			curlBox,
+			el('div', { class: 'rl-row', style: 'gap:var(--rl-space-2);margin-top:var(--rl-space-2)' },
+				el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => copyText(curl) }, 'Copy example'),
+			),
+			el('p', { class: 'rl-help' }, 'For large or resumable uploads, POST /api/v1/shares to get an editToken, then use the standard chunked endpoints.'),
+		),
+	);
+
+	openModal({ title: 'API key created', body, actions: [{ label: 'Done', variant: 'primary' }] });
+}
+
+function confirmRevoke(k) {
+	openModal({
+		title: 'Revoke key',
+		body: el('p', {}, `Revoke "${k.name}"? Programs using it will immediately stop being able to upload. Its history is kept; this cannot be undone.`),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Revoke', variant: 'danger',
+				onClick: async () => {
+					try {
+						await api.post(`/api/admin/api-keys/${encodeURIComponent(k.id)}/revoke`, {});
+						toastOk('Key revoked');
+						loadKeys();
+					} catch (err) {
+						toastErr(err);
+					}
+				},
+			},
+		],
+	});
+}
+
+function confirmDeleteKey(k) {
+	openModal({
+		title: 'Delete key',
+		body: el('p', {}, `Permanently delete "${k.name}"? This removes the key and its usage record. Shares it already created are not affected.`),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Delete', variant: 'danger',
+				onClick: async () => {
+					try {
+						await api.del(`/api/admin/api-keys/${encodeURIComponent(k.id)}`);
+						toastOk('Key deleted');
+						loadKeys();
+					} catch (err) {
+						toastErr(err);
+					}
+				},
+			},
+		],
+	});
+}
+
+async function openKeyDetail(id) {
+	const bodyHost = el('div', { class: 'rl-center', style: 'padding:var(--rl-space-6)' }, el('span', { class: 'rl-spinner' }));
+	openModal({ title: 'API key', body: bodyHost });
+	try {
+		const k = await api.get(`/api/admin/api-keys/${encodeURIComponent(id)}`);
+		const st = keyStatus(k);
+		const sharesHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
+		const shares = k.shares || [];
+		if (!shares.length) sharesHost.append(el('p', { class: 'rl-dim' }, 'No shares created with this key yet.'));
+		else for (const s of shares) {
+			sharesHost.append(el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);font-size:var(--rl-text-sm)' },
+				el('a', {
+					href: `${location.origin}/${s.id}`, target: '_blank', rel: 'noopener',
+					class: 'rl-truncate', style: 'color:var(--rl-primary);text-decoration:none',
+				}, s.title || s.id),
+				el('span', { class: 'rl-dim', style: 'flex-shrink:0;font-size:var(--rl-text-xs)' },
+					`${formatBytes(s.totalSize)}${s.deleted ? ' - deleted' : ''}`),
+			));
+		}
+
+		bodyHost.replaceChildren(
+			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1);margin-bottom:var(--rl-space-4)' },
+				el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center' },
+					el('strong', {}, k.name),
+					el('span', { class: `rl-badge ${st.cls}` }, st.label),
+				),
+				el('div', { class: 'rl-mono rl-dim', style: 'font-size:var(--rl-text-xs)' }, `${k.prefix}_...`),
+			),
+			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1);margin-bottom:var(--rl-space-4)' },
+				infoRow('Created', formatDate(k.createdAt)),
+				infoRow('Last used', k.lastUsedAt ? formatDate(k.lastUsedAt) : 'Never'),
+				infoRow('Expires', k.expiresAt ? `${formatDate(k.expiresAt)} (${timeUntil(k.expiresAt)})` : 'Never'),
+				infoRow('Shares created', String(k.uploadCount ?? 0)),
+				infoRow('Data uploaded', formatBytes(k.bytesUploaded ?? 0)),
+			),
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, `Recent shares (${shares.length})`),
+			sharesHost,
+		);
+	} catch (err) {
+		bodyHost.replaceChildren(el('p', { class: 'rl-dim' }, (err && err.message) || 'Could not load key.'));
+	}
 }
 
 // ===========================================================================

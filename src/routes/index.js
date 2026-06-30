@@ -6,6 +6,7 @@ import shares from './shares.js';
 import uploads from './uploads.js';
 import download from './download.js';
 import admin from './admin.js';
+import apiV1 from './api.js';
 import pages from './pages.js';
 
 export function registerRoutes(router) {
@@ -13,6 +14,7 @@ export function registerRoutes(router) {
 	uploads(router);
 	download(router);
 	admin(router);
+	apiV1(router);
 	pages(router);
 	return router;
 }

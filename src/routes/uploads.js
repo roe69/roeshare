@@ -12,8 +12,9 @@ import { writeChunk, totalUsage } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
+import { recordKeyUsage } from '../lib/apikeys.js';
 
-const getShare = db.query('SELECT id, edit_token, expires_at, e2e FROM shares WHERE id = ? AND deleted_at IS NULL');
+const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
 const insertFile = db.query(
 	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv) VALUES (?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?)'
@@ -127,6 +128,8 @@ export default function uploads(router) {
 			bumpMetric('files_uploaded');
 			bumpMetric('bytes_uploaded', file.size);
 			bumpUploader(share.creator_ip, { bytes: file.size });
+			// Attribute the bytes to the API key when this share was created via one.
+			if (share.api_key_id) recordKeyUsage(share.api_key_id, { bytes: file.size });
 		}
 		return json({ received, complete: !!complete });
 	});

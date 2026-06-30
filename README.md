@@ -224,6 +224,52 @@ RoeShare exposes a JSON API under `/api`. The main groups are:
   shares, preview inline, download files, and download a whole share as a zip.
 - Owner and admin management: owner delete, admin login/logout, searchable
   share listings, per-share and per-file delete, and stats.
+- Programmatic API (`/api/v1`): API-key authenticated upload for other servers
+  and scripts (see below).
 
 The authoritative request and response shapes, status codes, auth transport,
 and data model live in [CONTRACT.md](CONTRACT.md).
+
+### Programmatic uploads (API keys)
+
+Other servers and scripts can upload without a browser session using an API key.
+Create and manage keys in the admin panel under **API keys**: each key is a
+bearer token of the form `rsk_<id>_<secret>` shown in full exactly once at
+creation (only a SHA-256 hash is stored, so it cannot be recovered - revoke and
+reissue if lost). Keys can be given an expiry, revoked, or deleted, and the panel
+tracks each key's share count, bytes uploaded, and last use.
+
+Authenticate with `Authorization: Bearer rsk_...` (or the `X-Api-Key` header).
+Two flows:
+
+- **One-shot** - send a file in a single request and get back a finished share URL:
+
+  ```sh
+  curl -X POST "https://share.example.com/api/v1/upload?title=Report" \
+    -H "Authorization: Bearer rsk_xxx_yyy" \
+    -H "X-Filename: report.pdf" \
+    --data-binary @report.pdf
+  # -> { "id": "...", "url": "https://share.example.com/...", "fileId": "...", "size": 12345 }
+  ```
+
+  Options are query params: `title`, `slug`, `password`, `expiresIn` (seconds,
+  `0`=never), `maxDownloads`, `oneTime`, `mime`. One-shot is bounded by the
+  server's max request body size.
+
+- **Resumable** - for large files, create a share then drive the standard chunked
+  endpoints:
+
+  ```sh
+  curl -X POST "https://share.example.com/api/v1/shares" \
+    -H "Authorization: Bearer rsk_xxx_yyy" \
+    -H "Content-Type: application/json" \
+    -d '{"title":"Big upload"}'
+  # -> { "id", "editToken", "url", "chunkSize", "maxFileSize", "maxShareSize" }
+  ```
+
+  Then register each file (`POST /api/shares/:id/files`), PATCH chunks, and
+  `POST /api/shares/:id/finalize` using the returned `editToken` as the
+  `X-Edit-Token` header (the same flow the web uploader uses).
+
+`GET /api/v1/me` returns the calling key's metadata - a quick way to verify a key
+works. All the usual per-file, per-share, and total storage caps apply.

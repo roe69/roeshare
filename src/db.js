@@ -71,6 +71,22 @@ db.exec(`
 		last_seen  INTEGER
 	);
 
+	-- Programmatic-access credentials. Other servers/scripts present a bearer
+	-- token of the form rsk_<id>_<secret>; only a SHA-256 hash of the secret is
+	-- stored here, so the row is never enough to recover a usable key. The public
+	-- id is the lookup key and the recognizable prefix shown in the admin UI.
+	CREATE TABLE IF NOT EXISTS api_keys (
+		id             TEXT PRIMARY KEY,        -- public key id (the rsk_<id> prefix)
+		name           TEXT NOT NULL,           -- human label
+		key_hash       TEXT NOT NULL,           -- sha256(secret) hex; never the secret
+		created_at     INTEGER NOT NULL,
+		last_used_at   INTEGER,                 -- null until first use
+		expires_at     INTEGER,                 -- null = never
+		revoked_at     INTEGER,                 -- null = active
+		upload_count   INTEGER NOT NULL DEFAULT 0, -- shares created with this key
+		bytes_uploaded INTEGER NOT NULL DEFAULT 0
+	);
+
 	CREATE INDEX IF NOT EXISTS idx_files_share ON files(share_id);
 	CREATE INDEX IF NOT EXISTS idx_shares_expires ON shares(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_events_share ON download_events(share_id);
@@ -83,6 +99,9 @@ for (const stmt of [
 	'ALTER TABLE files ADD COLUMN iv TEXT',
 	'ALTER TABLE shares ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0',
 	'ALTER TABLE shares ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0',
+	// Attributes a share to the API key that created it (null = created via the
+	// web portal). Lets the admin panel show per-key usage and list a key's shares.
+	'ALTER TABLE shares ADD COLUMN api_key_id TEXT',
 ]) {
 	try {
 		db.exec(stmt);
@@ -90,6 +109,10 @@ for (const stmt of [
 		/* column already exists */
 	}
 }
+
+// Index the API-key attribution column (created here, after the ALTER above has
+// guaranteed the column exists).
+db.exec('CREATE INDEX IF NOT EXISTS idx_shares_apikey ON shares(api_key_id)');
 
 // One-time seed of the lifetime tables from whatever shares already exist (live
 // or soft-deleted), so the historical view is populated on the first run after

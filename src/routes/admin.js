@@ -3,7 +3,7 @@
 
 import { existsSync } from 'node:fs';
 import { config } from '../config.js';
-import { db } from '../db.js';
+import { db, now } from '../db.js';
 import { json, error, cookie, clearCookie, requestScheme, requestOrigin } from '../lib/http.js';
 import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken } from '../lib/auth.js';
 import { deleteShareFiles, deleteBlob, totalUsage, renameShareDir } from '../lib/storage.js';
@@ -13,6 +13,7 @@ import { slugError } from '../lib/slug.js';
 import { getLogs } from '../lib/logbuffer.js';
 import { ALLOWED_KEYS, ALLOWLIST, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
 import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
+import { listApiKeys, getApiKey, createApiKey, revokeApiKey, deleteApiKey } from '../lib/apikeys.js';
 
 // The editable settings keys mapped to their current effective (booted) values,
 // for pre-filling the editor. Secret keys are reported only as set/unset.
@@ -36,8 +37,8 @@ const secretIsSet = key =>
 // row. Done as one transaction so FK constraints never see a dangling parent.
 const renameShare = db.transaction((oldId, newId) => {
 	db.query(
-		`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua)
-		 SELECT ?, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua FROM shares WHERE id = ?`,
+		`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id)
+		 SELECT ?, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id FROM shares WHERE id = ?`,
 	).run(newId, oldId);
 	db.query('UPDATE files SET share_id = ? WHERE share_id = ?').run(newId, oldId);
 	db.query('UPDATE download_events SET share_id = ? WHERE share_id = ?').run(newId, oldId);
@@ -361,6 +362,65 @@ export default router => {
 		const lifetime = lifetimeMetrics();
 
 		return json({ biggestShares, topUploaders, expiringSoon, lifetime });
+	});
+
+	// ---- API keys ----------------------------------------------------------
+	// Credentials that let other servers/scripts upload programmatically (see
+	// routes/api.js). The secret is shown ONCE at creation and only its hash is
+	// stored, so it can never be retrieved again - revoke and reissue if lost.
+
+	router.get('/api/admin/api-keys', ({ req }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		return json({ keys: listApiKeys() });
+	});
+
+	router.post('/api/admin/api-keys', async ({ req, ip }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-apikey', ip, 30, 60 * 60 * 1000);
+		if (limited) return limited;
+
+		const body = await readBody(req);
+		const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
+		if (!name) return error(400, 'A name is required');
+
+		let expiresAt = null;
+		if (body.expiresIn !== undefined && body.expiresIn !== null && body.expiresIn !== '') {
+			const n = Number(body.expiresIn);
+			if (!Number.isFinite(n) || n < 0) return error(400, 'Invalid expiresIn');
+			if (n > 0) expiresAt = now() + Math.trunc(n);
+		}
+
+		// The token is returned exactly once here; afterwards only its hash exists.
+		const made = createApiKey(name, expiresAt);
+		return json({ id: made.id, name: made.name, token: made.token, prefix: made.prefix, expiresAt }, 201);
+	});
+
+	router.get('/api/admin/api-keys/:id', ({ req, params }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const key = getApiKey(params.id);
+		if (!key) return error(404, 'Not found');
+		// A few recent shares this key created, for the detail view.
+		const shares = db
+			.query(
+				`SELECT s.id, s.title, s.created_at AS createdAt, s.deleted_at AS deletedAt,
+					(SELECT COALESCE(SUM(f.size), 0) FROM files f WHERE f.share_id = s.id) AS totalSize
+				FROM shares s WHERE s.api_key_id = ? ORDER BY s.created_at DESC LIMIT 20`,
+			)
+			.all(params.id)
+			.map(s => ({ id: s.id, title: s.title, createdAt: s.createdAt, deleted: s.deletedAt != null, totalSize: s.totalSize }));
+		return json({ ...key, shares });
+	});
+
+	router.post('/api/admin/api-keys/:id/revoke', ({ req, params }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		if (!revokeApiKey(params.id)) return error(404, 'Not found');
+		return json({ ok: true });
+	});
+
+	router.delete('/api/admin/api-keys/:id', ({ req, params }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		if (!deleteApiKey(params.id)) return error(404, 'Not found');
+		return json({ ok: true });
 	});
 
 	// ---- Server operations -------------------------------------------------
