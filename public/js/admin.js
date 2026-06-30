@@ -8,7 +8,7 @@ import {
 	toast, toastOk, toastErr, openModal,
 	formatBytes, formatDate, timeUntil, copyText,
 } from '/js/shared.js';
-import { mountSidebar } from '/js/sidebar.js';
+import { mountSidebar, ADMIN_GROUPS } from '/js/sidebar.js';
 
 const view = $('#view');
 let sidebar; // rail handle from mountSidebar()
@@ -101,26 +101,13 @@ async function logout() {
 // ---- Boot ------------------------------------------------------------------
 
 function boot() {
-	// The shared rail, with the dashboard sections on top and an account footer.
+	// The shared rail. The admin sections come from ADMIN_GROUPS (one source of
+	// truth, also used to render the same nav on the public pages); here they drive
+	// in-app hash navigation within this SPA.
 	const go = id => () => { location.hash = `#/${id}`; };
-	// Share is rendered first automatically; the admin sections are grouped into
-	// labelled subsections below it (Admin / API / System).
 	sidebar = mountSidebar({
 		active: currentView(),
-		groups: [
-			{ label: 'Admin', items: [
-				{ id: 'overview', label: 'Overview', icon: 'overview', onClick: go('overview') },
-				{ id: 'shares', label: 'Shares', icon: 'shares', onClick: go('shares') },
-			] },
-			{ label: 'API', items: [
-				{ id: 'apikeys', label: 'API keys', icon: 'key', onClick: go('apikeys') },
-				{ id: 'apidocs', label: 'API docs', icon: 'book', onClick: go('apidocs') },
-			] },
-			{ label: 'System', items: [
-				{ id: 'server', label: 'Server', icon: 'server', onClick: go('server') },
-				{ id: 'logs', label: 'Logs', icon: 'logs', onClick: go('logs') },
-			] },
-		],
+		groups: ADMIN_GROUPS.map(g => ({ label: g.label, items: g.items.map(it => ({ ...it, onClick: go(it.id) })) })),
 		account: { name: 'Admin', onLogout: logout },
 	});
 

@@ -33,7 +33,37 @@ function svgIcon(key, cls) {
 	return span;
 }
 
+// Logout used on the public pages (the admin page passes its own handler). Ends
+// the admin session and returns to the login screen.
+async function defaultLogout() {
+	try {
+		await fetch('/api/admin/logout', { method: 'POST' });
+	} catch {
+		/* best effort */
+	}
+	location.href = '/login';
+}
+
 const COLLAPSE_KEY = 'roeshare_side_collapsed';
+
+// The admin dashboard's sections, as a single source of truth (id / label / icon).
+// The admin page wires these to in-app hash navigation; the public pages render
+// them as links into the /admin SPA, shown only once the visitor is confirmed as
+// an admin. Keep the ids in sync with the admin dashboard's views.
+export const ADMIN_GROUPS = [
+	{ label: 'Admin', items: [
+		{ id: 'overview', label: 'Overview', icon: 'overview' },
+		{ id: 'shares', label: 'Shares', icon: 'shares' },
+	] },
+	{ label: 'API', items: [
+		{ id: 'apikeys', label: 'API keys', icon: 'key' },
+		{ id: 'apidocs', label: 'API docs', icon: 'book' },
+	] },
+	{ label: 'System', items: [
+		{ id: 'server', label: 'Server', icon: 'server' },
+		{ id: 'logs', label: 'Logs', icon: 'logs' },
+	] },
+];
 
 // Shares this browser owns are tracked by the edit tokens saved at upload time
 // (same prefix as myshares.js). The "My shares" nav item is only shown when at
@@ -93,17 +123,29 @@ export function mountSidebar({ active, groups, account } = {}) {
 	if (active === 'mine' || hasOwnedShares()) {
 		share.items.push({ id: 'mine', label: 'My shares', icon: 'files', href: '/mine' });
 	}
-	// Share first, always; then the page's groups, or - on the public pages - a
-	// lone Admin link. That link starts hidden and is revealed only for an
-	// authenticated admin (see below), so a regular uploader is never shown a link
-	// that would just bounce them to /login.
+	// Share first, always; then the page's groups. On the public pages (no groups
+	// passed) the FULL admin dashboard sections are rendered as links into /admin,
+	// hidden until /api/admin/me confirms the visitor is an admin - so a signed-in
+	// admin gets the same nav everywhere, and everyone else sees none of it.
 	const showsDefaultAdmin = !(groups && groups.length);
-	const allGroups = [share, ...(showsDefaultAdmin ? [{ items: [{ id: 'admin', label: 'Admin', icon: 'admin', href: '/admin', hidden: true }] }] : groups)];
+	const publicAdmin = showsDefaultAdmin
+		? ADMIN_GROUPS.map(g => ({ label: g.label, adminGated: true, items: g.items.map(it => ({ ...it, href: `/admin#/${it.id}` })) }))
+		: [];
+	const allGroups = [share, ...(showsDefaultAdmin ? publicAdmin : groups)];
 
 	const nav = el('nav', { class: 'rl-side-nav', 'aria-label': 'Navigation' });
+	const adminGatedNodes = []; // labels + items revealed together once admin is confirmed
 	for (const group of allGroups) {
-		if (group.label) nav.append(el('span', { class: 'rl-side-group' }, group.label));
-		for (const item of group.items) nav.append(navItem(item, active));
+		if (group.label) {
+			const labelEl = el('span', { class: 'rl-side-group' }, group.label);
+			if (group.adminGated) { labelEl.classList.add('rl-hidden'); adminGatedNodes.push(labelEl); }
+			nav.append(labelEl);
+		}
+		for (const item of group.items) {
+			const itemEl = navItem(item, active);
+			if (group.adminGated) { itemEl.classList.add('rl-hidden'); adminGatedNodes.push(itemEl); }
+			nav.append(itemEl);
+		}
 	}
 
 	const brand = el('a', { class: 'rl-side-brand', href: '/', title: 'Home' },
@@ -121,25 +163,30 @@ export function mountSidebar({ active, groups, account } = {}) {
 		el('span', { class: 'rl-side-label' }, 'Collapse'),
 	);
 	footRow.append(collapseBtn);
-	if (account && account.onLogout) {
-		// Icon-only (the rail is too narrow for two labelled buttons); same height
-		// as Collapse, sitting flush at the right.
+	// Log out: an explicit handler on the admin page; on the public pages a default
+	// one shown only once admin is confirmed (revealed alongside the admin nav), so
+	// a signed-in admin can log out from anywhere. Icon-only (the rail is too narrow
+	// for two labelled buttons), same height as Collapse, flush at the right.
+	const onLogout = (account && account.onLogout) || (showsDefaultAdmin ? defaultLogout : null);
+	if (onLogout) {
 		const logoutBtn = el('button', { class: 'rl-side-foot-btn rl-side-foot-logout', type: 'button', title: 'Log out', 'aria-label': 'Log out' },
 			svgIcon('logout'),
 		);
-		logoutBtn.addEventListener('click', account.onLogout);
+		logoutBtn.addEventListener('click', onLogout);
+		if (!account) { logoutBtn.classList.add('rl-hidden'); adminGatedNodes.push(logoutBtn); }
 		footRow.append(logoutBtn);
 	}
 	foot.append(footRow);
 
 	const aside = el('aside', { class: 'rl-side' }, brand, nav, foot);
 
-	// Reveal the Admin link if this visitor is logged in as an admin, so the admin
-	// panel stays one click away from the upload/view/My-shares pages.
-	if (showsDefaultAdmin) {
+	// Reveal the admin sections if this visitor is logged in as an admin, so the
+	// full panel nav is available everywhere (upload, view, My shares), not just on
+	// the dashboard itself.
+	if (showsDefaultAdmin && adminGatedNodes.length) {
 		fetch('/api/admin/me', { headers: { Accept: 'application/json' } })
 			.then(r => (r.ok ? r.json() : null))
-			.then(me => { if (me && me.admin) aside.querySelector('[data-id="admin"]')?.classList.remove('rl-hidden'); })
+			.then(me => { if (me && me.admin) adminGatedNodes.forEach(n => n.classList.remove('rl-hidden')); })
 			.catch(() => {});
 	}
 
