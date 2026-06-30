@@ -8,6 +8,7 @@ import { db, now } from '../db.js';
 import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/http.js';
 import { safeEqual } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
+import { verifyApiKey, readApiKey } from '../lib/apikeys.js';
 import { blobFile, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
@@ -54,12 +55,17 @@ function liveShare(id) {
 	return share;
 }
 
-// Returns whether the caller may read the share. A matching X-Edit-Token marks
-// the caller as the owner and always grants access; otherwise a password-gated
-// share requires a valid per-share access token.
+// Returns whether the caller may read the share. The owner - identified by a
+// matching X-Edit-Token, or by the API key that created the share (so a backup
+// client can restore its own files with just the key) - always gets access;
+// otherwise a password-gated share requires a valid per-share access token.
 function accessCheck(share, req, url) {
 	const editToken = req.headers.get('x-edit-token');
-	const owner = !!editToken && safeEqual(editToken, share.edit_token);
+	let owner = !!editToken && safeEqual(editToken, share.edit_token);
+	if (!owner && share.api_key_id) {
+		const key = verifyApiKey(readApiKey(req));
+		if (key && key.id === share.api_key_id) owner = true;
+	}
 	if (owner || !share.password_hash) return { ok: true, owner };
 	const token = readAccessToken(req, url);
 	if (token && hasAccessToken(token, share.id)) return { ok: true, owner };

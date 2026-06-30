@@ -101,15 +101,27 @@ export default router => {
 		if (!Number.isFinite(offset) || offset < 0) offset = 0;
 		offset = Math.trunc(offset);
 
+		// Optional filter to just the shares created by one API key.
+		const apiKey = (query.get('apiKey') || '').trim();
+
 		const like = `%${search}%`;
-		const where = 'WHERE s.deleted_at IS NULL' + (search ? ' AND (s.id LIKE ? OR s.title LIKE ?)' : '');
-		const filterArgs = search ? [like, like] : [];
+		const conds = ['s.deleted_at IS NULL'];
+		const filterArgs = [];
+		if (search) {
+			conds.push('(s.id LIKE ? OR s.title LIKE ?)');
+			filterArgs.push(like, like);
+		}
+		if (apiKey) {
+			conds.push('s.api_key_id = ?');
+			filterArgs.push(apiKey);
+		}
+		const where = 'WHERE ' + conds.join(' AND ');
 
 		const total = db.query(`SELECT COUNT(*) AS n FROM shares s ${where}`).get(...filterArgs).n;
 
 		const rows = db
 			.query(
-				`SELECT s.id, s.title, s.created_at, s.expires_at, s.password_hash, s.one_time, s.max_downloads, s.download_count, s.view_count, s.finalized,
+				`SELECT s.id, s.title, s.created_at, s.expires_at, s.password_hash, s.one_time, s.max_downloads, s.download_count, s.view_count, s.finalized, s.api_key_id,
 					(SELECT COUNT(*) FROM files f WHERE f.share_id = s.id) AS fileCount,
 					(SELECT COALESCE(SUM(f.size), 0) FROM files f WHERE f.share_id = s.id) AS totalSize
 				FROM shares s
@@ -132,6 +144,7 @@ export default router => {
 			finalized: !!r.finalized,
 			fileCount: r.fileCount,
 			totalSize: r.totalSize,
+			apiKeyId: r.api_key_id,
 		}));
 
 		return json({ shares, total });
@@ -149,6 +162,10 @@ export default router => {
 		let totalSize = 0;
 		for (const f of files) totalSize += f.size;
 
+		// Surface the API key that created the share (if any), so the admin can
+		// trace it back and jump to that key's full share list.
+		const apiKeyName = share.api_key_id ? db.query('SELECT name FROM api_keys WHERE id = ?').get(share.api_key_id)?.name ?? null : null;
+
 		return json({
 			id: share.id,
 			title: share.title,
@@ -163,6 +180,8 @@ export default router => {
 			deletedAt: share.deleted_at,
 			creatorIp: share.creator_ip,
 			creatorUa: share.creator_ua,
+			apiKeyId: share.api_key_id,
+			apiKeyName,
 			fileCount: files.length,
 			totalSize,
 			files: files.map(f => ({

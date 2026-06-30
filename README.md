@@ -281,3 +281,18 @@ Two flows:
 
 `GET /api/v1/me` returns the calling key's metadata - a quick way to verify a key
 works. All the usual per-file, per-share, and total storage caps apply.
+
+**Backups.** A key can manage and restore the shares it created, which is enough to
+drive an external backup system end to end:
+
+- `GET /api/v1/shares` lists the key's shares (paginated) and `GET /api/v1/shares/:id`
+  returns each file with a ready-to-use download URL.
+- Retrieval uses the existing `GET /api/shares/:id/files/:fileId/download` - the
+  owning key authorizes it (`Authorization: Bearer rsk_...`), so a private backup
+  needs no per-share password. Downloads are range-aware for resumable restores.
+- `DELETE /api/v1/shares/:id` removes an old backup (rotation).
+
+Use a key with no expiry (or a long max lifetime) so scheduled backups are not
+swept, and the admin panel's **API keys** tab shows each key's shares, usage, and a
+filtered view of everything it created. The **API docs** page includes a full backup
+workflow example (push, list, restore, rotate).

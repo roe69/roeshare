@@ -18,7 +18,7 @@ import { db, now } from '../db.js';
 import { json, error, requestOrigin } from '../lib/http.js';
 import { hashPassword } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
-import { writeChunk, totalUsage } from '../lib/storage.js';
+import { writeChunk, totalUsage, deleteShareFiles } from '../lib/storage.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
@@ -34,6 +34,48 @@ const insertFile = db.query(
 	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)',
 );
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
+const softDeleteShare = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
+
+// A live share owned by `keyId` (created with that key, not soft-deleted). The
+// expiry is NOT applied here so a key can still inspect/delete an expired-but-not-
+// yet-swept share it created.
+const getOwnedShare = db.query('SELECT * FROM shares WHERE id = ? AND api_key_id = ? AND deleted_at IS NULL');
+const getShareFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, created_at FROM files WHERE share_id = ? ORDER BY created_at ASC, id ASC');
+
+// Map a share row to the API shape, with a built download/share URL.
+function shareView(s, origin, files) {
+	const totalSize = files ? files.reduce((n, f) => n + f.size, 0) : undefined;
+	return {
+		id: s.id,
+		title: s.title,
+		url: `${origin}/${s.id}`,
+		createdAt: s.created_at,
+		expiresAt: s.expires_at,
+		oneTime: !!s.one_time,
+		e2e: !!s.e2e,
+		password: !!s.password_hash,
+		maxDownloads: s.max_downloads,
+		downloadCount: s.download_count,
+		viewCount: s.view_count || 0,
+		finalized: !!s.finalized,
+		...(totalSize !== undefined ? { totalSize } : {}),
+		...(files
+			? {
+					files: files.map(f => ({
+						id: f.id,
+						name: f.name,
+						size: f.size,
+						received: f.received,
+						mime: f.mime,
+						complete: !!f.complete,
+						downloadCount: f.download_count,
+						// Ready-to-use retrieval URL (authorize with this same API key).
+						download: `${origin}/api/shares/${s.id}/files/${f.id}/download`,
+					})),
+			  }
+			: {}),
+	};
+}
 
 // Keep a SAFE relative path (mirrors uploads.js): drop "."/".."/empty/drive
 // segments and control chars. Never used as an on-disk path (blobs use the file
@@ -249,5 +291,53 @@ export default function apiV1(router) {
 			},
 			201,
 		);
+	});
+
+	// ---- List this key's shares (enumerate a backup) -----------------------
+	router.get('/api/v1/shares', ctx => {
+		const key = authenticate(ctx.req);
+		if (!key) return error(401, 'Invalid or missing API key');
+
+		const search = (ctx.query.get('search') || '').trim();
+		let limit = Number(ctx.query.get('limit'));
+		if (!Number.isFinite(limit) || limit <= 0) limit = 50;
+		limit = Math.min(Math.trunc(limit), 500);
+		let offset = Number(ctx.query.get('offset'));
+		if (!Number.isFinite(offset) || offset < 0) offset = 0;
+		offset = Math.trunc(offset);
+
+		const like = `%${search}%`;
+		const where = 'WHERE api_key_id = ? AND deleted_at IS NULL' + (search ? ' AND (id LIKE ? OR title LIKE ?)' : '');
+		const filterArgs = search ? [key.id, like, like] : [key.id];
+
+		const total = db.query(`SELECT COUNT(*) AS n FROM shares ${where}`).get(...filterArgs).n;
+		const rows = db.query(`SELECT * FROM shares ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`).all(...filterArgs, limit, offset);
+		const origin = requestOrigin(ctx.req, ctx.url);
+		const shares = rows.map(s => {
+			const agg = db.query('SELECT COUNT(*) AS n, COALESCE(SUM(size),0) AS total FROM files WHERE share_id = ?').get(s.id);
+			return { ...shareView(s, origin), fileCount: agg.n, totalSize: agg.total };
+		});
+		return json({ shares, total, limit, offset });
+	});
+
+	// ---- Inspect one of this key's shares ----------------------------------
+	router.get('/api/v1/shares/:id', ctx => {
+		const key = authenticate(ctx.req);
+		if (!key) return error(401, 'Invalid or missing API key');
+		const share = getOwnedShare.get(ctx.params.id, key.id);
+		if (!share) return error(404, 'Not found');
+		const files = getShareFiles.all(share.id);
+		return json(shareView(share, requestOrigin(ctx.req, ctx.url), files));
+	});
+
+	// ---- Delete one of this key's shares (backup rotation) -----------------
+	router.delete('/api/v1/shares/:id', async ctx => {
+		const key = authenticate(ctx.req);
+		if (!key) return error(401, 'Invalid or missing API key');
+		const share = getOwnedShare.get(ctx.params.id, key.id);
+		if (!share) return error(404, 'Not found');
+		softDeleteShare.run(now(), share.id);
+		await deleteShareFiles(share.id);
+		return json({ ok: true });
 	});
 }

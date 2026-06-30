@@ -13,12 +13,23 @@ import { mountSidebar } from '/js/sidebar.js';
 const view = $('#view');
 let sidebar; // rail handle from mountSidebar()
 
-// Current shares-table query state.
+// Current shares-table query state. apiKey (+ its name, for the chip) optionally
+// scopes the list to the shares created by one API key.
 const state = {
 	search: '',
 	sort: 'created',
 	order: 'desc',
+	apiKey: null,
+	apiKeyName: null,
 };
+
+// Open the Shares view filtered to one API key's shares.
+function showSharesForKey(id, name) {
+	state.apiKey = id;
+	state.apiKeyName = name || id;
+	state.search = '';
+	location.hash = '#/shares';
+}
 
 const SORTS = {
 	newest: { sort: 'created', order: 'desc', label: 'Newest' },
@@ -129,9 +140,11 @@ function statCard(label, value, extra) {
 }
 
 function infoRow(label, value) {
-	return el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);font-size:var(--rl-text-sm)' },
-		el('span', { class: 'rl-muted' }, label),
-		el('span', { class: 'rl-mono rl-truncate', style: 'max-width:60%;text-align:right' }, value),
+	return el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);font-size:var(--rl-text-sm);align-items:flex-start' },
+		el('span', { class: 'rl-muted', style: 'flex-shrink:0' }, label),
+		// Long values (e.g. the data dir path) wrap and break instead of being
+		// clipped, so the meaningful tail is never hidden. A title aids hovering.
+		el('span', { class: 'rl-mono', style: 'max-width:65%;text-align:right;word-break:break-all;overflow-wrap:anywhere', title: typeof value === 'string' ? value : undefined }, value),
 	);
 }
 
@@ -393,9 +406,23 @@ function renderShares() {
 		),
 	);
 
+	// When scoped to one API key, show a removable filter chip above the table.
+	let filterChip = false;
+	if (state.apiKey) {
+		filterChip = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2);align-items:center;margin-bottom:var(--rl-space-3)' },
+			el('span', { class: 'rl-muted', style: 'font-size:var(--rl-text-sm)' }, 'Filtered to API key'),
+			el('span', { class: 'rl-badge rl-badge-gold' }, state.apiKeyName || state.apiKey),
+			el('button', {
+				class: 'rl-btn rl-btn-secondary rl-btn-sm',
+				onclick: () => { state.apiKey = null; state.apiKeyName = null; renderShares(); },
+			}, 'Clear filter'),
+		);
+	}
+
 	view.replaceChildren(
-		viewHead('Shares', 'Browse, edit, and delete every share on this instance.'),
+		viewHead('Shares', state.apiKey ? 'Shares created by this API key.' : 'Browse, edit, and delete every share on this instance.'),
 		toolbar,
+		filterChip,
 		el('div', { class: 'rl-card', style: 'padding:0;overflow:hidden' }, table),
 	);
 
@@ -421,6 +448,7 @@ async function loadShares() {
 		offset: '0',
 	});
 	if (state.search) params.set('search', state.search);
+	if (state.apiKey) params.set('apiKey', state.apiKey);
 
 	try {
 		const data = await api.get(`/api/admin/shares?${params}`);
@@ -612,6 +640,16 @@ function renderDetail(modal, d, id) {
 		el('div', { class: 'rl-dim rl-truncate', style: 'font-size:var(--rl-text-xs)', title: `${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' - ' + d.creatorUa : ''}` },
 			`Uploaded from ${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' - ' + d.creatorUa : ''}`,
 		),
+		// When created via an API key, link out to that key's full share list.
+		d.apiKeyId
+			? el('div', { class: 'rl-row', style: 'gap:var(--rl-space-2);align-items:center;font-size:var(--rl-text-xs)' },
+					el('span', { class: 'rl-dim' }, 'Created via API key'),
+					el('button', {
+						class: 'rl-btn rl-btn-ghost rl-btn-sm',
+						onclick: () => { modal.close(); showSharesForKey(d.apiKeyId, d.apiKeyName); },
+					}, d.apiKeyName || d.apiKeyId),
+			  )
+			: false,
 	);
 
 	const filesHost = el('div', { class: 'rl-stack' });
@@ -1187,7 +1225,12 @@ async function openKeyDetail(id) {
 				scopes.node,
 				el('div', { class: 'rl-row', style: 'justify-content:flex-end' }, saveBtn),
 			),
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-6)' }, `Recent shares (${shares.length})`),
+			el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center;margin-top:var(--rl-space-6)' },
+				el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, `Recent shares (${shares.length})`),
+				k.uploadCount > 0
+					? el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); showSharesForKey(k.id, k.name); } }, 'View all in Shares')
+					: false,
+			),
 			sharesHost,
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-6)' }, 'Lifecycle'),
 			lifecycle,
@@ -1267,6 +1310,25 @@ function renderApiDocs() {
 		`curl -X POST "${origin}/api/shares/$ID/finalize" -H "X-Edit-Token: $ET"`,
 	].join('\n');
 
+	const backup = [
+		'KEY="Authorization: Bearer rsk_<id>_<secret>"',
+		'',
+		'# Push tonight\'s backup',
+		`curl -s -X POST "${origin}/api/v1/upload?title=db-$(date +%F)" \\`,
+		'  -H "$KEY" -H "X-Filename: db-$(date +%F).sql.gz" \\',
+		'  --data-binary @db.sql.gz',
+		'',
+		'# List what this key has stored (paginate with ?limit=&offset=)',
+		`curl -s "${origin}/api/v1/shares" -H "$KEY" | jq '.shares[] | {id,title,totalSize}'`,
+		'',
+		'# Restore: find a file id, then download it with the SAME key (no password)',
+		`ID=<share-id>; FID=$(curl -s "${origin}/api/v1/shares/$ID" -H "$KEY" | jq -r '.files[0].id')`,
+		`curl -s "${origin}/api/shares/$ID/files/$FID/download" -H "$KEY" -o restored.sql.gz`,
+		'',
+		'# Rotate: delete backups older than your retention window',
+		`curl -s -X DELETE "${origin}/api/v1/shares/$OLD_ID" -H "$KEY"`,
+	].join('\n');
+
 	const limitsPanel = el('div', { class: 'rl-card rl-stack' },
 		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'This instance'),
 		el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' }, panelSpinner()),
@@ -1322,6 +1384,18 @@ function renderApiDocs() {
 		),
 
 		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Managing & restoring (backups)'),
+			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'These let a key enumerate, retrieve, and rotate the shares it created - everything a backup client needs.'),
+			el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+				endpointCard('GET', '/api/v1/shares', 'List the shares this key created (newest first). Paginate with ?limit= (max 500) and ?offset=; filter with ?search=.',
+					el('p', { class: 'rl-help' }, 'Returns { shares: [{ id, title, url, createdAt, expiresAt, fileCount, totalSize, ... }], total, limit, offset }.')),
+				endpointCard('GET', '/api/v1/shares/:id', 'Inspect one of this key\'s shares: full metadata plus every file (id, size, complete) and a ready-to-use download URL.'),
+				endpointCard('GET', '/api/shares/:id/files/:fileId/download', 'Download a file. The owning API key authorizes the request (Authorization: Bearer), so a private backup needs no password. Range-aware for resumable restores.'),
+				endpointCard('DELETE', '/api/v1/shares/:id', 'Delete one of this key\'s shares and its files (backup rotation). Only the key that created the share can delete it this way.'),
+			),
+		),
+
+		el('div', { class: 'rl-card rl-stack' },
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Example: one-shot upload'),
 			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Send a whole file in a single request and get back a share URL.'),
 			docCode(oneShot),
@@ -1331,6 +1405,12 @@ function renderApiDocs() {
 			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Example: resumable upload'),
 			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'For large files: create a share, then register, chunk, and finalize.'),
 			docCode(resumable),
+		),
+
+		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Example: backup workflow'),
+			el('p', { class: 'rl-muted', style: 'margin:0;font-size:var(--rl-text-sm)' }, 'Push, list, restore, and rotate using only the API key. Pair it with a no-expiry key (or a long max lifetime) so backups are not swept.'),
+			docCode(backup),
 		),
 
 		el('div', { class: 'rl-card rl-stack' },

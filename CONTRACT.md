@@ -123,9 +123,10 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 - `POST /api/admin/login` body `{ password }` -> set `ADMIN_COOKIE` (HttpOnly, SameSite=Lax, Max-Age=config.adminSessionTtl), `{ ok: true }`. Use `checkAdminPassword`.
 - `POST /api/admin/logout` -> clear cookie.
 - `GET /api/admin/me` -> `{ admin: boolean }`.
-- `GET /api/admin/shares?search=&sort=created|size|downloads&order=asc|desc&limit=&offset=` (admin)
-  -> `{ shares: [{ id, title, createdAt, expiresAt, protected, oneTime, maxDownloads, downloadCount, finalized, fileCount, totalSize }], total }`.
-- `GET /api/admin/shares/:id` (admin) -> full detail incl files + last ~20 download_events + `creatorIp`/`creatorUa`.
+- `GET /api/admin/shares?search=&sort=created|size|downloads&order=asc|desc&limit=&offset=&apiKey=` (admin)
+  -> `{ shares: [{ id, title, createdAt, expiresAt, protected, oneTime, maxDownloads, downloadCount, finalized, fileCount, totalSize, apiKeyId }], total }`.
+  `apiKey` scopes the list to the shares created by that API key id.
+- `GET /api/admin/shares/:id` (admin) -> full detail incl files + last ~20 download_events + `creatorIp`/`creatorUa` + `apiKeyId`/`apiKeyName` (the key that created it, if any).
 - `PATCH /api/admin/shares/:id` (admin) -> edit any field. Body keys are optional and only applied when present: `title`, `slug` (rename id; validated + 409 if taken), `expiresAt` (epoch sec or null=never), `maxDownloads` (number or null/0=unlimited), `oneTime` (bool), `finalized` (bool), `password` (set new) or `removePassword: true` (clear). Returns `{ ok, id }` (id changes on rename).
 - `DELETE /api/admin/shares/:id` (admin) -> hard delete (db rows + blobs). `{ ok: true }`.
 - `DELETE /api/admin/shares/:id/files/:fileId` (admin) -> delete one file (blob + row). `{ ok: true }`.
@@ -163,6 +164,16 @@ slug/password scope, is `403`; the key's `maxExpiry` clamps the share's expiry.
   `password`, `expiresIn`, `maxDownloads`, `oneTime`, `mime`). Creates + finalizes a
   single-file share. -> `201 { id, url, fileId, name, size }`. Bounded by the server's
   max request body size (so for files beyond that, use the resumable flow above).
+
+Manage / restore (for backup clients). A key can only see and act on the shares it
+created (others 404):
+- `GET /api/v1/shares?limit=&offset=&search=` -> `{ shares: [{ id, title, url, createdAt, expiresAt, oneTime, e2e, password, maxDownloads, downloadCount, viewCount, finalized, fileCount, totalSize }], total, limit, offset }`. Excludes soft-deleted. `limit` max 500.
+- `GET /api/v1/shares/:id` -> the share plus `files: [{ id, name, size, received, mime, complete, downloadCount, download }]` (the `download` URL is ready to fetch with the same key).
+- `DELETE /api/v1/shares/:id` -> soft-delete the share + drop its blobs. `{ ok: true }`.
+- Retrieval: the existing `GET /api/shares/:id/files/:fileId/download` (and `/preview`,
+  `/download-all`) treat the **owning API key** as the owner, so a private (even
+  password-protected) backup is fetched by sending `Authorization: Bearer rsk_...` -
+  no per-share password or edit token needed. Range-aware for resumable restores.
 
 ### Pages (`src/routes/pages.js`)
 - `GET /` -> serve `public/upload.html`.
