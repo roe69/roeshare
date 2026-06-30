@@ -60,7 +60,7 @@ const baseUrlRule = raw => {
 export const ALLOWLIST = {
 	BASE_URL: { rule: baseUrlRule, type: 'text', label: 'Public base URL(s)', help: 'Comma-separate to serve multiple domains; the first is canonical.' },
 	TRUST_PROXY: { rule: boolRule, type: 'bool', label: 'Trust reverse proxy', help: 'Honour X-Forwarded-* headers. Only enable behind a trusted proxy.' },
-	APP_NAME: { rule: strRule(200), type: 'text', label: 'Brand name (HTML)', help: 'Shown in the header. <b> uses the ember gradient.' },
+	APP_NAME: { rule: strRule(200), type: 'text', label: 'Brand name (HTML)', help: 'Shown in the header and sidebar. Plain text takes brand colour 1; <b> takes brand colour 2 (both set in tokens.css).' },
 	ADMIN_PASSWORD: { rule: strRule(1024), type: 'secret', secret: true, label: 'Admin password', help: 'Leave blank to keep the current one. Cannot be cleared from here.' },
 	UPLOAD_PASSWORD: { rule: strRule(1024), type: 'secret', secret: true, clearable: true, label: 'Upload password', help: 'Leave blank to keep; tick Clear to allow open uploads.' },
 	SECRET: { rule: strRule(1024), type: 'secret', secret: true, label: 'Secret (signing + encryption key)', danger: 'Changing SECRET logs everyone out, invalidates every quick-access link, and PERMANENTLY breaks decryption of all existing uploads.' },

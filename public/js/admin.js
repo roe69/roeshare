@@ -1,5 +1,7 @@
-// RoeShare admin dashboard. Login gate, stats, searchable/sortable share table,
-// detail view with per-file delete, bulk delete, logout.
+// RoeShare admin dashboard. A fixed sidebar rail switches between four views -
+// Overview, Shares, Server, and Logs - each rendered into the main column. This
+// script is served ONLY to an authenticated admin (the server 404s it
+// otherwise), so the management markup and logic never leak.
 
 import {
 	el, $, $$, api, ApiError,
@@ -7,10 +9,10 @@ import {
 	formatBytes, formatDate, timeUntil, copyText,
 } from '/js/shared.js';
 
-const main = $('#main');
-const headerActions = $('#header-actions');
+const view = $('#view');
+const adminEl = $('#admin');
 
-// Current table query state.
+// Current shares-table query state.
 const state = {
 	search: '',
 	sort: 'created',
@@ -43,102 +45,255 @@ function editField(label, control, help) {
 	);
 }
 
+// A view header: big title, optional subtitle, optional actions on the right.
+function viewHead(title, subtitle, actions) {
+	return el('div', { class: 'rl-view-head' },
+		el('div', {},
+			el('h1', { class: 'rl-view-title' }, title),
+			subtitle ? el('p', { class: 'rl-view-sub' }, subtitle) : false,
+		),
+		actions ? el('div', { class: 'rl-row rl-row-wrap' }, ...[].concat(actions)) : false,
+	);
+}
+
+// ---- Sidebar / routing -----------------------------------------------------
+
+const COLLAPSE_KEY = 'roeshare_admin_collapsed';
+const VIEWS = { overview: renderOverview, shares: renderShares, server: renderServer, logs: renderLogs };
+
+// Per-view teardown (e.g. stop the logs poll) run before switching away.
+let cleanup = null;
+
+function currentView() {
+	const v = location.hash.replace(/^#\/?/, '');
+	return VIEWS[v] ? v : 'overview';
+}
+
+function navigate() {
+	if (cleanup) { cleanup(); cleanup = null; }
+	const name = currentView();
+	$$('.rl-side-item[data-view]').forEach(b => b.classList.toggle('is-active', b.dataset.view === name));
+	adminEl.classList.remove('is-open'); // close the mobile drawer on navigation
+	view.scrollTop = 0;
+	window.scrollTo(0, 0);
+	VIEWS[name]();
+}
+
+function wireSidebar() {
+	// Section buttons drive the hash; hashchange does the actual render.
+	$$('.rl-side-item[data-view]').forEach(btn => {
+		btn.addEventListener('click', () => { location.hash = `#/${btn.dataset.view}`; });
+	});
+
+	// Collapse (desktop icon-only rail), remembered across visits.
+	const collapseBtn = $('#side-collapse');
+	const collapseIco = $('.rl-side-ico', collapseBtn);
+	const syncCollapse = mini => {
+		collapseIco.innerHTML = mini ? '&#10217;' : '&#10216;'; // > when collapsed, < when expanded
+		collapseBtn.setAttribute('aria-label', mini ? 'Expand sidebar' : 'Collapse sidebar');
+	};
+	const startMini = localStorage.getItem(COLLAPSE_KEY) === '1';
+	if (startMini) adminEl.classList.add('is-mini');
+	syncCollapse(startMini);
+	collapseBtn.addEventListener('click', () => {
+		const mini = adminEl.classList.toggle('is-mini');
+		syncCollapse(mini);
+		try { localStorage.setItem(COLLAPSE_KEY, mini ? '1' : '0'); } catch {}
+	});
+
+	// Mobile drawer.
+	$('#side-toggle').addEventListener('click', () => adminEl.classList.add('is-open'));
+	$('#side-backdrop').addEventListener('click', () => adminEl.classList.remove('is-open'));
+
+	$('#side-logout').addEventListener('click', logout);
+
+	window.addEventListener('hashchange', navigate);
+}
+
+async function logout() {
+	try {
+		await api.post('/api/admin/logout', {});
+	} catch (err) {
+		toastErr(err);
+	}
+	location.href = '/admin';
+}
+
 // ---- Boot ------------------------------------------------------------------
 
 async function boot() {
-	stopLogsPoll();
-	headerActions.replaceChildren();
+	// The server already gated this page, but the cookie could have lapsed
+	// between the page load and now; bounce to the login page if so.
 	try {
 		const me = await api.get('/api/admin/me');
-		if (me && me.admin) renderDashboard();
-		else renderLogin();
+		if (!me || !me.admin) { location.href = '/admin'; return; }
+	} catch {
+		/* network hiccup: fall through and let the views surface the error */
+	}
+	wireSidebar();
+	navigate();
+}
+
+// ===========================================================================
+// Overview
+// ===========================================================================
+
+function statCard(label, value, extra) {
+	return el('div', { class: 'rl-card rl-card-pad-sm' },
+		el('div', { class: 'rl-eyebrow', style: 'margin-bottom:var(--rl-space-2)' }, label),
+		el('div', { style: 'font-size:var(--rl-text-3xl);font-weight:var(--rl-weight-bold);line-height:1.1' }, value),
+		extra ? el('div', { style: 'margin-top:var(--rl-space-3)' }, extra) : false,
+	);
+}
+
+function infoRow(label, value) {
+	return el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-4);font-size:var(--rl-text-sm)' },
+		el('span', { class: 'rl-muted' }, label),
+		el('span', { class: 'rl-mono rl-truncate', style: 'max-width:60%;text-align:right' }, value),
+	);
+}
+
+function renderOverview() {
+	const statsRow = el('div', {
+		id: 'stats',
+		style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:var(--rl-space-4)',
+	});
+	const instanceHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' },
+		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Instance'),
+		el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' })),
+	);
+	const recentHost = el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' },
+		el('div', { class: 'rl-row', style: 'justify-content:space-between' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, 'Recent shares'),
+			el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => { location.hash = '#/shares'; } }, 'View all'),
+		),
+		el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' })),
+	);
+
+	view.replaceChildren(
+		viewHead('Overview', 'A snapshot of this RoeShare instance.'),
+		statsRow,
+		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:var(--rl-space-4);margin-top:var(--rl-space-4)' },
+			instanceHost,
+			recentHost,
+		),
+	);
+
+	loadStats();
+	loadInstance(instanceHost);
+	loadRecent(recentHost);
+}
+
+async function loadStats() {
+	const host = $('#stats');
+	if (!host) return;
+	try {
+		const s = await api.get('/api/admin/stats');
+		let storageExtra = false;
+		if (s.maxTotalSize > 0) {
+			const pct = Math.min(100, Math.round((s.storageUsed / s.maxTotalSize) * 100));
+			storageExtra = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
+				el('div', { class: 'rl-progress' },
+					el('div', { class: 'rl-progress-bar', style: `width:${pct}%` }),
+				),
+				el('div', { class: 'rl-help' }, `${formatBytes(s.storageUsed)} of ${formatBytes(s.maxTotalSize)}`),
+			);
+		}
+		host.replaceChildren(
+			statCard('Shares', String(s.shareCount ?? 0)),
+			statCard('Files', String(s.fileCount ?? 0)),
+			statCard('Storage used', formatBytes(s.storageUsed ?? 0), storageExtra),
+			statCard('Total views', String(s.viewTotal ?? 0)),
+			statCard('Total downloads', String(s.downloadTotal ?? 0)),
+		);
 	} catch (err) {
-		renderError(err);
+		toastErr(err);
+		host.replaceChildren(el('p', { class: 'rl-dim' }, 'Stats unavailable.'));
 	}
 }
 
-function renderError(err) {
-	main.replaceChildren(
-		el('div', { class: 'rl-empty' },
-			el('div', { class: 'rl-empty-icon' }, '⚠'),
-			el('p', {}, 'Could not load the admin panel.'),
-			el('p', { class: 'rl-dim' }, (err && err.message) || 'Unknown error'),
-		),
-	);
-}
-
-// ---- Login -----------------------------------------------------------------
-
-function renderLogin() {
-	const input = el('input', {
-		class: 'rl-input', type: 'password', placeholder: 'Admin password',
-		autocomplete: 'current-password',
-	});
-	const btn = el('button', { class: 'rl-btn rl-btn-primary rl-btn-block', type: 'submit' }, 'Login');
-
-	const submit = async (e) => {
-		e.preventDefault();
-		const password = input.value;
-		if (!password) return;
-		btn.disabled = true;
-		try {
-			await api.post('/api/admin/login', { password });
-			boot();
-		} catch (err) {
-			if (err instanceof ApiError && err.status === 403) toastErr('Wrong password');
-			else toastErr(err);
-			btn.disabled = false;
-			input.focus();
-			input.select();
+async function loadInstance(host) {
+	const body = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' });
+	try {
+		const [settings, health] = await Promise.all([
+			api.get('/api/admin/settings'),
+			fetch('/healthz', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+		]);
+		const ro = settings.readOnly || {};
+		const up = health && Number.isFinite(health.uptime) ? formatUptime(health.uptime) : '-';
+		body.append(
+			infoRow('Status', 'Online'),
+			infoRow('Uptime', up),
+			infoRow('Host', `${ro.HOST || '-'}:${ro.PORT || '-'}`),
+			infoRow('Data dir', ro.DATA_DIR || '-'),
+		);
+		if (settings.ephemeralSecret) {
+			body.append(el('div', { class: 'rl-alert rl-alert-warning', style: 'font-size:var(--rl-text-xs)' },
+				'SECRET is unset: sessions and encrypted uploads will not survive a restart. Set one in Server settings.'));
 		}
-	};
-
-	const form = el('form', { class: 'rl-stack', onsubmit: submit },
-		el('div', { class: 'rl-field' },
-			el('label', { class: 'rl-label' }, 'Password'),
-			input,
-		),
-		btn,
+	} catch {
+		body.append(el('p', { class: 'rl-dim' }, 'Instance info unavailable.'));
+	}
+	host.replaceChildren(
+		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Instance'),
+		body,
 	);
-
-	main.replaceChildren(
-		el('div', { style: 'max-width:380px;margin:var(--rl-space-12) auto 0' },
-			el('div', { class: 'rl-card rl-stack' },
-				el('div', { class: 'rl-center' },
-					el('h1', { class: 'rl-h2' }, 'Admin'),
-					el('p', { class: 'rl-muted' }, 'Sign in to manage shares.'),
-				),
-				form,
-			),
-		),
-	);
-	input.focus();
 }
 
-// ---- Dashboard -------------------------------------------------------------
+function formatUptime(s) {
+	const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+	if (d) return `${d}d ${h}h`;
+	if (h) return `${h}h ${m}m`;
+	if (m) return `${m}m`;
+	return `${Math.floor(s)}s`;
+}
+
+async function loadRecent(host) {
+	const list = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
+	try {
+		const data = await api.get('/api/admin/shares?sort=created&order=desc&limit=6');
+		const shares = (data && data.shares) || [];
+		if (!shares.length) {
+			list.append(el('p', { class: 'rl-dim' }, 'No shares yet.'));
+		} else {
+			for (const s of shares) {
+				list.append(el('button', {
+					class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-3);width:100%;background:transparent;border:0;padding:var(--rl-space-2);border-radius:var(--rl-radius-sm);cursor:pointer;text-align:left;color:inherit',
+					onclick: () => openDetail(s.id),
+				},
+					el('span', { class: 'rl-truncate', style: 'font-weight:var(--rl-weight-semibold)' }, s.title || s.id),
+					el('span', { class: 'rl-dim', style: 'font-size:var(--rl-text-xs);flex-shrink:0' }, `${formatBytes(s.totalSize ?? 0)} - ${timeUntil(s.expiresAt)}`),
+				));
+			}
+		}
+	} catch {
+		list.append(el('p', { class: 'rl-dim' }, 'Could not load recent shares.'));
+	}
+	host.replaceChildren(
+		el('div', { class: 'rl-row', style: 'justify-content:space-between' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, 'Recent shares'),
+			el('button', { class: 'rl-btn rl-btn-ghost rl-btn-sm', onclick: () => { location.hash = '#/shares'; } }, 'View all'),
+		),
+		list,
+	);
+}
+
+// ===========================================================================
+// Shares
+// ===========================================================================
 
 let tbody;
 let headerCheckbox;
 let rowsById = new Map();
 
-function renderDashboard() {
-	headerActions.replaceChildren(
-		el('button', {
-			class: 'rl-btn rl-btn-ghost rl-btn-sm',
-			onclick: logout,
-		}, 'Logout'),
-	);
+function renderShares() {
+	rowsById = new Map();
 
-	const statsRow = el('div', {
-		id: 'stats',
-		style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:var(--rl-space-4)',
-	});
-
-	// Toolbar.
 	const searchInput = el('input', {
 		class: 'rl-input', type: 'search', placeholder: 'Search shares...',
 		style: 'max-width:320px',
 	});
+	searchInput.value = state.search;
 	let debounce;
 	searchInput.addEventListener('input', () => {
 		clearTimeout(debounce);
@@ -163,7 +318,7 @@ function renderDashboard() {
 		onclick: bulkDelete,
 	}, 'Delete selected');
 
-	const toolbar = el('div', { class: 'rl-row rl-row-wrap', style: 'margin:var(--rl-space-6) 0' },
+	const toolbar = el('div', { class: 'rl-row rl-row-wrap', style: 'margin-bottom:var(--rl-space-4)' },
 		searchInput,
 		sortSelect,
 		el('span', { class: 'rl-spacer' }),
@@ -200,65 +355,14 @@ function renderDashboard() {
 		),
 	);
 
-	main.replaceChildren(
-		el('h1', { class: 'rl-h1' }, 'Dashboard'),
-		statsRow,
+	view.replaceChildren(
+		viewHead('Shares', 'Browse, edit, and delete every share on this instance.'),
 		toolbar,
 		el('div', { class: 'rl-card', style: 'padding:0;overflow:hidden' }, table),
-		serverSection(),
 	);
 
-	loadStats();
 	loadShares();
 }
-
-async function logout() {
-	try {
-		await api.post('/api/admin/logout', {});
-	} catch (err) {
-		toastErr(err);
-	}
-	boot();
-}
-
-// ---- Stats -----------------------------------------------------------------
-
-function statCard(label, value, extra) {
-	return el('div', { class: 'rl-card rl-card-pad-sm' },
-		el('div', { class: 'rl-eyebrow', style: 'margin-bottom:var(--rl-space-2)' }, label),
-		el('div', { style: 'font-size:var(--rl-text-3xl);font-weight:var(--rl-weight-bold);line-height:1.1' }, value),
-		extra ? el('div', { style: 'margin-top:var(--rl-space-3)' }, extra) : false,
-	);
-}
-
-async function loadStats() {
-	const host = $('#stats');
-	try {
-		const s = await api.get('/api/admin/stats');
-		let storageExtra = false;
-		if (s.maxTotalSize > 0) {
-			const pct = Math.min(100, Math.round((s.storageUsed / s.maxTotalSize) * 100));
-			storageExtra = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
-				el('div', { class: 'rl-progress' },
-					el('div', { class: 'rl-progress-bar', style: `width:${pct}%` }),
-				),
-				el('div', { class: 'rl-help' }, `${formatBytes(s.storageUsed)} of ${formatBytes(s.maxTotalSize)}`),
-			);
-		}
-		host.replaceChildren(
-			statCard('Shares', String(s.shareCount ?? 0)),
-			statCard('Files', String(s.fileCount ?? 0)),
-			statCard('Storage used', formatBytes(s.storageUsed ?? 0), storageExtra),
-			statCard('Total views', String(s.viewTotal ?? 0)),
-			statCard('Total downloads', String(s.downloadTotal ?? 0)),
-		);
-	} catch (err) {
-		toastErr(err);
-		host.replaceChildren(el('p', { class: 'rl-dim' }, 'Stats unavailable.'));
-	}
-}
-
-// ---- Shares table ----------------------------------------------------------
 
 function colspanRow(content) {
 	return el('tr', {}, el('td', { colspan: 10 }, content));
@@ -354,6 +458,7 @@ function renderRow(s) {
 }
 
 function updateBulkState() {
+	if (!tbody) return;
 	const checks = $$('.row-check', tbody);
 	const selected = checks.filter(c => c.checked);
 	const bulkBtn = $('#bulk-delete');
@@ -366,8 +471,6 @@ function updateBulkState() {
 		headerCheckbox.indeterminate = selected.length > 0 && selected.length < checks.length;
 	}
 }
-
-// ---- Delete ----------------------------------------------------------------
 
 function confirmDelete(s) {
 	openModal({
@@ -438,7 +541,7 @@ async function bulkDelete() {
 	});
 }
 
-// ---- Detail view -----------------------------------------------------------
+// ---- Detail view (modal) ---------------------------------------------------
 
 async function openDetail(id) {
 	const bodyHost = el('div', { class: 'rl-center', style: 'padding:var(--rl-space-6)' }, el('span', { class: 'rl-spinner' }));
@@ -453,9 +556,7 @@ async function openDetail(id) {
 }
 
 function renderDetail(modal, d, id) {
-	// openModal returns { content }, where content IS the .rl-modal element.
 	const host = modal.content;
-	// Replace body content (keep header) by clearing everything after header.
 	const header = $('.rl-modal-header', host);
 	host.replaceChildren(header);
 
@@ -468,14 +569,13 @@ function renderDetail(modal, d, id) {
 		),
 		el('div', { class: 'rl-mono rl-dim', style: 'font-size:var(--rl-text-xs)' }, id),
 		el('div', { class: 'rl-muted', style: 'font-size:var(--rl-text-sm)' },
-			`Created ${formatDate(d.createdAt)} • Expires ${timeUntil(d.expiresAt)} • ${d.viewCount ?? 0} views • ${d.downloadCount} downloads`,
+			`Created ${formatDate(d.createdAt)} - Expires ${timeUntil(d.expiresAt)} - ${d.viewCount ?? 0} views - ${d.downloadCount} downloads`,
 		),
-		el('div', { class: 'rl-dim rl-truncate', style: 'font-size:var(--rl-text-xs)', title: `${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' — ' + d.creatorUa : ''}` },
-			`Uploaded from ${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' · ' + d.creatorUa : ''}`,
+		el('div', { class: 'rl-dim rl-truncate', style: 'font-size:var(--rl-text-xs)', title: `${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' - ' + d.creatorUa : ''}` },
+			`Uploaded from ${d.creatorIp || 'unknown IP'}${d.creatorUa ? ' - ' + d.creatorUa : ''}`,
 		),
 	);
 
-	// Files.
 	const filesHost = el('div', { class: 'rl-stack' });
 	const files = d.files || [];
 	if (!files.length) {
@@ -484,7 +584,6 @@ function renderDetail(modal, d, id) {
 		for (const f of files) filesHost.append(fileRow(modal, id, f, filesHost));
 	}
 
-	// Download events.
 	const events = d.downloadEvents || d.events || d.download_events || [];
 	const eventsHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' });
 	if (!events.length) {
@@ -509,8 +608,6 @@ function renderDetail(modal, d, id) {
 	);
 }
 
-// Full edit form: title, slug/id, password (set or remove), expiry, download
-// limit, one-time, and finalized - admin has complete control over every field.
 function editForm(modal, d, id) {
 	const title = el('input', { class: 'rl-input', type: 'text', value: d.title || '', maxlength: 200, placeholder: 'Untitled' });
 
@@ -592,7 +689,7 @@ function fileRow(modal, shareId, f, filesHost) {
 		el('div', { class: 'rl-filerow-meta' },
 			el('div', { class: 'rl-filerow-name rl-truncate' }, f.name),
 			el('div', { class: 'rl-dim', style: 'font-size:var(--rl-text-xs)' },
-				`${formatBytes(f.size)} • ${f.downloadCount ?? 0} downloads`),
+				`${formatBytes(f.size)} - ${f.downloadCount ?? 0} downloads`),
 		),
 		el('button', {
 			class: 'rl-btn rl-btn-danger rl-btn-sm',
@@ -615,17 +712,10 @@ function fileRow(modal, shareId, f, filesHost) {
 	return row;
 }
 
-// ---- Server section (admin ops: quick link, settings, restart, logs) -------
+// ===========================================================================
+// Server (quick link, settings, restart)
+// ===========================================================================
 
-let logsTimer = null;
-function stopLogsPoll() {
-	if (logsTimer) {
-		clearInterval(logsTimer);
-		logsTimer = null;
-	}
-}
-
-// One editable settings row, keyed into `inputs` for collection on save.
 function settingRow(f, inputs) {
 	if (f.type === 'bool') {
 		const cb = el('input', { type: 'checkbox' });
@@ -680,8 +770,6 @@ async function saveSettings(inputs, saveBtn, banner) {
 				if (key === 'SECRET') secretChange = true;
 			}
 		} else if (meta.input.value !== '') {
-			// Blank non-secret field = leave unchanged (avoids saving a number
-			// field as 0, which would, e.g., set the max upload size to 0 bytes).
 			values[key] = meta.input.value;
 		}
 	}
@@ -766,14 +854,8 @@ function confirmRestart() {
 	});
 }
 
-function serverSection() {
-	const host = el('div', { class: 'rl-card rl-stack', style: 'margin-top:var(--rl-space-6)' },
-		el('h2', { class: 'rl-h2' }, 'Server'),
-	);
-
-	// 1) Quick-access upload link.
+function renderServer() {
 	const quickHost = el('div', { class: 'rl-field' });
-	host.append(quickHost);
 	(async () => {
 		try {
 			const r = await api.get('/api/admin/upload-link');
@@ -789,11 +871,8 @@ function serverSection() {
 		}
 	})();
 
-	// 2) Settings editor.
-	host.append(el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-4)' }, 'Settings'));
 	const banner = el('div', { class: 'rl-alert rl-alert-warning rl-hidden' }, 'Saved. Restart the server to apply the changes.');
 	const formHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' });
-	host.append(banner, formHost);
 
 	const inputs = new Map();
 	const saveBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Save settings');
@@ -806,7 +885,7 @@ function serverSection() {
 		try {
 			const data = await api.get('/api/admin/settings');
 			inputs.clear();
-			const rows = [el('p', { class: 'rl-help' }, `Host ${data.readOnly.HOST} · Port ${data.readOnly.PORT} · Data ${data.readOnly.DATA_DIR} (fixed by the container)`)];
+			const rows = [el('p', { class: 'rl-help' }, `Host ${data.readOnly.HOST} - Port ${data.readOnly.PORT} - Data ${data.readOnly.DATA_DIR} (fixed by the container)`)];
 			for (const f of data.fields) rows.push(settingRow(f, inputs));
 			formHost.replaceChildren(...rows);
 		} catch (err) {
@@ -815,13 +894,40 @@ function serverSection() {
 		}
 	};
 
-	host.append(el('div', { class: 'rl-row rl-row-wrap', style: 'justify-content:flex-end;gap:var(--rl-space-2)' }, restartBtn, saveBtn));
+	view.replaceChildren(
+		viewHead('Server', 'Quick-access link, app-managed settings, and restart.'),
+		el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Quick access'),
+			quickHost,
+		),
+		el('div', { class: 'rl-card rl-stack', style: 'margin-top:var(--rl-space-4)' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Settings'),
+			el('p', { class: 'rl-help', style: 'margin:0' }, 'Saved to the data volume and applied on the next restart, not live.'),
+			banner,
+			formHost,
+			el('div', { class: 'rl-row rl-row-wrap', style: 'justify-content:flex-end;gap:var(--rl-space-2)' }, restartBtn, saveBtn),
+		),
+	);
 
-	// 3) Logs.
-	host.append(el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin-top:var(--rl-space-4)' }, 'Logs'));
+	loadSettings();
+}
+
+// ===========================================================================
+// Logs
+// ===========================================================================
+
+let logsTimer = null;
+function stopLogsPoll() {
+	if (logsTimer) {
+		clearInterval(logsTimer);
+		logsTimer = null;
+	}
+}
+
+function renderLogs() {
 	const logBox = el('pre', {
 		class: 'rl-mono',
-		style: 'max-height:340px;overflow:auto;font-size:var(--rl-text-xs);white-space:pre-wrap;background:var(--rl-bg-tertiary);border:var(--rl-border-thin) solid var(--rl-border);border-radius:var(--rl-radius-sm);padding:var(--rl-space-3);margin:0',
+		style: 'max-height:60vh;overflow:auto;font-size:var(--rl-text-xs);white-space:pre-wrap;background:var(--rl-bg-tertiary);border:var(--rl-border-thin) solid var(--rl-border);border-radius:var(--rl-radius-sm);padding:var(--rl-space-3);margin:0',
 	});
 	const loadLogs = async () => {
 		try {
@@ -840,17 +946,21 @@ function serverSection() {
 			logsTimer = setInterval(loadLogs, 3000);
 		}
 	});
-	host.append(
-		el('div', { class: 'rl-row', style: 'gap:var(--rl-space-3)' },
-			refreshBtn,
-			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, autoBox, el('span', {}, 'Auto-refresh')),
+
+	// Stop polling when navigating away from this view.
+	cleanup = stopLogsPoll;
+
+	view.replaceChildren(
+		viewHead('Logs', 'Recent process output from the in-memory ring buffer.',
+			el('div', { class: 'rl-row', style: 'gap:var(--rl-space-3)' },
+				refreshBtn,
+				el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, autoBox, el('span', {}, 'Auto-refresh')),
+			),
 		),
-		logBox,
+		el('div', { class: 'rl-card', style: 'padding:var(--rl-space-3)' }, logBox),
 	);
 
-	loadSettings();
 	loadLogs();
-	return host;
 }
 
 boot();

@@ -10,7 +10,7 @@ import { Router } from './router.js';
 import { registerRoutes } from './routes/index.js';
 import { servePage } from './routes/pages.js';
 import { clientIp, error, json, SECURITY_HEADERS } from './lib/http.js';
-import { hasUploadAccess } from './lib/auth.js';
+import { hasUploadAccess, isAdmin } from './lib/auth.js';
 import { deleteShareFiles } from './lib/storage.js';
 import { pickEncoding, compressBytes, isCompressibleType, compressResponse } from './lib/compress.js';
 
@@ -81,6 +81,9 @@ async function serveStatic(req, pathname) {
 	// The upload portal's code is gated behind the upload-password cookie: an
 	// unauthorized visitor gets a 404 for it, so the source never leaks.
 	if (pathname === '/js/upload.js' && !hasUploadAccess(req)) return null;
+	// Likewise, the admin dashboard's code is served only to a logged-in admin.
+	// The login page uses the separate, ungated /js/admin-login.js instead.
+	if (pathname === '/js/admin.js' && !isAdmin(req)) return null;
 	const rel = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
 	const full = join(PUBLIC_DIR, rel);
 	if (full !== PUBLIC_DIR && !full.startsWith(PUBLIC_DIR + sep)) return null; // traversal guard

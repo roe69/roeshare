@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { config } from '../config.js';
 import { error, cookie, requestScheme, SECURITY_HEADERS } from '../lib/http.js';
-import { hasUploadAccess, checkUploadLink, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
+import { hasUploadAccess, isAdmin, checkUploadLink, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
 import { enforce } from '../lib/ratelimit.js';
 
 const PAGES_DIR = join(import.meta.dir, '..', '..', 'public');
@@ -79,7 +79,11 @@ export default function pages(router) {
 	});
 	router.get('/s/:id', () => servePage('view.html'));
 	router.get('/mine', () => servePage('myshares.html'));
-	router.get('/admin', () => servePage('admin.html'));
+	// The dashboard shell (and its code) is served only to an authenticated
+	// admin; everyone else gets the login-only page, so the management markup
+	// never leaves the server unauthorized. The matching /js/admin.js is gated
+	// the same way in the static handler.
+	router.get('/admin', ({ req }) => servePage(isAdmin(req) ? 'admin.html' : 'admin-login.html', { 'Cache-Control': 'no-store' }));
 
 	// The web app manifest is templated too, so the PWA/install name follows
 	// APP_TITLE. Registered as a route (runs before the static handler) so the
