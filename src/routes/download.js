@@ -160,12 +160,13 @@ function offloadHeaders(share, file) {
 }
 
 // Build a Range-aware response for a single blob. makeBody optionally wraps the
-// chosen stream (used to schedule one-time cleanup).
+// chosen stream (used to schedule one-time cleanup). A caller that has already
+// stat'd the file / parsed the Range passes `size` and `range` to avoid a
+// second stat syscall and re-parse on the hot streaming path.
 function rangeResponse(share, file, req, opts = {}) {
 	const { inline = false, contentType, makeBody, extraHeaders } = opts;
-	const f = blobFile(share.id, file.id);
-	const size = f.size;
-	const range = parseRange(req.headers.get('range'), size);
+	const size = opts.size !== undefined ? opts.size : blobFile(share.id, file.id).size;
+	const range = opts.range !== undefined ? opts.range : parseRange(req.headers.get('range'), size);
 	if (range?.invalid) {
 		return new Response(null, {
 			status: 416,
@@ -273,39 +274,47 @@ export default function download(router) {
 		// whole file. Anything else (a partial range probe, a HEAD, or the
 		// owner's own restore) never counts, claims, or burns.
 		const full = req.method === 'GET' && !owner && reachesEnd(range, size);
+		const ua = req.headers.get('user-agent');
 
-		if (full && share.one_time) {
-			// Atomically claim the share so only the request that will actually
-			// deliver the whole file gets to burn it; a losing racer (a second
-			// full-range request arriving after the claim) is turned away instead
-			// of also streaming and burning.
-			const claimed = claimOneTime.run(now(), share.id).changes > 0;
-			if (!claimed) return error(410, 'This one-time share has already been taken');
+		// One-time shares carry the full claim/burn machinery: track every read so
+		// a burn waits for in-flight reads, claim the share on a full delivery,
+		// count and burn only once that delivery drains, and restore it if the
+		// delivery is cancelled so the recipient can retry.
+		if (share.one_time) {
+			if (full) {
+				const claimed = claimOneTime.run(now(), share.id).changes > 0;
+				if (!claimed) return error(410, 'This one-time share has already been taken');
+			}
+			readStart(share.id);
+			let completed = false;
+			const makeBody = src =>
+				trackedStream(src, {
+					onComplete: full
+						? () => {
+								completed = true;
+								recordDownload(share.id, file.id, ip, ua, share.creator_ip);
+								burnPending.add(share.id);
+							}
+						: undefined,
+					onEnd: () => {
+						if (full && !completed) restoreShare.run(share.id);
+						readEnd(share.id);
+					},
+				});
+			return rangeResponse(share, file, req, { inline: false, makeBody, size, range });
 		}
 
-		// Track every read against the share, not just full deliveries, so a
-		// one-time burn (triggered by a concurrent full delivery elsewhere)
-		// always waits for partial/owner reads that are still in flight.
-		readStart(share.id);
-		let completed = false;
-		const makeBody = src =>
-			trackedStream(src, {
-				onComplete: full
-					? () => {
-							completed = true;
-							recordDownload(share.id, file.id, ip, req.headers.get('user-agent'), share.creator_ip);
-							if (share.one_time) burnPending.add(share.id);
-						}
-					: undefined,
-				onEnd: () => {
-					// A cancelled/errored full delivery of a one-time share must not
-					// leave it burned/soft-deleted - restore it so the recipient can
-					// simply retry the download.
-					if (full && share.one_time && !completed) restoreShare.run(share.id);
-					readEnd(share.id);
-				},
-			});
-		return rangeResponse(share, file, req, { inline: false, makeBody });
+		// A download-capped share must count only a COMPLETED full delivery, so a
+		// cancelled/paused transfer never consumes the cap - wrap just that stream.
+		if (full && share.max_downloads !== null) {
+			const makeBody = src => trackedStream(src, { onComplete: () => recordDownload(share.id, file.id, ip, ua, share.creator_ip) });
+			return rangeResponse(share, file, req, { inline: false, makeBody, size, range });
+		}
+
+		// Uncontrolled share (the common, hot path): tally a full delivery up front
+		// and stream with no wrapper and no per-share read tracking.
+		if (full) recordDownload(share.id, file.id, ip, ua, share.creator_ip);
+		return rangeResponse(share, file, req, { inline: false, size, range });
 	});
 
 	// Whole-share zip: one chunked archive of every complete file. A zip is

@@ -202,20 +202,33 @@ async function handleDownload(token, endpoint) {
 	if (!res.ok && res.status !== 200) return new Response('fetch failed', { status: res.status });
 	const { cs, key, plainTotal } = entry;
 	const numChunks = Math.ceil(plainTotal / cs) || 1;
-	let buf = new Uint8Array(0), recIndex = 0;
+	// Reassemble fixed-size ciphertext records from arbitrarily-sized network
+	// chunks by copying each byte exactly once into the record it belongs to
+	// (a queue), rather than repeatedly concatenating a growing leftover buffer -
+	// the latter is O(recordSize) per network chunk, a large copy amplification
+	// on a big download with the default multi-MB chunk size.
+	const pending = []; // queue of Uint8Array
+	let pendingLen = 0, recIndex = 0;
 	const dec = new TransformStream({
 		async transform(chunk, controller) {
-			const merged = new Uint8Array(buf.length + chunk.length);
-			merged.set(buf);
-			merged.set(chunk, buf.length);
-			buf = merged;
+			pending.push(chunk);
+			pendingLen += chunk.length;
 			while (true) {
 				const isLast = recIndex === numChunks - 1;
 				const thisPlain = isLast ? (plainTotal - recIndex * cs) : cs;
 				const recLen = thisPlain + ENC_OVERHEAD;
-				if (buf.length < recLen) break;
-				const record = buf.subarray(0, recLen);
-				buf = buf.subarray(recLen);
+				if (pendingLen < recLen) break;
+				const record = new Uint8Array(recLen);
+				let off = 0;
+				while (off < recLen) {
+					const head = pending[0];
+					const take = Math.min(head.length, recLen - off);
+					record.set(head.subarray(0, take), off);
+					off += take;
+					if (take === head.length) pending.shift();
+					else pending[0] = head.subarray(take);
+				}
+				pendingLen -= recLen;
 				let plain;
 				try {
 					plain = await decryptRecord(key, record);
