@@ -7,8 +7,15 @@ step and no extra dependencies, storing its state in a single SQLite database
 and plain (or encrypted) blobs on disk.
 
 The name "RoeShare", its colours, and its icons are just the upstream
-defaults - all of it is meant to be changed. See
-[CUSTOMIZING.md](CUSTOMIZING.md) for a full rebranding guide.
+defaults - all of it is meant to be changed.
+
+## Documentation
+
+- **This README** - features, [setup](#setup) for every method, [configuration](#configuration), [security](#security-notes).
+- [CUSTOMIZING.md](CUSTOMIZING.md) - rename, recolour, and re-icon it as your own.
+- [CONTRACT.md](CONTRACT.md) - the full HTTP API: request/response shapes, status codes, data model.
+- [DEPLOY.md](DEPLOY.md) - optional GitHub Actions CI example for automated deploys.
+- [`deploy/nginx.example.conf`](deploy/nginx.example.conf) / [`deploy/Caddyfile.example`](deploy/Caddyfile.example) - ready-to-adapt reverse-proxy configs.
 
 ## Features
 
@@ -24,6 +31,8 @@ defaults - all of it is meant to be changed. See
 - Range streaming for smooth seeking and resumable downloads.
 - QR code for every share link, generated locally with no network calls.
 
+## Setup
+
 There is more than one way to run RoeShare. Pick the guide that matches your
 setup:
 
@@ -33,7 +42,7 @@ setup:
 - [Single compiled binary](#single-compiled-binary) - one executable, no runtime install.
 - [Behind a reverse proxy (TLS)](#behind-a-reverse-proxy-tls) - add HTTPS in front of any of the above.
 
-## Quick start (Docker Compose)
+### Quick start (Docker Compose)
 
 One command builds and runs everything. It writes a `.env` with a strong random
 `SECRET` and admin password on first run:
@@ -62,7 +71,7 @@ and uploads in the `roeshare-data` volume. (`roeshare` is just the default
 container/volume/image name from `docker-compose.yml` - rename it there if
 you'd like something else.)
 
-## Run with plain `docker run`
+### Run with plain `docker run`
 
 If you don't want Compose, build the image once and run it directly:
 
@@ -81,7 +90,7 @@ This needs a `.env` file next to where you run the command (copy
 [Configuration](#configuration)). Data (the SQLite db and uploaded blobs)
 persists in the `roeshare-data` named volume across container recreation.
 
-## Run with Bun directly (no Docker)
+### Run with Bun directly (no Docker)
 
 1. Install Bun (>= 1.1). See https://bun.sh for instructions.
 2. Copy the example environment file and set the required secrets:
@@ -107,7 +116,7 @@ The server listens on `http://0.0.0.0:3300` by default. Open it in a browser
 to upload, visit `/s/:id` for a share, and `/admin` for the admin panel. The
 data directory (SQLite db plus uploaded blobs) is created automatically.
 
-### Running as a systemd service
+#### Running as a systemd service
 
 To keep it running and restart it automatically, install it as a service with
 a unit like:
@@ -133,7 +142,7 @@ panel's **Restart** button exits the process cleanly (exit 0), so only
 `always` relaunches it. The Docker `docker-compose.yml` already uses
 `restart: unless-stopped`, which behaves the same way.
 
-## Single compiled binary
+### Single compiled binary
 
 Bun can compile RoeShare into a standalone executable that bundles the runtime:
 
@@ -145,7 +154,7 @@ Ship the resulting `roeshare` binary alongside the `public/` directory and
 your `.env`, then run `./roeshare`. This is handy for environments where you'd
 rather ship one file than install Bun or Docker.
 
-## Behind a reverse proxy (TLS)
+### Behind a reverse proxy (TLS)
 
 RoeShare speaks plain HTTP; for a public deployment, terminate TLS at a
 reverse proxy (nginx, Caddy, or similar) in front of it and set
@@ -187,7 +196,7 @@ share.example.com {
 For a version with comments and options, see
 [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
-### Optional: sendfile byte offload
+#### Optional: sendfile byte offload
 
 Two env vars let the reverse proxy serve file bytes itself instead of
 streaming them through the Bun process, using the kernel's `sendfile`:
@@ -307,28 +316,25 @@ theming via `public/css/tokens.css`.
 
 ## Security notes
 
-- Encryption at rest: uploaded blobs are stored as AES-256-CTR ciphertext, keyed
-  from `SECRET`, and decrypted only in memory while streaming to an authorized
-  request. CTR keeps downloads seekable. Back up `SECRET` - without it the files
-  are unrecoverable. (A random-slug share with no password is still reachable by
-  anyone who has the link; add a password for confidentiality.) This guarantee -
-  that someone with raw disk, volume, or backup access cannot read the files -
-  holds when `SECRET` is provided via the host environment or `.env` and kept
-  outside the data volume. If `SECRET` is instead set or rotated through the
-  admin panel, it is written to `${DATA_DIR}/settings.env` inside the same data
-  volume as the ciphertext and the per-file IVs, so anyone who captures a volume
-  snapshot or backup can recover `SECRET` and decrypt the blobs; see "App-managed
-  settings" above. Encrypt and protect volume backups accordingly. Note also that
-  CTR gives confidentiality, not integrity: it does not detect tampering, so
-  someone with direct write access to the storage directory could corrupt or
-  bit-flip stored ciphertext undetected. The app's access control and unguessable
-  ids remain the authorization boundary, not the ciphertext itself. At-rest
-  encryption can be disabled with `ENCRYPT_AT_REST=0` for performance (no
-  server-side AES on upload/download, useful for large-video workloads with
-  many concurrent streams); this only affects new server-managed blobs -
-  end-to-end encrypted shares are always encrypted client-side regardless of
-  this setting, and existing on-disk files keep decrypting correctly since that
-  depends on the file's own stored IV, not this flag.
+- **Encryption at rest.** Server-managed blobs are stored as AES-256-CTR
+  ciphertext keyed from `SECRET`, decrypted only in memory for an authorized
+  request (CTR keeps downloads seekable). **Back up `SECRET`** - without it the
+  files are unrecoverable.
+  - The "raw disk / backup access can't read the files" guarantee holds when
+    `SECRET` comes from the host env or `.env`, kept outside the data volume. If
+    you set or rotate `SECRET` via the admin panel it is written to
+    `${DATA_DIR}/settings.env` inside the volume, next to the ciphertext - so
+    protect and encrypt volume backups (see
+    [App-managed settings](#app-managed-settings-admin-panel)).
+  - CTR gives confidentiality, not integrity - it won't detect tampering. The
+    authorization boundary is the app's access control and unguessable ids, not
+    the ciphertext itself.
+  - Set `ENCRYPT_AT_REST=0` to store server-managed blobs as plaintext (lighter
+    for high-concurrency video). End-to-end shares are always client-encrypted
+    regardless, and existing files keep decrypting via their own stored IV.
+- End-to-end encryption: E2E shares are encrypted in the browser; the key lives
+  only in the link `#fragment` and never reaches the server, which stores and
+  serves ciphertext it cannot read. New shares default to E2E (`DEFAULT_E2E`).
 - Opaque ids: random shares, file ids, and tokens are unguessable, so links
   cannot be enumerated. (Custom slugs are user-chosen and therefore guessable -
   password-protect anything sensitive that uses one.)
@@ -370,22 +376,15 @@ and data model live in [CONTRACT.md](CONTRACT.md).
 ### Programmatic uploads (API keys)
 
 Other servers and scripts can upload without a browser session using an API key.
-Create and manage keys in the admin panel under **API keys**: each key is a
-bearer token of the form `rsk_<id>_<secret>` shown in full exactly once at
-creation (only a SHA-256 hash is stored, so it cannot be recovered - revoke and
-reissue if lost). Keys can be given an expiry, revoked (and later reinstated), or
-deleted, and the panel tracks each key's share count, bytes uploaded, and last use.
-A built-in **API docs** page in the panel lists every endpoint with copy-ready
-examples and the instance's current limits.
+Create keys in the admin panel under **API keys**: each is a bearer token
+`rsk_<id>_<secret>`, shown in full once at creation (only a SHA-256 hash is
+stored). Keys can be scoped below the instance limits - per-file/share byte caps,
+a lifetime share cap, a max share lifetime, and slug/password toggles - and
+expired, revoked, or deleted; over-cap or out-of-scope requests are rejected
+(`413` for size, `403` for scope). The panel's **API docs** page lists every
+endpoint with copy-ready examples and the instance's current limits.
 
-Each key can be scoped below the instance limits: per-file and per-share byte
-caps, a lifetime cap on how many shares it may create, a maximum share lifetime
-(forcing its shares to expire within a window), and toggles for whether it may set
-custom slugs or share passwords. A request that exceeds a cap or uses a disallowed
-scope is rejected (`413` for size, `403` for scope/limit).
-
-Authenticate with `Authorization: Bearer rsk_...` (or the `X-Api-Key` header).
-Two flows:
+Authenticate with `Authorization: Bearer rsk_...` (or `X-Api-Key`). Two upload flows:
 
 - **One-shot** - send a file in a single request and get back a finished share URL:
 
@@ -416,27 +415,14 @@ Two flows:
   `POST /api/shares/:id/finalize` using the returned `editToken` as the
   `X-Edit-Token` header (the same flow the web uploader uses).
 
-`GET /api/v1/me` returns the calling key's metadata - a quick way to verify a key
-works. All the usual per-file, per-share, and total storage caps apply.
-
-**Backups.** A key can manage and restore the shares it created, which is enough to
-drive an external backup system end to end:
-
-- `GET /api/v1/shares` lists the key's shares (paginated) and `GET /api/v1/shares/:id`
-  returns each file with a ready-to-use download URL.
-- Retrieval uses the existing `GET /api/shares/:id/files/:fileId/download` - the
-  owning key authorizes it (`Authorization: Bearer rsk_...`), so a private backup
-  needs no per-share password. Downloads are range-aware for resumable restores.
-- `DELETE /api/v1/shares/:id` removes an old backup (rotation).
-
-Create backup shares with `expiresIn=0` (never expire) and manage retention
-yourself with `DELETE` - otherwise a share takes the server's default expiry and
-is swept. Do not set a max share lifetime on a backup key, since that would
-force-expire its shares. The owner's own restores never count against a share's
-download cap or burn a one-time share, so caps/one-time set for recipients do not
-get in the way of your own restores. The admin panel's **API keys** tab shows each
-key's shares, usage, and a filtered view of everything it created; the **API docs**
-page includes a full backup workflow example (push, list, restore, rotate).
+`GET /api/v1/me` verifies a key. A key can also list, fetch, and delete the
+shares it created (`GET`/`DELETE /api/v1/shares[/:id]`, range-aware downloads) -
+enough to drive an external backup: push with `expiresIn=0` (and don't set a max
+share lifetime on the key, which would force-expire them), and the owner's own
+restores never count against a download cap or burn a one-time share. The **API
+docs** page has the full backup workflow (push, list, restore, rotate). Key
+holders can also sign in at **`/api`** to manage their shares in the browser -
+no admin access needed.
 
 Key holders can also sign in at **`/api`** with the key name and token to list,
 download, and delete that key's shares from the browser - no admin access needed.

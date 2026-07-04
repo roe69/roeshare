@@ -1,9 +1,9 @@
-# RoeShare build contract
+# RoeShare API & module reference
 
-This is the shared spec for the modules built on top of the core. The core
-(config, db, router, server, `src/lib/*`, `public/css/*`, `public/js/shared.js`)
-already exists and MUST NOT be modified except to fix a genuine bug. Build the
-leaf modules described here against these exact contracts.
+The authoritative technical reference for RoeShare: the HTTP API (request and
+response shapes, status codes, auth transport), the data model, and the internal
+module surfaces the routes are built on. For setup, configuration, and usage see
+[README.md](README.md); to rebrand it, see [CUSTOMIZING.md](CUSTOMIZING.md).
 
 ## Runtime
 
