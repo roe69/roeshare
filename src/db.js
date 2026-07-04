@@ -1,6 +1,11 @@
 // SQLite layer built on bun:sqlite (no native module to compile). Opens the db,
-// applies the schema, sets pragmatic pragmas, and exposes the connection plus a
-// handful of helpers. All timestamps are unix epoch seconds.
+// applies the full schema, sets pragmatic pragmas, and exposes the connection
+// plus a couple of helpers. All timestamps are unix epoch seconds.
+//
+// The schema below is the complete, current shape - there is no migration code.
+// A fresh data directory gets everything in one pass; if you change the schema,
+// start from a fresh DATA_DIR (or drop the data volume) rather than upgrading an
+// old database in place.
 
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
@@ -29,7 +34,11 @@ db.exec(`
 		edit_token    TEXT NOT NULL,           -- lets the uploader manage their own share
 		finalized     INTEGER NOT NULL DEFAULT 0,
 		deleted_at    INTEGER,                 -- soft delete
-		creator_ip    TEXT
+		creator_ip    TEXT,
+		creator_ua    TEXT,
+		e2e           INTEGER NOT NULL DEFAULT 0, -- 1 = client-side end-to-end encrypted
+		view_count    INTEGER NOT NULL DEFAULT 0,
+		api_key_id    TEXT                     -- key that created it (null = web portal)
 	);
 
 	CREATE TABLE IF NOT EXISTS files (
@@ -42,7 +51,8 @@ db.exec(`
 		complete      INTEGER NOT NULL DEFAULT 0,
 		download_count INTEGER NOT NULL DEFAULT 0,
 		created_at    INTEGER NOT NULL,
-		stored_name   TEXT NOT NULL            -- on-disk blob name (== id), never the original
+		stored_name   TEXT NOT NULL,           -- on-disk blob name (== id), never the original
+		iv            TEXT                     -- at-rest AES-CTR IV; null = stored as plaintext / E2E
 	);
 
 	CREATE TABLE IF NOT EXISTS download_events (
@@ -95,59 +105,8 @@ db.exec(`
 
 	CREATE INDEX IF NOT EXISTS idx_files_share ON files(share_id);
 	CREATE INDEX IF NOT EXISTS idx_shares_expires ON shares(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_shares_apikey ON shares(api_key_id);
 	CREATE INDEX IF NOT EXISTS idx_events_share ON download_events(share_id);
 `);
-
-// Migrations for columns added after the initial release. SQLite has no
-// "ADD COLUMN IF NOT EXISTS", so we attempt it and ignore the duplicate error.
-for (const stmt of [
-	'ALTER TABLE shares ADD COLUMN creator_ua TEXT',
-	'ALTER TABLE files ADD COLUMN iv TEXT',
-	'ALTER TABLE shares ADD COLUMN e2e INTEGER NOT NULL DEFAULT 0',
-	'ALTER TABLE shares ADD COLUMN view_count INTEGER NOT NULL DEFAULT 0',
-	// Attributes a share to the API key that created it (null = created via the
-	// web portal). Lets the admin panel show per-key usage and list a key's shares.
-	'ALTER TABLE shares ADD COLUMN api_key_id TEXT',
-	// Per-key limits/scopes (added after api_keys shipped without them).
-	'ALTER TABLE api_keys ADD COLUMN max_file_size INTEGER',
-	'ALTER TABLE api_keys ADD COLUMN max_share_size INTEGER',
-	'ALTER TABLE api_keys ADD COLUMN max_shares INTEGER',
-	'ALTER TABLE api_keys ADD COLUMN max_expiry INTEGER',
-	'ALTER TABLE api_keys ADD COLUMN allow_slug INTEGER NOT NULL DEFAULT 1',
-	'ALTER TABLE api_keys ADD COLUMN allow_password INTEGER NOT NULL DEFAULT 1',
-]) {
-	try {
-		db.exec(stmt);
-	} catch {
-		/* column already exists */
-	}
-}
-
-// Index the API-key attribution column (created here, after the ALTER above has
-// guaranteed the column exists).
-db.exec('CREATE INDEX IF NOT EXISTS idx_shares_apikey ON shares(api_key_id)');
-
-// One-time seed of the lifetime tables from whatever shares already exist (live
-// or soft-deleted), so the historical view is populated on the first run after
-// this feature ships rather than starting empty. Detected by an empty `metrics`.
-if (db.query('SELECT COUNT(*) AS n FROM metrics').get().n === 0) {
-	const s = db.query('SELECT COUNT(*) AS shares, COALESCE(SUM(view_count),0) AS views, COALESCE(SUM(download_count),0) AS downloads FROM shares').get();
-	const f = db.query('SELECT COUNT(*) AS files, COALESCE(SUM(size),0) AS bytes FROM files').get();
-	const set = db.query('INSERT INTO metrics(key, value) VALUES (?, ?)');
-	const seed = db.transaction(() => {
-		set.run('shares_created', s.shares);
-		set.run('files_uploaded', f.files);
-		set.run('bytes_uploaded', f.bytes);
-		set.run('downloads', s.downloads);
-		set.run('views', s.views);
-		db.query(`INSERT INTO uploaders(ip, shares, bytes, downloads, first_seen, last_seen)
-			SELECT COALESCE(s.creator_ip, 'unknown'), COUNT(DISTINCT s.id),
-				COALESCE(SUM(sz.total), 0), COALESCE(SUM(s.download_count), 0),
-				MIN(s.created_at), MAX(s.created_at)
-			FROM shares s LEFT JOIN (SELECT share_id, SUM(size) AS total FROM files GROUP BY share_id) sz ON sz.share_id = s.id
-			GROUP BY COALESCE(s.creator_ip, 'unknown')`).run();
-	});
-	seed();
-}
 
 export const now = () => Math.floor(Date.now() / 1000);
