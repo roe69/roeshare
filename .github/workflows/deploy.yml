@@ -8,7 +8,12 @@ name: Deploy RoeShare
 on:
   push:
     branches: [main]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      reset_data:
+        description: "Wipe the data volume before deploying (DELETES all shares, uploads, and stats - needed after a schema change)"
+        type: boolean
+        default: false
 
 # One deploy at a time; a newer push cancels an in-flight (older) deploy.
 concurrency:
@@ -57,6 +62,14 @@ jobs:
       - name: Build & deploy
         run: |
           set -euo pipefail
+          # Opt-in reset: only when this workflow is run manually with reset_data
+          # checked. Removes the container AND the named data volume, so the next
+          # `up` starts from an empty database with the current schema. This is the
+          # deliberate way to apply a schema change (there is no migration code).
+          if [ "${{ inputs.reset_data }}" = "true" ]; then
+            echo "reset_data=true: wiping the data volume (all shares, uploads, and stats)."
+            docker compose down -v --remove-orphans || true
+          fi
           # --build reuses the local layer cache (no --no-cache), so an unchanged
           # source tree rebuilds in seconds. --remove-orphans tidies stale services.
           docker compose up -d --build --remove-orphans
