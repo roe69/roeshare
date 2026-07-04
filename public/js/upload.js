@@ -12,8 +12,16 @@ mountSidebar({ active: 'upload' });
 
 const EDIT_KEY = id => `roeshare:edit:${id}`;
 const MAX_CHUNK_RETRIES = 3;
+// Consecutive non-409 chunk failures at the same offset before giving up outright
+// (rather than relying solely on the large maxGuard to eventually bail out).
+const MAX_OFFSET_FAILURES = 5;
 const SLUG_RE = /^[A-Za-z0-9_-]{3,64}$/;
 const SLUG_BAD_CHARS = /[^A-Za-z0-9_-]/g;
+
+// Exponential backoff with jitter between chunk-retry attempts, so a persistent
+// server/network error does not hammer the server back-to-back on a large upload.
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const backoff = n => Math.min(15000, 500 * 2 ** n) + Math.random() * 250;
 
 let config = null;
 const selected = []; // { file, key, row: { wrap, bar, status }, done }
@@ -475,36 +483,63 @@ async function uploadFile(id, token, file, chunkSize, onProgress, name) {
 
 	let guard = 0;
 	const maxGuard = Math.ceil(file.size / chunkSize) * 4 + 16;
+	// Track attempts/failures per offset so backoff grows across retry rounds and
+	// a persistent (non-409) error at the same offset trips a hard stop well
+	// before maxGuard - a real 409 resync always resets both counters.
+	let lastOffset = -1;
+	let attemptsForOffset = 0;
+	let failuresForOffset = 0;
 	while (received < file.size) {
 		if (guard++ > maxGuard) throw new Error('Upload stalled, please retry');
 		const offset = received;
+		if (offset !== lastOffset) {
+			lastOffset = offset;
+			attemptsForOffset = 0;
+			failuresForOffset = 0;
+		}
 		const end = Math.min(offset + chunkSize, file.size);
 		const blob = file.slice(offset, end);
 		let handled = false;
 		for (let attempt = 0; attempt < MAX_CHUNK_RETRIES && !handled; attempt++) {
+			// Back off before every retry (never before a chunk's first attempt,
+			// never after a success) - this also covers the outer while re-attempting
+			// a chunk that just exhausted a round of inner retries.
+			if (attemptsForOffset > 0) await sleep(backoff(attemptsForOffset - 1));
+			attemptsForOffset++;
 			try {
 				const r = await api.raw('PATCH', `/api/shares/${id}/files/${fileId}?offset=${offset}`, blob, { headers });
 				received = typeof r.received === 'number' ? r.received : end;
 				onProgress(received, file.size);
 				handled = true;
 			} catch (e) {
-				// Server told us the real offset: resync and move on.
+				if (e instanceof ApiError && e.status === 404) {
+					throw new Error('Upload failed: this share no longer exists (it may have expired or been deleted).');
+				}
+				// Server told us the real offset: resync and move on - a normal
+				// resume signal, not a failure.
 				if (e instanceof ApiError && e.status === 409 && e.data && typeof e.data.received === 'number') {
 					received = e.data.received;
 					onProgress(received, file.size);
 					handled = true;
 					break;
 				}
+				failuresForOffset++;
+				if (failuresForOffset >= MAX_OFFSET_FAILURES) {
+					throw new Error('Upload failed after repeated errors - the server may be out of space or unreachable. Your progress is saved; try again later.');
+				}
 				if (attempt === MAX_CHUNK_RETRIES - 1) {
-					// Final failure for this chunk: ask the server where it is and resume.
+					// Final failure for this round: ask the server where it is and resume.
 					try {
 						const st = await api.get(`/api/shares/${id}/files/${fileId}/status`, { headers: { 'X-Edit-Token': token } });
 						if (typeof st.received === 'number') {
 							received = st.received;
 							onProgress(received, file.size);
 						}
-					} catch (_) {
-						/* keep the previous offset and let the guard catch a stall */
+					} catch (e2) {
+						if (e2 instanceof ApiError && e2.status === 404) {
+							throw new Error('Upload failed: this share no longer exists (it may have expired or been deleted).');
+						}
+						/* keep the previous offset and let the guard/failure count catch a stall */
 					}
 				}
 			}
@@ -533,8 +568,19 @@ async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name) 
 	onProgress(0, cipherSize);
 	let guard = 0;
 	const maxGuard = numChunks * 4 + 16;
+	// Track attempts/failures per offset so backoff grows across retry rounds and
+	// a persistent (non-409) error at the same offset trips a hard stop well
+	// before maxGuard - a real 409 resync always resets both counters.
+	let lastOffset = -1;
+	let attemptsForOffset = 0;
+	let failuresForOffset = 0;
 	while (cipherOff < cipherSize) {
 		if (guard++ > maxGuard) throw new Error('Upload stalled, please retry');
+		if (cipherOff !== lastOffset) {
+			lastOffset = cipherOff;
+			attemptsForOffset = 0;
+			failuresForOffset = 0;
+		}
 		const chunkIndex = Math.floor(cipherOff / recordSize);
 		const plainOff = chunkIndex * chunkSize;
 		const end = Math.min(plainOff + chunkSize, plainSize);
@@ -542,18 +588,42 @@ async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name) 
 		const record = await encryptBytes(key, plainChunk);
 		let handled = false;
 		for (let attempt = 0; attempt < MAX_CHUNK_RETRIES && !handled; attempt++) {
+			// Back off before every retry (never before a chunk's first attempt,
+			// never after a success) - this also covers the outer while re-attempting
+			// a chunk that just exhausted a round of inner retries.
+			if (attemptsForOffset > 0) await sleep(backoff(attemptsForOffset - 1));
+			attemptsForOffset++;
 			try {
 				const r = await api.raw('PATCH', `/api/shares/${id}/files/${fileId}?offset=${cipherOff}`, new Blob([record]), { headers });
 				cipherOff = typeof r.received === 'number' ? r.received : cipherOff + record.length;
 				handled = true;
 			} catch (e) {
-				// Resync to the server's offset (a record boundary) and re-encrypt.
+				if (e instanceof ApiError && e.status === 404) {
+					throw new Error('Upload failed: this share no longer exists (it may have expired or been deleted).');
+				}
+				// Resync to the server's offset (a record boundary) and re-encrypt -
+				// a normal resume signal, not a failure.
 				if (e instanceof ApiError && e.status === 409 && e.data && typeof e.data.received === 'number') {
 					cipherOff = e.data.received;
 					handled = true;
 					break;
 				}
-				if (attempt === MAX_CHUNK_RETRIES - 1) throw e;
+				failuresForOffset++;
+				if (failuresForOffset >= MAX_OFFSET_FAILURES) {
+					throw new Error('Upload failed after repeated errors - the server may be out of space or unreachable. Your progress is saved; try again later.');
+				}
+				if (attempt === MAX_CHUNK_RETRIES - 1) {
+					// Final failure for this round: ask the server where it is and resume.
+					try {
+						const st = await api.get(`/api/shares/${id}/files/${fileId}/status`, { headers: { 'X-Edit-Token': token } });
+						if (typeof st.received === 'number') cipherOff = st.received;
+					} catch (e2) {
+						if (e2 instanceof ApiError && e2.status === 404) {
+							throw new Error('Upload failed: this share no longer exists (it may have expired or been deleted).');
+						}
+						/* keep the previous offset and let the guard/failure count catch a stall */
+					}
+				}
 			}
 		}
 		onProgress(cipherOff, cipherSize);
