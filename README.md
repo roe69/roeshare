@@ -1,11 +1,14 @@
 # RoeShare
 
-RoeShare is a secure, self-hosted file-sharing server that wraps the RoeLite
-OSRS-inspired design around a fast, dependency-free upload and download flow.
-Drag a file in, get an opaque share link,
-and control exactly who can fetch it and for how long. It runs on the Bun
-runtime with no build step and no extra dependencies, storing its state in a
-single SQLite database and plain blobs on disk.
+RoeShare is a secure, self-hosted file-sharing server: drag a file in, get an
+opaque share link, and control exactly who can fetch it and for how long.
+It runs on the Bun runtime with no build
+step and no extra dependencies, storing its state in a single SQLite database
+and plain (or encrypted) blobs on disk.
+
+The name "RoeShare", its colours, and its icons are just the upstream
+defaults - all of it is meant to be changed. See
+[CUSTOMIZING.md](CUSTOMIZING.md) for a full rebranding guide.
 
 ## Features
 
@@ -21,7 +24,16 @@ single SQLite database and plain blobs on disk.
 - Range streaming for smooth seeking and resumable downloads.
 - QR code for every share link, generated locally with no network calls.
 
-## Quick start (Docker, recommended)
+There is more than one way to run RoeShare. Pick the guide that matches your
+setup:
+
+- [Quick start (Docker Compose)](#quick-start-docker-compose) - recommended.
+- [Run with plain `docker run`](#run-with-plain-docker-run) - single container, no Compose.
+- [Run with Bun directly (no Docker)](#run-with-bun-directly-no-docker) - bare metal or a VM.
+- [Single compiled binary](#single-compiled-binary) - one executable, no runtime install.
+- [Behind a reverse proxy (TLS)](#behind-a-reverse-proxy-tls) - add HTTPS in front of any of the above.
+
+## Quick start (Docker Compose)
 
 One command builds and runs everything. It writes a `.env` with a strong random
 `SECRET` and admin password on first run:
@@ -45,10 +57,31 @@ docker compose down               # stop
 ```
 
 The image is ~150 MB (Bun on Alpine, no build step, zero npm dependencies),
-exposes `/healthz` for the container healthcheck, and persists the database and
-uploads in the `roeshare-data` volume.
+exposes `/healthz` for the container healthcheck, and persists the database
+and uploads in the `roeshare-data` volume. (`roeshare` is just the default
+container/volume/image name from `docker-compose.yml` - rename it there if
+you'd like something else.)
 
-## Quick start (Bun, no Docker)
+## Run with plain `docker run`
+
+If you don't want Compose, build the image once and run it directly:
+
+```sh
+docker build -t roeshare .
+docker run -d \
+  -p 3300:3300 \
+  -v roeshare-data:/data \
+  --env-file .env \
+  --name roeshare \
+  roeshare
+```
+
+This needs a `.env` file next to where you run the command (copy
+`.env.example` and set at least `ADMIN_PASSWORD` and `SECRET` - see
+[Configuration](#configuration)). Data (the SQLite db and uploaded blobs)
+persists in the `roeshare-data` named volume across container recreation.
+
+## Run with Bun directly (no Docker)
 
 1. Install Bun (>= 1.1). See https://bun.sh for instructions.
 2. Copy the example environment file and set the required secrets:
@@ -70,9 +103,112 @@ uploads in the `roeshare-data` volume.
    bun run src/server.js
    ```
 
-The server listens on `http://0.0.0.0:3300` by default. Open it in a browser to
-upload, visit `/s/:id` for a share, and `/admin` for the admin panel. The data
-directory (SQLite db plus uploaded blobs) is created automatically.
+The server listens on `http://0.0.0.0:3300` by default. Open it in a browser
+to upload, visit `/s/:id` for a share, and `/admin` for the admin panel. The
+data directory (SQLite db plus uploaded blobs) is created automatically.
+
+### Running as a systemd service
+
+To keep it running and restart it automatically, install it as a service with
+a unit like:
+
+```ini
+[Unit]
+Description=RoeShare
+After=network.target
+
+[Service]
+WorkingDirectory=/opt/roeshare
+ExecStart=/usr/local/bin/bun run src/server.js
+EnvironmentFile=/opt/roeshare/.env
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+(`/opt/roeshare` is just an example install path - use whatever directory you
+deployed the source to.) Use `Restart=always` (not `on-failure`): the admin
+panel's **Restart** button exits the process cleanly (exit 0), so only
+`always` relaunches it. The Docker `docker-compose.yml` already uses
+`restart: unless-stopped`, which behaves the same way.
+
+## Single compiled binary
+
+Bun can compile RoeShare into a standalone executable that bundles the runtime:
+
+```sh
+bun build --compile src/server.js --outfile roeshare
+```
+
+Ship the resulting `roeshare` binary alongside the `public/` directory and
+your `.env`, then run `./roeshare`. This is handy for environments where you'd
+rather ship one file than install Bun or Docker.
+
+## Behind a reverse proxy (TLS)
+
+RoeShare speaks plain HTTP; for a public deployment, terminate TLS at a
+reverse proxy (nginx, Caddy, or similar) in front of it and set
+`TRUST_PROXY=1` so RoeShare trusts the proxy's forwarded client IP and
+protocol for rate limiting, audit logging, and marking the admin cookie
+`Secure`. Without a trusted proxy in front, leave `TRUST_PROXY=0` (the
+default) - otherwise a direct client could spoof its IP and defeat rate
+limits.
+
+**nginx** - minimal example (forward the app port, whatever you set `PORT` to):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name share.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:3300;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Real-IP $remote_addr;
+        client_max_body_size 0;
+    }
+}
+```
+
+For the full version - including TLS certificate directives and the
+sendfile-offload `location` block described below - see
+[`deploy/nginx.example.conf`](deploy/nginx.example.conf).
+
+**Caddy** - minimal example (Caddy handles TLS automatically):
+
+```
+share.example.com {
+    reverse_proxy 127.0.0.1:3300
+}
+```
+
+For a version with comments and options, see
+[`deploy/Caddyfile.example`](deploy/Caddyfile.example).
+
+### Optional: sendfile byte offload
+
+Two env vars let the reverse proxy serve file bytes itself instead of
+streaming them through the Bun process, using the kernel's `sendfile`:
+
+- `X_ACCEL_REDIRECT` - for **nginx**: set it to an internal `location` prefix
+  (e.g. `/_roeshare_blobs`), configured to serve blobs straight off disk. See
+  `deploy/nginx.example.conf` for the matching `location` block.
+- `X_SENDFILE` - for **Apache/Lighttpd**: set to `1` to use the `X-Sendfile`
+  response header.
+
+This only applies to files that need no server-side decryption: all
+end-to-end encrypted shares, or every file if you've also set
+`ENCRYPT_AT_REST=0`. Server-managed encrypted blobs still stream through the
+app either way, since only the app holds the key. Caddy has no equivalent -
+it streams through the app, which is still lightweight since Caddy itself
+doesn't buffer.
+
+This is entirely optional and only matters at very high concurrent
+stream counts (e.g. many simultaneous large-video views); leave both unset to
+stream everything through the app (the default, and fine for most
+deployments).
 
 ## Configuration
 
@@ -95,7 +231,12 @@ default except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `UPLOAD_PASSWORD`| (empty)                  | Require a password to create shares. Empty = open uploads.                  |
 | `DEFAULT_EXPIRY` | `604800` (7 days)        | Default expiry for new shares, in seconds. 0 = never.                       |
 | `DEFAULT_E2E`    | `1` (true)               | Whether new shares default to end-to-end encryption in the upload UI. 0 = default to server-managed shares. |
-| `ENCRYPT_AT_REST`| `1` (true)               | Whether server-managed (non-E2E) blobs are AES-256-CTR encrypted at rest. 0 = store them as plaintext (no server crypto). E2E shares are unaffected either way. |
+| `ENCRYPT_AT_REST`| `1` (true)               | Whether server-managed (non-E2E) blobs are AES-256-CTR encrypted at rest. 0 = store them as plaintext (no server crypto, lighter to serve). E2E shares are unaffected either way. |
+| `THEME_PRIMARY`  | (empty)                  | Hex colour (e.g. `#3b82f6`) to recolour the UI's primary/button accent. No CSS edit needed. See [CUSTOMIZING.md](CUSTOMIZING.md). |
+| `THEME_ACCENT`   | (empty)                  | Hex colour (e.g. `#22c55e`) to recolour links/highlights. No CSS edit needed. See [CUSTOMIZING.md](CUSTOMIZING.md). |
+| `X_ACCEL_REDIRECT`| (empty)                 | nginx internal `location` prefix for sendfile byte offload (advanced, optional). See [Behind a reverse proxy](#behind-a-reverse-proxy-tls). |
+| `X_SENDFILE`     | `0`                      | Set to `1` to use the Apache/Lighttpd `X-Sendfile` header for byte offload (advanced, optional). See [Behind a reverse proxy](#behind-a-reverse-proxy-tls). |
+| `ABANDONED_UPLOAD_TTL` | `172800` (48 hours) | How long an upload that was never finalized is kept before the background sweep deletes it, in seconds. |
 | `SWEEP_INTERVAL` | `3600` (1 hour)          | Background sweep interval for expired shares, in seconds.                   |
 
 If `SECRET` is unset, RoeShare generates an ephemeral key and warns at startup;
@@ -126,48 +267,22 @@ know:
   `SECRET`/passwords, a backup of the data volume may contain them — protect and
   encrypt volume backups accordingly. The file is written `0600`.
 
-## Deployment
+## Customization
 
-### Single binary
+RoeShare is meant to be rebranded. Short version:
 
-Bun can compile RoeShare into a standalone executable that bundles the runtime:
+- **Name & wordmark colours**: set `APP_NAME`, which carries its own colours
+  via `<col=RRGGBB>` and `<b>` tags, e.g.
+  `APP_NAME=<col=5b9dff>Acme<b><col=34d27b>Drop</b>`. The plain-text `<title>`
+  and PWA name derive from it automatically - no separate setting.
+- **Accent colours**: set `THEME_PRIMARY` / `THEME_ACCENT` to a hex colour
+  each, no CSS edit required.
+- **Icons**: replace `favicon.ico`, `favicon-16x16.png`, and
+  `favicon-32x32.png` in `public/`.
+- **Public URL**: set `BASE_URL` to your own domain(s).
 
-```sh
-bun build --compile src/server.js --outfile roeshare
-```
-
-Ship the resulting `roeshare` binary alongside the `public/` directory and your
-`.env`, then run `./roeshare`.
-
-### systemd
-
-Run it as a service with a unit like:
-
-```ini
-[Unit]
-Description=RoeShare
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/roeshare
-ExecStart=/usr/local/bin/bun run src/server.js
-EnvironmentFile=/opt/roeshare/.env
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Use `Restart=always` (not `on-failure`): the admin panel's **Restart** button
-exits the process cleanly (exit 0), so only `always` relaunches it. The Docker
-`docker-compose.yml` already uses `restart: unless-stopped`, which behaves the
-same way.
-
-### Docker / Compose
-
-A production `Dockerfile` and `docker-compose.yml` are included. Use `setup.sh`
-(see the Docker quick start above) or run `docker compose up -d --build`. The
-`roeshare-data` volume persists the database and uploaded blobs.
+See [CUSTOMIZING.md](CUSTOMIZING.md) for the full guide, including deep
+theming via `public/css/tokens.css`.
 
 ## Performance
 
@@ -185,6 +300,10 @@ A production `Dockerfile` and `docker-compose.yml` are included. Use `setup.sh`
   starts fast. SQLite runs in WAL mode with prepared statements throughout.
 - **Health**: `GET /healthz` returns `{ ok, uptime }` for load balancers and the
   container healthcheck.
+- **Reverse-proxy sendfile offload**: see
+  [Behind a reverse proxy](#behind-a-reverse-proxy-tls) for `X_ACCEL_REDIRECT` /
+  `X_SENDFILE`, which let nginx/Apache serve eligible blobs directly instead of
+  streaming them through the app.
 
 ## Security notes
 

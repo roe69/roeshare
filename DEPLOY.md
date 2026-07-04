@@ -1,4 +1,9 @@
-# Deploying RoeShare (CI)
+# Example: CI-driven deploys with GitHub Actions
+
+> This is one optional way to automate deploys; see [README.md](README.md) for
+> all the manual/Docker/reverse-proxy setup methods. Nothing here is required
+> to run RoeShare - it's a starting point if you want pushes to `main` to
+> redeploy automatically.
 
 Pushes to `main` trigger `.github/workflows/deploy.yml`, which runs on a
 **self-hosted runner on the target server** and rebuilds/restarts the container.
@@ -13,15 +18,15 @@ only RoeShare-specific step is the config file.
    for the runner's user (add it to the `docker` group, or run the runner as a
    user that can reach the Docker socket).
 
-2. **A registered self-hosted runner** for `roe69/roeshare`
+2. **A registered self-hosted runner** for `YOUR-ORG/YOUR-REPO`
    (*Settings → Actions → Runners → New self-hosted runner*), installed as a
    service so it survives reboots. To pin deploys to this specific box, give the
    runner an extra label (e.g. `roeshare`) and change the workflow's
    `runs-on: [self-hosted]` to `runs-on: [self-hosted, roeshare]`.
 
-3. **The persisted config** at `/opt/roeshare/.env` (override the path with a
-   repo Variable named `ENV_PATH`). Create it once — CI reads it but never
-   generates or overwrites it:
+3. **The persisted config** at `/opt/roeshare/.env` (an example path — use
+   whatever directory you like, and override it with a repo Variable named
+   `ENV_PATH`). Create it once — CI reads it but never generates or overwrites it:
 
    ```sh
    sudo install -d -m 700 /opt/roeshare
@@ -56,6 +61,11 @@ share.example.com, files.example.com {
     reverse_proxy 127.0.0.1:3300
 }
 ```
+
+For nginx, a full example, and the optional sendfile byte-offload setup, see
+the "Behind a reverse proxy (TLS)" section in [README.md](README.md) and
+[`deploy/nginx.example.conf`](deploy/nginx.example.conf) /
+[`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
 ## How redeploys stay safe and fast
 
