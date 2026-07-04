@@ -32,6 +32,83 @@ function withAccess(path) {
 
 const fileBase = id => `/api/shares/${encodeURIComponent(shareId)}/files/${encodeURIComponent(id)}`;
 
+// ---- Streamed E2E playback/download (Service Worker) -----------------------
+// A whole-file fetch+decrypt (e2eFetch below) OOMs on multi-GB video and can't
+// seek. Instead we hand the file's key + location to a Service Worker, which
+// exposes a virtual same-origin URL that answers Range requests by decrypting
+// only the ciphertext records a <video>/<audio> element (or a download) needs.
+// See public/sw.js for the streaming implementation.
+const SW_OK = 'serviceWorker' in navigator && self.isSecureContext;
+const swReadyPromise = SW_OK
+	? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).catch(() => null)
+	: null;
+
+// Registers `file` with the Service Worker and resolves to a virtual URL once
+// it acks readiness - '/_e2e-dl/<token>' for a full counted download,
+// '/_e2e/<token>' for an uncounted, seekable preview. Resolves to null if the
+// SW path is unavailable or registration fails for any reason, so the caller
+// can fall back to the existing whole-file Blob path.
+async function ensureE2eStream(file, count) {
+	if (!SW_OK || !e2eKeyB64) return null;
+	try {
+		const reg = await swReadyPromise;
+		if (!reg) return null;
+		let controller = navigator.serviceWorker.controller;
+		if (!controller) {
+			// First-ever load: the page may not be controlled yet even though the
+			// worker is active. Give clients.claim() a moment to take effect.
+			controller = await new Promise(resolve => {
+				if (navigator.serviceWorker.controller) return resolve(navigator.serviceWorker.controller);
+				const onChange = () => {
+					navigator.serviceWorker.removeEventListener('controllerchange', onChange);
+					resolve(navigator.serviceWorker.controller);
+				};
+				navigator.serviceWorker.addEventListener('controllerchange', onChange);
+				setTimeout(() => {
+					navigator.serviceWorker.removeEventListener('controllerchange', onChange);
+					resolve(navigator.serviceWorker.controller);
+				}, 2000);
+			});
+		}
+		if (!controller) return null;
+
+		const token = crypto.randomUUID();
+		const authHeaders = editToken ? { 'X-Edit-Token': editToken } : accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+		const ready = new Promise((resolve, reject) => {
+			const onMessage = e => {
+				const m = e.data;
+				if (!m || m.token !== token) return;
+				navigator.serviceWorker.removeEventListener('message', onMessage);
+				clearTimeout(timer);
+				if (m.type === 'e2e-ready') resolve();
+				else reject(new Error(m.message || 'registration failed'));
+			};
+			navigator.serviceWorker.addEventListener('message', onMessage);
+			const timer = setTimeout(() => {
+				navigator.serviceWorker.removeEventListener('message', onMessage);
+				reject(new Error('registration timed out'));
+			}, 8000);
+		});
+		controller.postMessage({
+			type: 'e2e-register',
+			token,
+			keyB64: e2eKeyB64,
+			fileBase: fileBase(file.id),
+			// file.size is the CIPHERTEXT size from share metadata; load() never
+			// overwrites it (only name/mime/cs come from the decrypted meta), so
+			// this is safe to read here regardless of call order.
+			cipherSize: file.size,
+			cs: file.cs,
+			mime: file.mime,
+			authHeaders,
+		});
+		await ready;
+		return (count ? '/_e2e-dl/' : '/_e2e/') + token;
+	} catch {
+		return null;
+	}
+}
+
 // The decrypted per-file mime is chosen by the uploader and must never be
 // trusted to pick how we render inline content. Derive the Blob type from the
 // classified preview `kind` instead, so a mislabeled file (e.g. text/html named
@@ -235,23 +312,44 @@ async function e2eFetch(file, count) {
 	return decryptFile(e2eKey, cipher, file.cs);
 }
 
+// A whole-file download's object URL used to be revoked on a fixed 30s timer,
+// which could cut off a slow write of a large file to disk. Revoke on page
+// unload instead, once it's no longer possible for a still-running save to
+// need the URL.
 function saveBytes(bytes, name, mime) {
 	const url = URL.createObjectURL(new Blob([bytes], { type: mime || 'application/octet-stream' }));
 	const a = el('a', { href: url, download: name });
 	document.body.append(a);
 	a.click();
 	a.remove();
-	setTimeout(() => URL.revokeObjectURL(url), 30000);
+	window.addEventListener('pagehide', () => URL.revokeObjectURL(url), { once: true });
 }
 
 async function e2ePreview(file, host) {
 	host.replaceChildren(el('div', { class: 'rl-center', style: 'padding:var(--rl-space-4)' }, el('span', { class: 'rl-spinner' })));
+	const kind = previewKind(file.mime, file.name);
+
+	// Video/audio: stream via the Service Worker so playback seeks and never
+	// loads the whole file into memory. Falls through to the whole-file Blob
+	// path below if the SW is unavailable.
+	if (kind === 'video' || kind === 'audio') {
+		const url = await ensureE2eStream(file, false);
+		if (url) {
+			const node = el(kind, { src: url, controls: true, preload: 'metadata' });
+			node.addEventListener('error', () => {
+				host.replaceChildren(el('p', { class: 'rl-dim', style: 'padding:var(--rl-space-2)' },
+					'This video could not be streamed in the browser; use Download.'));
+			});
+			host.replaceChildren(el('div', { class: 'rl-preview' }, node));
+			return node;
+		}
+	}
+
 	try {
 		const plain = await e2eFetch(file, false);
-		const kind = previewKind(file.mime, file.name);
 		if (kind === 'text') {
 			host.replaceChildren(el('pre', { class: 'rl-preview-text' }, new TextDecoder().decode(plain)));
-			return;
+			return null;
 		}
 		const url = URL.createObjectURL(new Blob([plain], { type: safeBlobType(kind, file.mime) }));
 		let node;
@@ -261,16 +359,28 @@ async function e2ePreview(file, host) {
 		else if (kind === 'pdf') node = el('iframe', { src: url, title: file.name });
 		else node = el('p', { class: 'rl-dim' }, 'No preview for this type.');
 		host.replaceChildren(el('div', { class: 'rl-preview' }, node));
+		return node;
 	} catch (e) {
 		const msg = e instanceof ApiError && e.status === 403 ? 'Preview is not available for one-time shares - use Download.' : 'Could not decrypt the preview.';
 		host.replaceChildren(el('p', { class: 'rl-dim', style: 'padding:var(--rl-space-2)' }, msg));
+		return null;
 	}
+}
+
+// file.size is the ciphertext (on-disk) size; derive the true plaintext size
+// for display by subtracting the per-record IV+tag overhead.
+function e2ePlainSize(file) {
+	if (!file.cs) return file.size;
+	const recordSize = file.cs + 28;
+	return file.size - 28 * Math.ceil(file.size / recordSize);
 }
 
 function e2eFileCard(file, canPreview) {
 	const kind = previewKind(file.mime, file.name);
 	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
 	const base = file.name.split('/').pop() || file.name;
+	const sizeText = formatBytes(e2ePlainSize(file));
+	const sub = el('div', { class: 'rl-file-sub' }, sizeText);
 
 	let toggle = null;
 	if (kind !== 'none' && canPreview) {
@@ -280,8 +390,20 @@ function e2eFileCard(file, canPreview) {
 			shown = !shown;
 			toggle.textContent = shown ? 'Hide' : 'Preview';
 			previewHost.classList.toggle('rl-hidden', !shown);
-			if (shown) await e2ePreview(file, previewHost);
-			else previewHost.replaceChildren();
+			if (shown) {
+				const media = await e2ePreview(file, previewHost);
+				// Nice-to-have: once the browser has read the container, show the
+				// duration alongside the size.
+				if (media && (kind === 'video' || kind === 'audio')) {
+					media.addEventListener('loadedmetadata', () => {
+						if (Number.isFinite(media.duration) && media.duration > 0) {
+							const mm = Math.floor(media.duration / 60);
+							const ss = Math.floor(media.duration % 60).toString().padStart(2, '0');
+							sub.textContent = `${sizeText} · ${mm}:${ss}`;
+						}
+					}, { once: true });
+				}
+			} else previewHost.replaceChildren();
 		});
 	}
 
@@ -289,6 +411,18 @@ function e2eFileCard(file, canPreview) {
 	download.addEventListener('click', async () => {
 		const label = download.textContent;
 		download.disabled = true;
+		// Streamed path: the Service Worker decrypts on the fly straight to the
+		// browser's save-to-disk, with one server-side download count and
+		// bounded memory even for multi-GB files.
+		const url = await ensureE2eStream(file, true);
+		if (url) {
+			const a = el('a', { href: url, download: base });
+			document.body.append(a);
+			a.click();
+			a.remove();
+			download.disabled = false;
+			return;
+		}
 		download.textContent = 'Decrypting...';
 		try {
 			saveBytes(await e2eFetch(file, true), base, file.mime);
@@ -304,7 +438,7 @@ function e2eFileCard(file, canPreview) {
 			el('div', { class: 'rl-file-icon' }, fileGlyph(file.mime, file.name)),
 			el('div', { class: 'rl-file-info' },
 				fileNameNode(file.name),
-				el('div', { class: 'rl-file-sub' }, formatBytes(file.size)),
+				sub,
 			),
 			el('div', { class: 'rl-file-actions' }, toggle, download),
 		),
@@ -379,7 +513,7 @@ function renderShare(share) {
 	// one-time share, or one with a download cap). Owners (editToken) may always
 	// preview; hide the Preview toggle otherwise so we never show a control that
 	// would just 403.
-	const canPreview = !!editToken || (!share.oneTime && share.maxDownloads == null);
+	const canPreview = !!editToken || !share.oneTime;
 	const totalSize = share.totalSize != null ? share.totalSize : files.reduce((s, f) => s + (f.size || 0), 0);
 
 	const downloads = share.maxDownloads
