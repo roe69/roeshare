@@ -102,7 +102,13 @@ async function serveStatic(req, pathname) {
 
 // ---- Expired-share sweeper -------------------------------------------------
 
-const selectExpired = db.query('SELECT id FROM shares WHERE deleted_at IS NULL AND expires_at IS NOT NULL AND expires_at < ?');
+// Only a finalized share's published-link expiry is enforced here - a
+// not-yet-finalized (still uploading) share must never be swept out from
+// under an in-progress upload just because its (not-yet-started) expiry
+// clock would otherwise have elapsed. Those are instead handled below as
+// abandoned uploads, on their own (much longer) TTL.
+const selectExpired = db.query('SELECT id FROM shares WHERE deleted_at IS NULL AND finalized = 1 AND expires_at IS NOT NULL AND expires_at < ?');
+const selectAbandoned = db.query('SELECT id FROM shares WHERE deleted_at IS NULL AND finalized = 0 AND created_at < ?');
 const markDeleted = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
 
 async function sweep() {
@@ -117,18 +123,44 @@ async function sweep() {
 		}
 	}
 	if (expired.length) console.log(`[sweep] removed ${expired.length} expired share(s)`);
+
+	// Abandoned (never finalized) uploads: no visitor has ever seen a link to
+	// these, so they cannot be "expired" in the published-link sense - but a
+	// draft that nobody ever finishes uploading/publishing must not sit on
+	// disk forever, so it gets its own, much longer TTL.
+	const abandoned = selectAbandoned.all(ts - config.abandonedUploadTtl);
+	for (const { id } of abandoned) {
+		try {
+			await deleteShareFiles(id);
+			markDeleted.run(ts, id);
+		} catch (e) {
+			console.error('sweep failed for', id, e);
+		}
+	}
+	if (abandoned.length) console.log(`[sweep] removed ${abandoned.length} abandoned upload(s)`);
 }
 
 // ---- Server ----------------------------------------------------------------
+
+let warnedProxy = false;
 
 const server = Bun.serve({
 	hostname: config.host,
 	port: config.port,
 	maxRequestBodySize: Math.max(64 * 1024 * 1024, config.chunkSize * 2),
+	// Bun's default idle timeout (~10s) aborts slow multi-GB chunk uploads and
+	// quiet/paused streaming responses; 255s is Bun's documented maximum. The
+	// streaming download handlers additionally disable the per-request timeout
+	// entirely, for transfers that can legitimately run even longer.
+	idleTimeout: 255,
 	async fetch(req, server) {
 		const url = new URL(req.url);
 		const method = req.method;
 		try {
+			if (!config.trustProxy && !warnedProxy && (req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip'))) {
+				warnedProxy = true;
+				console.warn('  WARNING: received X-Forwarded-For/X-Real-IP but TRUST_PROXY is off - all clients share one rate-limit bucket and real IPs are not seen. Set TRUST_PROXY=1 only if behind a trusted reverse proxy.');
+			}
 			let res = null;
 			if (url.pathname === '/healthz') {
 				res = json({ ok: true, uptime: Math.floor(process.uptime()) });

@@ -15,7 +15,7 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps } from '../lib/apikeys.js';
 import { enforce } from '../lib/ratelimit.js';
 
-const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id FROM shares WHERE id = ? AND deleted_at IS NULL');
+const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
 const insertFile = db.query(
 	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv) VALUES (?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?)'
@@ -41,8 +41,11 @@ function authShare(req, id) {
 	const share = getShare.get(id);
 	// Reject missing, soft-deleted, and expired shares (mirrors the read-path
 	// liveShare gate) so writes cannot land on a share that view/download already
-	// treat as gone.
-	if (!share || (share.expires_at !== null && share.expires_at < now())) return { res: error(404, 'Share not found') };
+	// treat as gone. A NON-finalized share is never treated as expired mid-upload:
+	// its published-link expiry clock does not start until finalize, so a slow
+	// multi-GB upload cannot be 404'd (and its partial blobs swept) while it is
+	// still in progress.
+	if (!share || (share.finalized && share.expires_at !== null && share.expires_at < now())) return { res: error(404, 'Share not found') };
 	const token = req.headers.get('x-edit-token');
 	if (!token || !safeEqual(token, share.edit_token)) return { res: error(403, 'Forbidden') };
 	return { share };

@@ -20,14 +20,20 @@ const insertShare = db.query(
 );
 const getFiles = db.query('SELECT id, name, size, mime, complete, download_count FROM files WHERE share_id = ? ORDER BY created_at ASC');
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
+// Shifts a share's expiry forward by the time spent uploading, so the
+// published-link expiry clock effectively starts at finalize rather than at
+// share creation (see the finalize handler below).
+const shiftExpiry = db.query('UPDATE shares SET expires_at = expires_at + (? - created_at) WHERE id = ?');
 const softDelete = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
 const incShareView = db.query('UPDATE shares SET view_count = view_count + 1 WHERE id = ?');
 
 // A share is "live" when it exists, is not soft-deleted, and has not expired.
+// A non-finalized share's expiry clock has not started yet (see finalize,
+// below), so it is never treated as expired while still being uploaded.
 function liveShare(id) {
 	const share = getShare.get(id);
 	if (!share || share.deleted_at != null) return null;
-	if (share.expires_at != null && share.expires_at < now()) return null;
+	if (share.finalized && share.expires_at != null && share.expires_at < now()) return null;
 	return share;
 }
 
@@ -255,7 +261,13 @@ export default function shares(router) {
 		if (!share) return error(404, 'Not found');
 		if (!isOwner(ctx.req, share)) return error(403, 'Forbidden');
 
+		// Start the published-link expiry clock at finalize, not at creation: shift
+		// expires_at forward by however long the upload took, so the link lives for
+		// its intended duration from the moment it is actually published. Only on
+		// the first finalize, so a re-finalize cannot keep pushing the clock out.
+		const firstFinalize = !share.finalized;
 		setFinalized.run(share.id);
+		if (firstFinalize && share.expires_at != null) shiftExpiry.run(now(), share.id);
 		return json({ id: share.id, url: `${requestOrigin(ctx.req, ctx.url)}/${share.id}` });
 	});
 
