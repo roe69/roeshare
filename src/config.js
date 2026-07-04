@@ -92,6 +92,23 @@ const appName = str('APP_NAME', '<col=e4e4ce>Roe<b><col=ff6b35>Share</b>');
 const appNameHtml = brandHtml(appName);
 const appTitle = appName.replace(/<[^>]*>/g, '').trim() || 'RoeShare';
 
+// Optional one-line re-theming with no CSS edit or build step: THEME_PRIMARY and
+// THEME_ACCENT (hex colours like #3b82f6) override the two semantic brand tokens
+// the whole UI is built from, injected as a <style> into every page's <head> (see
+// {{BRAND_STYLE}} in the HTML shells). Only strict hex is accepted so the value
+// can never break out of the style block. For deeper control, edit
+// public/css/tokens.css directly (the full source of truth for the palette).
+const hexColor = v => (/^#[0-9a-fA-F]{3,8}$/.test(v) ? v : '');
+const themePrimary = hexColor(str('THEME_PRIMARY'));
+const themeAccent = hexColor(str('THEME_ACCENT'));
+function buildBrandStyle() {
+	const rules = [];
+	if (themePrimary) rules.push(`--rl-primary:${themePrimary};--rl-primary-dark:${themePrimary};--rl-primary-light:${themePrimary}`);
+	if (themeAccent) rules.push(`--rl-accent:${themeAccent};--rl-accent-dark:${themeAccent}`);
+	return rules.length ? `<style>:root{${rules.join(';')}}</style>` : '';
+}
+const brandStyle = buildBrandStyle();
+
 // A SECRET is mandatory for signing. If none is provided we generate an
 // ephemeral one and warn - sessions/tokens will not survive a restart.
 let secret = str('SECRET');
@@ -119,15 +136,28 @@ export const config = Object.freeze({
 	ephemeralSecret,
 
 	// Brand name: the raw env string (for the settings editor), the rendered safe
-	// HTML (injected into pages), and the plain-text form (for <title>).
+	// HTML (injected into pages), and the plain-text form (for <title>). brandStyle
+	// is the optional theme-colour <style> override injected into every page head.
 	appName,
 	appNameHtml,
 	appTitle,
+	brandStyle,
 
 	// Only honor X-Forwarded-For / X-Real-IP when behind a trusted reverse proxy.
 	// When false (the default for a directly-exposed server), rate-limit and audit
 	// keys use the real socket peer so a client cannot spoof its identity.
 	trustProxy: bool('TRUST_PROXY', false),
+
+	// Reverse-proxy byte-serving offload. When set, the preview endpoint hands
+	// blobs that need no server-side decryption (E2E shares, or any file when
+	// ENCRYPT_AT_REST is off) to the proxy to serve via kernel sendfile instead of
+	// streaming them through this process - so one core can serve far more
+	// concurrent video streams. X_ACCEL_REDIRECT is an nginx internal-location
+	// prefix (e.g. /_roeshare_blobs); X_SENDFILE=1 uses the Apache/Lighttpd
+	// X-Sendfile header (absolute path). Off by default (bytes stream through the
+	// app). See the reverse-proxy setup guide.
+	xAccelRedirect: str('X_ACCEL_REDIRECT'),
+	xSendfile: bool('X_SENDFILE', false),
 
 	// New shares default to end-to-end encryption (client-side crypto; the server
 	// never sees the key or does any crypto for these). Operators can set
