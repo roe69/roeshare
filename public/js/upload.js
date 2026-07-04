@@ -24,6 +24,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 const backoff = n => Math.min(15000, 500 * 2 ** n) + Math.random() * 250;
 
 let config = null;
+// Captured from config on load so resetForm() can restore the checkbox to the
+// server's default even though config may be refreshed again by then.
+let defaultE2e = false;
 const selected = []; // { file, key, row: { wrap, bar, status }, done }
 let uploading = false;
 let keyCounter = 0;
@@ -50,6 +53,8 @@ const resultEl = $('#result');
 async function loadConfig() {
 	try {
 		config = await api.get('/api/config');
+		defaultE2e = !!config.defaultE2e;
+		$('#opt-e2e').checked = defaultE2e;
 	} catch (e) {
 		toastErr('Could not load server config');
 	}
@@ -696,7 +701,7 @@ function resetForm() {
 	$('#opt-limit').value = 'unlimited';
 	$('#opt-limit-num').value = '';
 	$('#opt-limit-num').classList.add('rl-hidden');
-	$('#opt-e2e').checked = false;
+	$('#opt-e2e').checked = defaultE2e;
 	refreshSlug();
 	refreshPasswordConfirm();
 	window.scrollTo({ top: 0, behavior: 'smooth' });

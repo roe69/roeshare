@@ -129,6 +129,17 @@ export const config = Object.freeze({
 	// keys use the real socket peer so a client cannot spoof its identity.
 	trustProxy: bool('TRUST_PROXY', false),
 
+	// New shares default to end-to-end encryption (client-side crypto; the server
+	// never sees the key or does any crypto for these). Operators can set
+	// DEFAULT_E2E=0 to default to server-managed shares.
+	defaultE2e: bool('DEFAULT_E2E', true),
+	// When true (default), server-managed (non-E2E) blobs are AES-256-CTR
+	// encrypted at rest; when false they are stored as plaintext (no server
+	// crypto - lighter, but raw-disk/backup access can read them). Existing
+	// already-encrypted files keep decrypting correctly regardless of this
+	// setting.
+	encryptAtRest: bool('ENCRYPT_AT_REST', true),
+
 	dataDir,
 	storageDir: resolve(dataDir, 'storage'),
 	dbPath: resolve(dataDir, 'roeshare.db'),

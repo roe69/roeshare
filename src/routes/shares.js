@@ -59,6 +59,7 @@ export default function shares(router) {
 			maxFileSize: config.maxFileSize,
 			maxShareSize: config.maxShareSize,
 			defaultExpiry: config.defaultExpiry,
+			defaultE2e: config.defaultE2e,
 			uploadPasswordRequired: !!config.uploadPassword,
 			// Resolved from the visitor's host so links match the domain in use.
 			baseUrl: requestOrigin(ctx.req, ctx.url),

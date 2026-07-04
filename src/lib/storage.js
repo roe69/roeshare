@@ -7,7 +7,7 @@ import { mkdir, open, rm, stat, readdir, rename } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { config } from '../config.js';
-import { ENC_ENABLED, transformAt, decryptStream } from './filecrypt.js';
+import { transformAt, decryptStream } from './filecrypt.js';
 
 // Random ids use the ids.js alphabet; custom share slugs add - and _. Neither
 // dots nor path separators are allowed, so a segment can never escape its dir.
@@ -44,7 +44,7 @@ export async function writeChunk(shareId, fileId, offset, data, iv) {
 	const fh = await open(path, flags);
 	try {
 		let buf = data instanceof Uint8Array ? data : new Uint8Array(data);
-		if (iv && ENC_ENABLED) buf = transformAt(iv, offset, buf);
+		if (iv) buf = transformAt(iv, offset, buf);
 		await fh.write(buf, 0, buf.length, offset);
 	} finally {
 		await fh.close();
@@ -59,7 +59,7 @@ export async function writeChunk(shareId, fileId, offset, data, iv) {
 export function blobRangeStream(shareId, fileId, start, end, iv) {
 	const f = Bun.file(blobPath(shareId, fileId));
 	const src = (end < start ? f.slice(0, 0) : f.slice(start, end + 1)).stream();
-	if (iv && ENC_ENABLED) return decryptStream(iv, start, src);
+	if (iv) return decryptStream(iv, start, src);
 	return src;
 }
 

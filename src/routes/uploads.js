@@ -111,8 +111,13 @@ export default function uploads(router) {
 
 		const fileId = newFileId();
 		// E2E shares arrive already encrypted by the client - store the bytes raw
-		// (iv = null means storage does not apply its own encryption layer).
-		insertFile.run(fileId, share.id, name, size, mime, now(), fileId, share.e2e ? null : newIv());
+		// (iv = null means storage does not apply its own encryption layer). A
+		// non-E2E file only gets an iv (and thus server-side encryption) when
+		// at-rest encryption is enabled; this is the only place ENCRYPT_AT_REST
+		// affects new writes - existing files keep decrypting via their own iv
+		// regardless of this setting (see storage.js).
+		const iv = share.e2e || !config.encryptAtRest ? null : newIv();
+		insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv);
 		return json({ fileId, received: 0 });
 	});
 

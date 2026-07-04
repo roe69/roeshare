@@ -94,6 +94,8 @@ default except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `CHUNK_SIZE`     | `8388608` (8 MiB)        | Upload chunk size advertised to clients, in bytes.                         |
 | `UPLOAD_PASSWORD`| (empty)                  | Require a password to create shares. Empty = open uploads.                  |
 | `DEFAULT_EXPIRY` | `604800` (7 days)        | Default expiry for new shares, in seconds. 0 = never.                       |
+| `DEFAULT_E2E`    | `1` (true)               | Whether new shares default to end-to-end encryption in the upload UI. 0 = default to server-managed shares. |
+| `ENCRYPT_AT_REST`| `1` (true)               | Whether server-managed (non-E2E) blobs are AES-256-CTR encrypted at rest. 0 = store them as plaintext (no server crypto). E2E shares are unaffected either way. |
 | `SWEEP_INTERVAL` | `3600` (1 hour)          | Background sweep interval for expired shares, in seconds.                   |
 
 If `SECRET` is unset, RoeShare generates an ephemeral key and warns at startup;
@@ -201,7 +203,13 @@ A production `Dockerfile` and `docker-compose.yml` are included. Use `setup.sh`
   CTR gives confidentiality, not integrity: it does not detect tampering, so
   someone with direct write access to the storage directory could corrupt or
   bit-flip stored ciphertext undetected. The app's access control and unguessable
-  ids remain the authorization boundary, not the ciphertext itself.
+  ids remain the authorization boundary, not the ciphertext itself. At-rest
+  encryption can be disabled with `ENCRYPT_AT_REST=0` for performance (no
+  server-side AES on upload/download, useful for large-video workloads with
+  many concurrent streams); this only affects new server-managed blobs -
+  end-to-end encrypted shares are always encrypted client-side regardless of
+  this setting, and existing on-disk files keep decrypting correctly since that
+  depends on the file's own stored IV, not this flag.
 - Opaque ids: random shares, file ids, and tokens are unguessable, so links
   cannot be enumerated. (Custom slugs are user-chosen and therefore guessable -
   password-protect anything sensitive that uses one.)
