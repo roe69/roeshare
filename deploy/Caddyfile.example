@@ -1,0 +1,25 @@
+# Minimal Caddy reverse-proxy config for RoeShare, with automatic HTTPS.
+# Copy to /etc/caddy/Caddyfile (or append this block to your existing one),
+# replace example.com, then `systemctl reload caddy`.
+#
+# NOTE: Caddy has no equivalent of nginx's X-Accel-Redirect or Apache/
+# Lighttpd's X-Sendfile, so it cannot do the kernel-sendfile preview offload
+# (see deploy/nginx.example.conf for that). With Caddy, leave X_ACCEL_REDIRECT
+# unset and X_SENDFILE unset/0 in the app's env - every preview simply streams
+# through the app as it always has. This is still lightweight: E2E shares (the
+# default) do zero server-side crypto either way, so the app is just relaying
+# bytes, not decrypting them. Only very high concurrency on large files (e.g.
+# many simultaneous video previews) would benefit from the nginx offload; if
+# you need that, use nginx instead.
+
+example.com {
+	reverse_proxy 127.0.0.1:3300 {
+		header_up Host {host}
+		header_up X-Forwarded-Proto {scheme}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Real-IP {remote_host}
+	}
+}
+
+# Remember to also set in the app's .env:
+#   TRUST_PROXY=1

@@ -5,11 +5,12 @@
 // access token or the owner edit token. Only complete files are ever streamed.
 
 import { db, now } from '../db.js';
+import { config } from '../config.js';
 import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/http.js';
 import { safeEqual } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
 import { verifyApiKey, readApiKey, readApiKeySession } from '../lib/apikeys.js';
-import { blobFile, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
+import { blobFile, blobPath, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
@@ -142,6 +143,22 @@ function readEnd(id) {
 	else activeReads.set(id, n);
 }
 
+// When an offload mode is configured and the file needs no server-side
+// decryption (E2E, or any file when at-rest encryption is off), return the
+// headers that tell the reverse proxy to serve the raw blob itself via
+// sendfile; otherwise null (stream through the app as usual). Range,
+// Content-Length and 206 handling are done by the proxy.
+function offloadHeaders(share, file) {
+	if (file.iv != null) return null;
+	if (config.xAccelRedirect) {
+		return { 'X-Accel-Redirect': `${config.xAccelRedirect}/${encodeURIComponent(share.id)}/${encodeURIComponent(file.id)}` };
+	}
+	if (config.xSendfile) {
+		return { 'X-Sendfile': blobPath(share.id, file.id) };
+	}
+	return null;
+}
+
 // Build a Range-aware response for a single blob. makeBody optionally wraps the
 // chosen stream (used to schedule one-time cleanup).
 function rangeResponse(share, file, req, opts = {}) {
@@ -193,6 +210,22 @@ export default function download(router) {
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
+		const offload = offloadHeaders(share, file);
+		if (offload) {
+			const serving = previewServing(file.mime);
+			return new Response(null, {
+				headers: {
+					...offload,
+					'Content-Type': serving.type,
+					'Content-Disposition': contentDisposition(file.name.split('/').pop(), serving.inline),
+					'Content-Security-Policy': PREVIEW_CSP,
+					'Cache-Control': 'private, max-age=31536000, immutable',
+					ETag: '"' + file.id + '"',
+					'Accept-Ranges': 'bytes',
+					...SECURITY_HEADERS,
+				},
+			});
+		}
 		const serving = previewServing(file.mime);
 		return rangeResponse(share, file, req, {
 			inline: serving.inline,
