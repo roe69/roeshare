@@ -2,7 +2,7 @@
 	"name": "roeshare",
 	"version": "0.1.0",
 	"private": true,
-	"description": "RoeShare - a secure, self-hosted file sharing platform with the RoeLite design system",
+	"description": "A secure, self-hosted, end-to-end-encryptable file sharing platform. No build step, zero runtime dependencies, single SQLite file.",
 	"author": "Roe <admin@roelite.net>",
 	"license": "SEE LICENSE IN LICENSE",
 	"type": "module",

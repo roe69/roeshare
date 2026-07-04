@@ -30,7 +30,8 @@ function renderPage(file) {
 	try {
 		out = readFileSync(join(PAGES_DIR, file), 'utf8')
 			.replaceAll('{{APP_NAME}}', config.appNameHtml)
-			.replaceAll('{{APP_TITLE}}', config.appTitle);
+			.replaceAll('{{APP_TITLE}}', config.appTitle)
+			.replaceAll('{{BRAND_STYLE}}', config.brandStyle);
 	} catch {
 		out = null;
 	}

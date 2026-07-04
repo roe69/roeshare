@@ -1,6 +1,8 @@
 /* ==========================================================================
-   RoeLite Design Tokens - Source of truth (ported from roelite-net)
+   Design tokens - the single source of truth for the palette.
    OSRS-inspired: pure black surfaces, gold/orange/brown trim.
+   Edit these for full control over theming; or set THEME_PRIMARY / THEME_ACCENT
+   env vars for a quick accent recolour without editing CSS.
    ========================================================================== */
 
 :root {
