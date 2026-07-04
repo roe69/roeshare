@@ -188,10 +188,20 @@ A production `Dockerfile` and `docker-compose.yml` are included. Use `setup.sh`
 
 - Encryption at rest: uploaded blobs are stored as AES-256-CTR ciphertext, keyed
   from `SECRET`, and decrypted only in memory while streaming to an authorized
-  request. Someone with raw disk, volume, or backup access cannot read the files.
-  CTR keeps downloads seekable. Back up `SECRET` - without it the files are
-  unrecoverable. (A random-slug share with no password is still reachable by
-  anyone who has the link; add a password for confidentiality.)
+  request. CTR keeps downloads seekable. Back up `SECRET` - without it the files
+  are unrecoverable. (A random-slug share with no password is still reachable by
+  anyone who has the link; add a password for confidentiality.) This guarantee -
+  that someone with raw disk, volume, or backup access cannot read the files -
+  holds when `SECRET` is provided via the host environment or `.env` and kept
+  outside the data volume. If `SECRET` is instead set or rotated through the
+  admin panel, it is written to `${DATA_DIR}/settings.env` inside the same data
+  volume as the ciphertext and the per-file IVs, so anyone who captures a volume
+  snapshot or backup can recover `SECRET` and decrypt the blobs; see "App-managed
+  settings" above. Encrypt and protect volume backups accordingly. Note also that
+  CTR gives confidentiality, not integrity: it does not detect tampering, so
+  someone with direct write access to the storage directory could corrupt or
+  bit-flip stored ciphertext undetected. The app's access control and unguessable
+  ids remain the authorization boundary, not the ciphertext itself.
 - Opaque ids: random shares, file ids, and tokens are unguessable, so links
   cannot be enumerated. (Custom slugs are user-chosen and therefore guessable -
   password-protect anything sensitive that uses one.)

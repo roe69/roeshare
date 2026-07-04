@@ -13,9 +13,12 @@ COPY package.json ./
 COPY src ./src
 COPY public ./public
 
-RUN mkdir -p /data
+RUN mkdir -p /data && chown -R bun:bun /data /app
 VOLUME ["/data"]
 EXPOSE 3300
+
+# Drop root: run as the non-root bun user (uid 1000) shipped by the base image.
+USER bun
 
 # Uses the unauthenticated /healthz endpoint.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \

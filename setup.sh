@@ -30,6 +30,7 @@ UPLOAD_PASSWORD=${UPLOAD_PASSWORD:-}
 SECRET=$SECRET
 TRUST_PROXY=${TRUST_PROXY:-0}
 EOF
+	chmod 600 .env
 	echo "  Wrote .env (admin password: $ADMIN_PASSWORD)"
 else
 	echo ".env already exists - keeping it."

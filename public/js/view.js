@@ -32,6 +32,19 @@ function withAccess(path) {
 
 const fileBase = id => `/api/shares/${encodeURIComponent(shareId)}/files/${encodeURIComponent(id)}`;
 
+// The decrypted per-file mime is chosen by the uploader and must never be
+// trusted to pick how we render inline content. Derive the Blob type from the
+// classified preview `kind` instead, so a mislabeled file (e.g. text/html named
+// "x.pdf") can never be interpreted as an active document in our origin.
+function safeBlobType(kind, mime) {
+	const m = String(mime || '').toLowerCase().split(';')[0].trim();
+	if (kind === 'image') return m.startsWith('image/') ? m : 'application/octet-stream';
+	if (kind === 'video') return m.startsWith('video/') ? m : 'application/octet-stream';
+	if (kind === 'audio') return m.startsWith('audio/') ? m : 'application/octet-stream';
+	if (kind === 'pdf') return 'application/pdf';
+	return 'application/octet-stream';
+}
+
 function clear() {
 	root.replaceChildren();
 }
@@ -159,13 +172,13 @@ async function loadText(file, pre) {
 	}
 }
 
-function fileCard(file) {
-	if (e2eKey) return e2eFileCard(file);
+function fileCard(file, canPreview) {
+	if (e2eKey) return e2eFileCard(file, canPreview);
 	const kind = previewKind(file.mime, file.name);
 	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
 	let expanded = false;
 
-	const toggle = kind === 'none' ? null : el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
+	const toggle = kind === 'none' || !canPreview ? null : el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
 	if (toggle) {
 		toggle.addEventListener('click', () => {
 			expanded = !expanded;
@@ -240,7 +253,7 @@ async function e2ePreview(file, host) {
 			host.replaceChildren(el('pre', { class: 'rl-preview-text' }, new TextDecoder().decode(plain)));
 			return;
 		}
-		const url = URL.createObjectURL(new Blob([plain], { type: file.mime || 'application/octet-stream' }));
+		const url = URL.createObjectURL(new Blob([plain], { type: safeBlobType(kind, file.mime) }));
 		let node;
 		if (kind === 'image') node = el('img', { src: url, alt: file.name, loading: 'lazy' });
 		else if (kind === 'video') node = el('video', { src: url, controls: true });
@@ -254,13 +267,13 @@ async function e2ePreview(file, host) {
 	}
 }
 
-function e2eFileCard(file) {
+function e2eFileCard(file, canPreview) {
 	const kind = previewKind(file.mime, file.name);
 	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
 	const base = file.name.split('/').pop() || file.name;
 
 	let toggle = null;
-	if (kind !== 'none') {
+	if (kind !== 'none' && canPreview) {
 		let shown = false;
 		toggle = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
 		toggle.addEventListener('click', async () => {
@@ -362,6 +375,11 @@ function renderShare(share) {
 	clear();
 	const files = share.files || [];
 	const count = files.length;
+	// The server rejects non-owner preview requests on any controlled share (a
+	// one-time share, or one with a download cap). Owners (editToken) may always
+	// preview; hide the Preview toggle otherwise so we never show a control that
+	// would just 403.
+	const canPreview = !!editToken || (!share.oneTime && share.maxDownloads == null);
 	const totalSize = share.totalSize != null ? share.totalSize : files.reduce((s, f) => s + (f.size || 0), 0);
 
 	const downloads = share.maxDownloads
@@ -424,7 +442,7 @@ function renderShare(share) {
 
 	// One framed card holding a tight list of file rows (previews expand inline).
 	const list = el('div', { class: 'rl-files' });
-	for (const f of files) list.append(fileCard(f));
+	for (const f of files) list.append(fileCard(f, canPreview));
 	root.append(el('section', { class: 'rl-card rl-files-card' }, list));
 }
 
