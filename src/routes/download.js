@@ -12,6 +12,7 @@ import { verifyApiKey, readApiKey, readApiKeySession } from '../lib/apikeys.js';
 import { blobFile, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
+import { enforce } from '../lib/ratelimit.js';
 
 // Only these MIME types are ever served inline (rendered in the browser on our
 // own origin). Everything else - HTML, SVG-with-doubt, scripts, office docs - is
@@ -159,23 +160,25 @@ function rangeResponse(share, file, req, opts = {}) {
 }
 
 export default function download(router) {
-	// Inline preview: never counts as a download, but must respect the same
-	// limit/one-time gates as /download so it cannot be used to exfiltrate the
-	// full bytes after the cap is reached, or to read a one-time share without
-	// ever burning it.
-	router.get('/api/shares/:id/files/:fileId/preview', async ({ req, url, params }) => {
+	// Inline preview: never counts as a download, so it cannot be metered against
+	// a one-time burn or a download cap. Rather than trying to approximate those
+	// gates here, any share with such a control is simply not previewable by a
+	// non-owner - only the owner and uncontrolled shares get inline preview.
+	router.get('/api/shares/:id/files/:fileId/preview', async ({ req, url, params, ip }) => {
+		const limited = enforce('download', ip, 300, 60_000);
+		if (limited) return limited;
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
 		const { ok, owner } = accessCheck(share, req, url);
 		if (!ok) return error(403, 'Password required');
 		// The owner (edit token or the API key that created the share) manages and
-		// restores their own share, so these gates do not apply to them. For everyone
-		// else: a one-time share is "burn after first retrieval", so serving its
-		// full bytes inline (repeatedly, without counting) would defeat that;
-		// likewise the download cap must hold.
+		// restores their own share, so this gate does not apply to them. For
+		// everyone else: preview streams the full bytes without counting a
+		// download, so for any controlled share (one-time, or a maxDownloads cap)
+		// serving it to a non-owner would silently bypass that control. Only
+		// uncontrolled shares may be previewed by visitors.
 		if (!owner) {
-			if (share.one_time) return error(403, 'Preview is disabled for one-time shares');
-			if (limitReached(share)) return error(410, 'Download limit reached');
+			if (share.one_time || share.max_downloads !== null) return error(403, 'Preview is disabled for one-time and download-limited shares');
 		}
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
@@ -187,6 +190,11 @@ export default function download(router) {
 	// Attachment download: counts as one download when serving without a Range
 	// header (a full delivery), so seeks/resumes do not double-count.
 	router.get('/api/shares/:id/files/:fileId/download', async ({ req, url, params, ip }) => {
+		// Generous per-IP cap: stops bandwidth/CPU exhaustion loops without
+		// interfering with legitimate range/seek streaming (a video scrubbing
+		// through a file makes many small Range requests).
+		const limited = enforce('download', ip, 300, 60_000);
+		if (limited) return limited;
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
 		const { ok, owner } = accessCheck(share, req, url);
@@ -227,6 +235,11 @@ export default function download(router) {
 	// Whole-share zip: one chunked archive of every complete file. Counts as one
 	// download; honors the same limit and one-time burn rules.
 	router.get('/api/shares/:id/download-all', async ({ req, url, params, ip }) => {
+		// A zip build is heavier per-request than a single-file stream, so it gets
+		// its own (lower) generous per-IP cap - still well above legitimate use,
+		// just enough to stop a bandwidth/CPU exhaustion loop.
+		const limited = enforce('zip', ip, 30, 60_000);
+		if (limited) return limited;
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
 		const { ok, owner } = accessCheck(share, req, url);

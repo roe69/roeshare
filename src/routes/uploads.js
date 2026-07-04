@@ -13,6 +13,7 @@ import { newFileId } from '../lib/ids.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps } from '../lib/apikeys.js';
+import { enforce } from '../lib/ratelimit.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
@@ -47,11 +48,35 @@ function authShare(req, id) {
 	return { share };
 }
 
+// Serialize chunk writes per file id: concurrent PATCHes for the same file
+// would otherwise all pass the offset===received check and race, each
+// buffering a body. Chain them so only one runs at a time.
+const fileLocks = new Map();
+function withFileLock(fileId, fn) {
+	const prev = fileLocks.get(fileId) || Promise.resolve();
+	// Run after prev settles either way, so one failed chunk never wedges the
+	// chain for the ones behind it.
+	const task = prev.then(fn, fn);
+	fileLocks.set(fileId, task);
+	const cleanup = () => {
+		// Only the current tail clears the entry - if another PATCH has already
+		// chained onto us, the map must keep pointing at that newer tail.
+		if (fileLocks.get(fileId) === task) fileLocks.delete(fileId);
+	};
+	task.then(cleanup, cleanup);
+	return task;
+}
+
 export default function uploads(router) {
 	// Register a file against a share before streaming its bytes.
-	router.post('/api/shares/:id/files', async ({ req, params }) => {
+	router.post('/api/shares/:id/files', async ({ req, params, ip }) => {
 		const { share, res } = authShare(req, params.id);
 		if (res) return res;
+
+		// Bounds the 10000-file-flood metadata-bloat vector (each registration is
+		// cheap on its own, but a flood of them still grows the files table).
+		const limited = enforce('file-reg', ip, 300, 60_000);
+		if (limited) return limited;
 
 		let body;
 		try {
@@ -101,40 +126,51 @@ export default function uploads(router) {
 	router.patch('/api/shares/:id/files/:fileId', async ({ req, params, query }) => {
 		const { share, res } = authShare(req, params.id);
 		if (res) return res;
-		const file = getFile.get(params.fileId, share.id);
-		if (!file) return error(404, 'File not found');
 
-		const offset = Number(query.get('offset'));
-		if (!Number.isFinite(offset) || offset < 0) return error(400, 'Invalid offset');
-		if (offset !== file.received) return error(409, 'Offset mismatch', { received: file.received });
+		// Everything below is serialized per file id: concurrent PATCHes for the
+		// same file would otherwise all read the same `received` and race past the
+		// offset check, each buffering a body before either one has written.
+		return withFileLock(params.fileId, async () => {
+			const file = getFile.get(params.fileId, share.id);
+			if (!file) return error(404, 'File not found');
 
-		// Reject oversized chunks BEFORE buffering the body into memory. A single
-		// chunk may never exceed chunkSize, and offset+len may never exceed the
-		// declared file size. This caps per-request memory and stops a flood of
-		// max-body PATCHes (each ~64 MiB) from being read in just to 413 them.
-		// E2E chunks carry a small per-record overhead (12-byte IV + 16-byte GCM
-		// tag); allow a 64-byte margin over chunkSize so they are not rejected.
-		const declaredLen = Number(req.headers.get('content-length'));
-		if (Number.isFinite(declaredLen) && declaredLen >= 0) {
-			if (declaredLen > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
-			if (offset + declaredLen > file.size) return error(413, 'Chunk exceeds declared file size');
-		}
+			const offset = Number(query.get('offset'));
+			if (!Number.isFinite(offset) || offset < 0) return error(400, 'Invalid offset');
+			if (offset !== file.received) return error(409, 'Offset mismatch', { received: file.received });
 
-		const buf = await req.arrayBuffer();
-		const chunk = new Uint8Array(buf);
-		if (file.received + chunk.length > file.size) return error(413, 'Chunk exceeds declared file size');
+			// Reject oversized chunks BEFORE buffering the body into memory. A single
+			// chunk may never exceed chunkSize, and offset+len may never exceed the
+			// declared file size. This caps per-request memory and stops a flood of
+			// max-body PATCHes (each ~64 MiB) from being read in just to 413 them.
+			// E2E chunks carry a small per-record overhead (12-byte IV + 16-byte GCM
+			// tag); allow a 64-byte margin over chunkSize so they are not rejected.
+			const declaredLen = Number(req.headers.get('content-length'));
+			if (Number.isFinite(declaredLen) && declaredLen >= 0) {
+				if (declaredLen > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
+				if (offset + declaredLen > file.size) return error(413, 'Chunk exceeds declared file size');
+			}
 
-		const received = await writeChunk(share.id, file.id, offset, chunk, file.iv);
-		const complete = received === file.size ? 1 : 0;
-		updateReceived.run(received, complete, file.id);
-		// Lifetime stats when a file first finishes (persist past deletion).
-		if (complete && !file.complete) {
-			bumpMetric('files_uploaded');
-			bumpMetric('bytes_uploaded', file.size);
-			bumpUploader(share.creator_ip, { bytes: file.size });
-			// Attribute the bytes to the API key when this share was created via one.
-			if (share.api_key_id) recordKeyUsage(share.api_key_id, { bytes: file.size });
-		}
-		return json({ received, complete: !!complete });
+			const buf = await req.arrayBuffer();
+			const chunk = new Uint8Array(buf);
+			// The Content-Length guard above is skipped entirely when the client
+			// omits it (e.g. chunked transfer encoding, where Number(null) === 0
+			// would otherwise pass as "0 <= 0"). Cap the actual bytes read too, so
+			// that path cannot smuggle an oversized chunk past the header check.
+			if (chunk.length > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
+			if (file.received + chunk.length > file.size) return error(413, 'Chunk exceeds declared file size');
+
+			const received = await writeChunk(share.id, file.id, offset, chunk, file.iv);
+			const complete = received === file.size ? 1 : 0;
+			updateReceived.run(received, complete, file.id);
+			// Lifetime stats when a file first finishes (persist past deletion).
+			if (complete && !file.complete) {
+				bumpMetric('files_uploaded');
+				bumpMetric('bytes_uploaded', file.size);
+				bumpUploader(share.creator_ip, { bytes: file.size });
+				// Attribute the bytes to the API key when this share was created via one.
+				if (share.api_key_id) recordKeyUsage(share.api_key_id, { bytes: file.size });
+			}
+			return json({ received, complete: !!complete });
+		});
 	});
 }

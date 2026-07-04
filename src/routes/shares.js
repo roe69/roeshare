@@ -195,6 +195,8 @@ export default function shares(router) {
 	// ---- Visitor metadata --------------------------------------------------
 
 	router.get('/api/shares/:id', ctx => {
+		const limited = enforce('meta', ctx.ip, 240, 60_000);
+		if (limited) return limited;
 		const share = liveShare(ctx.params.id);
 		if (!share) return error(404, 'Not found');
 

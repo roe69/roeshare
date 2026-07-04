@@ -10,6 +10,12 @@ const COMPRESSIBLE = /^(text\/|application\/(json|manifest\+json|javascript|xml)
 // Don't bother compressing tiny payloads - the framing overhead isn't worth it.
 const MIN_BYTES = 256;
 
+// Don't run a huge body through the blocking sync brotli/gzip call - that would
+// stall the event loop for every other in-flight request. Bodies above this size
+// are served uncompressed instead (they are expected to be rare for the
+// text/JSON responses this module handles at all).
+const MAX_BYTES = 2 * 1024 * 1024;
+
 export function pickEncoding(req) {
 	const ae = req.headers.get('accept-encoding') || '';
 	if (/\bbr\b/.test(ae)) return 'br';
@@ -52,6 +58,7 @@ export async function compressResponse(req, res) {
 	const headers = new Headers(res.headers);
 	headers.set('Vary', 'Accept-Encoding');
 	if (buf.length < MIN_BYTES) return new Response(buf, { status: res.status, headers });
+	if (buf.length > MAX_BYTES) return new Response(buf, { status: res.status, headers });
 	const out = compressBytes(buf, enc);
 	headers.set('Content-Encoding', enc);
 	headers.set('Content-Length', String(out.length));
