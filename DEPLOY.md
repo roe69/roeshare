@@ -64,7 +64,7 @@ share.example.com, files.example.com {
 ```
 
 For nginx, a full example, and the optional sendfile byte-offload setup, see
-the "Behind a reverse proxy (TLS)" section in [README.md](README.md) and
+the "HTTPS (reverse proxy)" section in [README.md](README.md) and
 [`deploy/nginx.example.conf`](deploy/nginx.example.conf) /
 [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 

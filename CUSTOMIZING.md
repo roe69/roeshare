@@ -118,4 +118,4 @@ BASE_URL=https://share.example.com,https://files.example.com
 
 Multi-domain serving requires `TRUST_PROXY=1` and a reverse proxy in front
 that forwards the `Host` header (and ideally `X-Forwarded-Proto`) - see the
-"Behind a reverse proxy" section in [README.md](README.md).
+"HTTPS (reverse proxy)" section in [README.md](README.md).
