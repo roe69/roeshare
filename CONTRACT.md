@@ -180,7 +180,7 @@ created (others 404):
 - `GET /api/v1/shares/:id` -> the share plus `files: [{ id, name, size, received, mime, complete, downloadCount, download }]` (the `download` URL is ready to fetch with the same key).
 - `DELETE /api/v1/shares/:id` -> soft-delete the share + drop its blobs. `{ ok: true }`.
 - Retrieval: the existing `GET /api/shares/:id/files/:fileId/download` (and `/preview`,
-  `/download-all`) treat the **owning API key** as the owner, so a private (even
+  `/download-all`) treat the owning API key as the owner, so a private (even
   password-protected) backup is fetched by sending `Authorization: Bearer rsk_...` -
   no per-share password or edit token needed. Range-aware for resumable restores.
 

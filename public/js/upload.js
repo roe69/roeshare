@@ -661,7 +661,6 @@ async function showResult(id, url, e2e) {
 
 	resultEl.append(
 		el('div', { class: 'rl-result' },
-			el('div', { class: 'rl-result-check', 'aria-hidden': 'true' }, '✓'),
 			el('h1', { class: 'rl-h1', style: 'margin:0' }, 'Your share is live'),
 			el('p', { class: 'rl-muted', style: 'margin:0;max-width:46ch' },
 				e2e

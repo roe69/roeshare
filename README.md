@@ -146,7 +146,7 @@ Full annotated versions: [`deploy/Caddyfile.example`](deploy/Caddyfile.example),
 directives and the optional `X_ACCEL_REDIRECT` sendfile offload, which lets
 nginx serve encryption-free file bytes straight off disk at high concurrency).
 
-No proxy yet? Add Caddy to the same compose file and you're done:
+If you don't have a reverse proxy yet, add Caddy to the same compose file:
 
 ```yaml
   caddy:
@@ -198,7 +198,7 @@ publishes the image and redeploys a server on every push.
 Everything the UI does is a JSON API under `/api` - shares, chunked uploads,
 downloads, admin - documented in [CONTRACT.md](CONTRACT.md).
 
-For scripts and other servers, create an **API key** in the admin panel and
+For scripts and other servers, create an API key in the admin panel and
 upload with one request:
 
 ```sh
@@ -212,7 +212,7 @@ curl -X POST "https://share.example.com/api/v1/upload?title=Report" \
 Keys can be scoped (size caps, max lifetime, slug/password permissions) and
 revoked; large files can use the resumable chunked flow; a key can list,
 download, and delete its own shares - enough to drive an external backup.
-The admin panel's **API docs** page documents every endpoint with copy-ready
+The admin panel's API docs page documents every endpoint with copy-ready
 examples, and key holders can manage their shares in the browser at `/api`.
 
 ## Security notes

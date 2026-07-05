@@ -9,7 +9,7 @@ Pushes to `main` first run `.github/workflows/publish.yml`, which builds the
 image once and pushes it to `roe69/roeshare:latest` on Docker Hub. When that
 succeeds, `.github/workflows/deploy.yml` runs on a **self-hosted runner on
 the target server**, pulls the freshly published image, and swaps the
-container onto it — the server never builds anything and runs the exact image
+container onto it - the server never builds anything and runs the exact image
 users get. The server itself holds no config at all: instance settings (port,
 domains) live in the tracked [`deploy/production.yml`](deploy/production.yml)
 overlay, and the secret values are GitHub **repository secrets** injected as
@@ -18,7 +18,7 @@ Compose. Nothing is written to disk on the host.
 
 ## One-time setup
 
-1. **Docker Engine + Compose v2 plugin** on the server — `docker compose
+1. **Docker Engine + Compose v2 plugin** on the server - `docker compose
    version` must work for the runner's user (add it to the `docker` group, or
    run the runner as a user that can reach the Docker socket).
 
@@ -36,19 +36,19 @@ Compose. Nothing is written to disk on the host.
    | `DOCKERHUB_TOKEN`    | Docker Hub access token (read & write scope).                |
    | `BASE_URL`           | Public URL(s), comma-separated; first entry is canonical.    |
    | `ADMIN_PASSWORD`     | Admin panel login.                                           |
-   | `SECRET`             | `openssl rand -hex 32` — signs tokens, derives the at-rest encryption key. |
+   | `SECRET`             | `openssl rand -hex 32` - signs tokens, derives the at-rest encryption key. |
    | `UPLOAD_PASSWORD`    | Optional; unset/empty = open uploads.                        |
 
    > **Back up `SECRET` somewhere outside GitHub too.** It derives the at-rest
-   > encryption key — lose it and every uploaded file becomes unrecoverable
+   > encryption key - lose it and every uploaded file becomes unrecoverable
    > (GitHub secrets cannot be read back out).
 
-4. **Instance config** — edit [`deploy/production.yml`](deploy/production.yml)
+4. **Instance config** - edit [`deploy/production.yml`](deploy/production.yml)
    for the published host port (`!override` replaces the base mapping; prefix
    it with `127.0.0.1:` if your reverse proxy runs directly on the host, so
    nothing else can reach the app).
 
-That's it. The first push publishes the image and starts it on the server
+The first push publishes the image and starts it on the server
 (or run the two workflows manually via *Run workflow*, publish first).
 
 ## Reverse proxy
@@ -92,17 +92,17 @@ A normal push deploy never resets - it reuses the volume (below).
   only pulls it and restarts. `concurrency` cancels superseded deploys, and
   the previous image is pruned after the swap.
 - **Deterministic**: `COMPOSE_PROJECT_NAME=roeshare` fixes the container and
-  volume names regardless of which runner or checkout path runs the job — so you
+  volume names regardless of which runner or checkout path runs the job, so you
   can swap the runner to a fresh box and redeploy with no renaming surprises.
 
-> **Swapping to a *different* server?** The named volume is local to each Docker
+> **Swapping to a different server.** The named volume is local to each Docker
 > engine, so a brand-new box starts empty. To carry data across boxes, either
 > back up/restore the volume (`docker run --rm -v roeshare_roeshare-data:/d -v
 > "$PWD":/b alpine tar czf /b/roeshare-data.tgz -C /d .`) or switch the compose
 > volume to a bind mount on shared/persistent storage.
 
 > **Secrets in the volume.** If you edit settings via the admin panel, they're
-> saved to `settings.env` inside the data volume — and that file can hold
+> saved to `settings.env` inside the data volume, and that file can hold
 > `SECRET`/passwords (written `0600`). A volume backup therefore may contain your
 > master key, so protect/encrypt those backups. Settings changed in the panel
 > override the deploy-time environment (repository secrets and
