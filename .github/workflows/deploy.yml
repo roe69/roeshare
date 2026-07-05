@@ -45,6 +45,7 @@ jobs:
       # ("roeshare_roeshare-data") no matter which runner/path runs this.
       COMPOSE_PROJECT_NAME: roeshare
       # Interpolated into deploy/production.yml by every compose call below.
+      BASE_URL: ${{ secrets.BASE_URL }}
       ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
       UPLOAD_PASSWORD: ${{ secrets.UPLOAD_PASSWORD }}
       SECRET: ${{ secrets.SECRET }}
@@ -64,6 +65,8 @@ jobs:
             || { echo "::error::Repository secret ADMIN_PASSWORD is not set."; exit 1; }
           [ -n "$SECRET" ] \
             || { echo "::error::Repository secret SECRET is not set."; exit 1; }
+          [ -n "$BASE_URL" ] \
+            || { echo "::error::Repository secret BASE_URL is not set."; exit 1; }
 
       - name: Deploy
         run: |

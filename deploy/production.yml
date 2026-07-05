@@ -5,12 +5,11 @@
 services:
   roeshare:
     image: roe69/roeshare:latest
-    # 127.0.0.1: only the local reverse proxy can reach the app (TRUST_PROXY=1
-    # would let direct visitors spoof their IP otherwise).
+    # Host port the reverse proxy forwards to.
     ports: !override
-      - "127.0.0.1:6968:3300"
+      - "6968:3300"
     environment:
-      BASE_URL: https://share.example.com,https://files.example.com
+      BASE_URL: ${BASE_URL}
       TRUST_PROXY: "1"
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       UPLOAD_PASSWORD: ${UPLOAD_PASSWORD:-}

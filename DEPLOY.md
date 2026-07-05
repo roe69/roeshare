@@ -34,6 +34,7 @@ Compose. Nothing is written to disk on the host.
    | -------------------- | ------------------------------------------------------------ |
    | `DOCKERHUB_USERNAME` | Docker Hub account the publish workflow pushes as.           |
    | `DOCKERHUB_TOKEN`    | Docker Hub access token (read & write scope).                |
+   | `BASE_URL`           | Public URL(s), comma-separated; first entry is canonical.    |
    | `ADMIN_PASSWORD`     | Admin panel login.                                           |
    | `SECRET`             | `openssl rand -hex 32` — signs tokens, derives the at-rest encryption key. |
    | `UPLOAD_PASSWORD`    | Optional; unset/empty = open uploads.                        |
@@ -42,11 +43,10 @@ Compose. Nothing is written to disk on the host.
    > encryption key — lose it and every uploaded file becomes unrecoverable
    > (GitHub secrets cannot be read back out).
 
-4. **Instance config** — edit [`deploy/production.yml`](deploy/production.yml):
-   the published host port (`!override` replaces the base mapping; keep the
-   `127.0.0.1:` bind so only the local reverse proxy can reach the app) and
-   `BASE_URL` (comma-separated for multi-domain serving — first entry is
-   canonical, links are built from whichever of these the visitor is on).
+4. **Instance config** — edit [`deploy/production.yml`](deploy/production.yml)
+   for the published host port (`!override` replaces the base mapping; prefix
+   it with `127.0.0.1:` if your reverse proxy runs directly on the host, so
+   nothing else can reach the app).
 
 That's it. The first push publishes the image and starts it on the server
 (or run the two workflows manually via *Run workflow*, publish first).
