@@ -108,6 +108,12 @@ async function ensureE2eStream(file, count) {
 			type: 'e2e-register',
 			token,
 			keyB64: e2eKeyB64,
+			// Decrypted basename: the worker needs it to name the saved file via
+			// Content-Disposition (a download triggered by navigating to the
+			// virtual URL cannot get its name from an <a download> attribute).
+			// It never reaches the server - the virtual URL is answered entirely
+			// inside the Service Worker.
+			name: file.name.split('/').pop() || file.name,
 			fileBase: fileBase(file.id),
 			// file.size is the CIPHERTEXT size from share metadata; load() never
 			// overwrites it (only name/mime/cs come from the decrypted meta), so
@@ -432,10 +438,14 @@ function e2eFileCard(file, canPreview) {
 		// bounded memory even for multi-GB files.
 		const url = await ensureE2eStream(file, true);
 		if (url) {
-			const a = el('a', { href: url, download: base });
-			document.body.append(a);
-			a.click();
-			a.remove();
+			// Must be a NAVIGATION, not an <a download> click: the download
+			// attribute hands the URL to the browser's download manager, whose
+			// browser-process request bypasses Service Workers entirely - it hit
+			// the real server, 404'd, and the recipient saw "file wasn't
+			// available on site". A top-level navigation IS matched against the
+			// worker's scope; the worker replies with Content-Disposition:
+			// attachment, so the browser starts saving and the page stays put.
+			location.assign(url);
 			download.disabled = false;
 			return;
 		}

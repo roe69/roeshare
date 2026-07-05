@@ -20,7 +20,15 @@
 //   /_e2e-dl/<token>   - the full plaintext file, streamed straight to the
 //                        browser's save-to-disk machinery. Backed by a SINGLE
 //                        GET .../download so the server's download counters /
-//                        one-time burn only fire once.
+//                        one-time burn only fire once. The page NAVIGATES to
+//                        this URL (location.assign) rather than clicking an
+//                        <a download> anchor: an anchor download hands the
+//                        URL to the browser's download manager, whose
+//                        browser-process request bypasses Service Workers and
+//                        404s against the real server. A navigation is always
+//                        matched against the worker's scope; the attachment
+//                        disposition (with the decrypted filename) turns it
+//                        into a save-to-disk without leaving the page.
 //
 // For either URL, this worker maps the *plaintext* byte range the browser
 // asked for onto the *ciphertext* records that cover it, fetches only those
@@ -49,8 +57,15 @@
 const IV_LEN = 12;
 const ENC_OVERHEAD = 28; // IV_LEN + 16-byte GCM tag
 
-// token -> { key, fileBase, cipherSize, cs, mime, plainTotal, numChunks, authHeaders, createdAt }
+// token -> { key, name, fileBase, cipherSize, cs, mime, plainTotal, numChunks, authHeaders, createdAt }
 const files = new Map();
+
+// Same encoding as the server's contentDisposition (src/lib/http.js): an
+// ASCII-safe quoted fallback plus RFC 5987 filename* for the real name.
+function attachmentDisposition(filename) {
+	const fallback = String(filename).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+	return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
 
 // ---- IndexedDB persistence ---------------------------------------------------
 
@@ -153,6 +168,7 @@ self.addEventListener('message', async e => {
 		const entry = {
 			token: m.token,
 			key,
+			name: m.name,
 			fileBase: m.fileBase,
 			cipherSize: m.cipherSize,
 			cs: m.cs,
@@ -320,7 +336,7 @@ async function handleDownload(token, req, endpoint) {
 					'Content-Length': String(end - start + 1),
 					'Content-Range': `bytes ${start}-${end}/${total}`,
 					'Accept-Ranges': 'bytes',
-					'Content-Disposition': 'attachment',
+					'Content-Disposition': attachmentDisposition(entry.name || token),
 					'Cache-Control': 'no-store',
 				},
 			});
@@ -382,7 +398,9 @@ async function handleDownload(token, req, endpoint) {
 			// Advertise ranges so an interrupted download offers Resume (handled
 			// above) instead of only Retry-from-zero.
 			'Accept-Ranges': 'bytes',
-			'Content-Disposition': 'attachment',
+			// The filename must come from this header: a navigation download has
+			// no <a download> attribute to name the file.
+			'Content-Disposition': attachmentDisposition(entry.name || token),
 			'Cache-Control': 'no-store',
 		},
 	});
