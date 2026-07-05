@@ -98,7 +98,7 @@ values under `environment:` always win over `env_file`, so a leftover
 `ADMIN_PASSWORD: change-me` there would silently override your `.env`.
 
 The image is ~150 MB (Bun on Alpine, zero npm dependencies), works on amd64
-and arm64, exposes `/healthz` for the container healthcheck, and persists the
+and arm64, exposes `/health` for the container healthcheck, and persists the
 database and uploads in the `roeshare-data` named volume. (`roeshare` is just
 the container/volume name above - rename it to whatever you'd like.)
 
@@ -416,7 +416,7 @@ theming via `public/css/tokens.css`.
 - **No build step, no dependencies**: the frontend is plain ES modules and the
   server has zero npm runtime dependencies, which keeps the image small and cold
   starts fast. SQLite runs in WAL mode with prepared statements throughout.
-- **Health**: `GET /healthz` returns `{ ok, uptime }` for load balancers and the
+- **Health**: `GET /health` returns `{ ok, uptime }` for load balancers and the
   container healthcheck.
 - **Reverse-proxy sendfile offload**: see
   [Behind a reverse proxy](#behind-a-reverse-proxy-tls) for `X_ACCEL_REDIRECT` /

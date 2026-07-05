@@ -221,7 +221,7 @@ async function loadInstance(host) {
 	try {
 		const [settings, health] = await Promise.all([
 			api.get('/api/admin/settings'),
-			fetch('/healthz', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
+			fetch('/health', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
 		]);
 		const ro = settings.readOnly || {};
 		const up = health && Number.isFinite(health.uptime) ? formatUptime(health.uptime) : '-';
@@ -1640,7 +1640,7 @@ function pollHealthThenReload() {
 	const t = setInterval(async () => {
 		tries++;
 		try {
-			const r = await fetch('/healthz', { cache: 'no-store' });
+			const r = await fetch('/health', { cache: 'no-store' });
 			if (r.ok) {
 				clearInterval(t);
 				location.reload();

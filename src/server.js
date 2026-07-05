@@ -168,7 +168,7 @@ const server = Bun.serve({
 				console.warn('  WARNING: received X-Forwarded-For/X-Real-IP but TRUST_PROXY is off - all clients share one rate-limit bucket and real IPs are not seen. Set TRUST_PROXY=1 only if behind a trusted reverse proxy.');
 			}
 			let res = null;
-			if (url.pathname === '/healthz') {
+			if (url.pathname === '/health') {
 				res = json({ ok: true, uptime: Math.floor(process.uptime()) });
 			} else {
 				const matched = router.match(method, url.pathname);

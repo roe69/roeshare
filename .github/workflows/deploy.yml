@@ -91,8 +91,8 @@ jobs:
           PORT="${PORT:-3300}"
           echo "Waiting for RoeShare to report healthy on 127.0.0.1:${PORT} ..."
           for _ in $(seq 1 30); do
-            if curl -fsS "http://127.0.0.1:${PORT}/healthz" >/dev/null 2>&1; then
-              echo "Healthy:"; curl -fsS "http://127.0.0.1:${PORT}/healthz"; echo
+            if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+              echo "Healthy:"; curl -fsS "http://127.0.0.1:${PORT}/health"; echo
               exit 0
             fi
             sleep 2
