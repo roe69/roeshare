@@ -164,7 +164,7 @@ function offloadHeaders(share, file) {
 // stat'd the file / parsed the Range passes `size` and `range` to avoid a
 // second stat syscall and re-parse on the hot streaming path.
 function rangeResponse(share, file, req, opts = {}) {
-	const { inline = false, contentType, makeBody, extraHeaders } = opts;
+	const { inline = false, contentType, makeBody, extraHeaders, head = false } = opts;
 	const size = opts.size !== undefined ? opts.size : blobFile(share.id, file.id).size;
 	const range = opts.range !== undefined ? opts.range : parseRange(req.headers.get('range'), size);
 	if (range?.invalid) {
@@ -175,8 +175,14 @@ function rangeResponse(share, file, req, opts = {}) {
 	}
 	const start = range ? range.start : 0;
 	const end = range ? range.end : size - 1;
-	const decrypted = blobRangeStream(share.id, file.id, start, end, file.iv);
-	const body = makeBody ? makeBody(decrypted) : decrypted;
+	// HEAD gets the exact status/headers a GET would, but must never open the
+	// blob stream: Bun drops an unread body without cancelling it, so the
+	// createReadStream fd would leak on every probe.
+	let body = null;
+	if (!head) {
+		const decrypted = blobRangeStream(share.id, file.id, start, end, file.iv);
+		body = makeBody ? makeBody(decrypted) : decrypted;
+	}
 	return new Response(body, {
 		status: range ? 206 : 200,
 		headers: {
@@ -231,6 +237,7 @@ export default function download(router) {
 		return rangeResponse(share, file, req, {
 			inline: serving.inline,
 			contentType: serving.type,
+			head: req.method === 'HEAD',
 			extraHeaders: {
 				'Content-Security-Policy': PREVIEW_CSP,
 				// Previewed bytes are immutable content addressed by file id, so a
@@ -269,6 +276,14 @@ export default function download(router) {
 
 		const size = blobFile(share.id, file.id).size;
 		const range = parseRange(req.headers.get('range'), size);
+		// HEAD is a pure probe (the E2E view page pre-flights one before
+		// committing a navigation download): answer from metadata alone, before
+		// the one-time read tracking below. Reaching that machinery with a body
+		// Bun never drains would bump activeReads without a matching readEnd,
+		// stalling a later burn forever.
+		if (req.method === 'HEAD') {
+			return rangeResponse(share, file, req, { inline: false, size, range, head: true });
+		}
 		// A "full" delivery is a non-owner GET whose range (or the absence of
 		// one) reaches the last byte - i.e. draining the stream delivers the
 		// whole file. Anything else (a partial range probe, a HEAD, or the
@@ -353,6 +368,19 @@ export default function download(router) {
 		const totalSize = files.reduce((sum, f) => sum + f.size, 0);
 		if (totalSize >= ZIP_LIMIT || files.some(f => f.size >= ZIP_LIMIT)) {
 			return error(413, 'Share is too large for a single zip; download the files individually');
+		}
+
+		// Same probe rule as the single-file download: HEAD answers headers-only
+		// and never constructs the archive stream.
+		if (req.method === 'HEAD') {
+			return new Response(null, {
+				headers: {
+					'Content-Type': 'application/zip',
+					'Content-Disposition': contentDisposition((share.title || share.id) + '.zip', false),
+					'Cache-Control': 'no-store',
+					...SECURITY_HEADERS,
+				},
+			});
 		}
 
 		const entries = files.map(f => ({

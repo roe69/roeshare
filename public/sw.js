@@ -44,15 +44,16 @@
 // from the URL fragment (which is never sent to any server).
 //
 // Registrations are held in memory AND persisted to IndexedDB (a CryptoKey
-// survives structured clone, so the key stays non-extractable). Persistence is
-// what makes the virtual URLs survive this worker being terminated: the
-// browser kills idle/long-running Service Workers at will, and it re-requests
-// a download URL OUTSIDE the page that registered it - a Retry from the
-// downloads bar, a Resume after a pause, or a relaunch. Before persistence,
-// any of those spawned a fresh worker with an empty map, the virtual URL
-// 404'd, and Chrome reported "File wasn't available on site". The key already
-// lives in the recipient's history (it is part of the share link), so the IDB
-// copy adds no new exposure; entries are swept after IDB_TTL regardless.
+// survives structured clone, so the key stays non-extractable). Persistence
+// lets the virtual URLs survive this worker being terminated: the browser
+// kills idle Service Workers at will, so a seek in a long-paused video or a
+// download navigation issued after the worker died must be servable by a
+// fresh worker instance hydrating from IDB. It does NOT rescue the downloads
+// bar's own Retry/Resume: those are issued by the browser's download manager,
+// whose requests never route through Service Workers - a recipient retries by
+// pressing Download on the share page again. The key already lives in the
+// recipient's history (it is part of the share link), so the IDB copy adds no
+// new exposure; entries are swept after IDB_TTL regardless.
 
 const IV_LEN = 12;
 const ENC_OVERHEAD = 28; // IV_LEN + 16-byte GCM tag
@@ -65,6 +66,21 @@ const files = new Map();
 function attachmentDisposition(filename) {
 	const fallback = String(filename).replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
 	return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}
+
+// A GET on /_e2e-dl is a top-level navigation, so an error response would
+// COMMIT that navigation and strand the visitor on a bare error body. Serve a
+// small page that walks itself back to the share instead - history.back()
+// restores the URL fragment (the key), which a redirect could not carry. The
+// view page pre-flights a HEAD before navigating, so this only surfaces when
+// the share's state changed in the race between probe and click.
+function failPage(status, message) {
+	const html = '<!doctype html><meta charset="utf-8"><title>Download failed</title>'
+		+ '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#0d1017;color:#dfe3ea;font:15px system-ui">'
+		+ '<div style="text-align:center"><p>' + message + '</p>'
+		+ '<p><a href="#" onclick="history.back();return false" style="color:#7aa2f7">Go back</a></p></div>'
+		+ '<script>setTimeout(function () { history.back(); }, 2500)</scr' + 'ipt>';
+	return new Response(html, { status, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
 
 // ---- IndexedDB persistence ---------------------------------------------------
@@ -313,14 +329,29 @@ async function handleRange(token, req, endpoint) {
 // multi-GB file.
 async function handleDownload(token, req, endpoint) {
 	const entry = await getEntry(token);
-	if (!entry) return new Response('not found', { status: 404 });
+	if (!entry) {
+		if (req.method === 'HEAD') return new Response(null, { status: 404 });
+		return failPage(404, 'This download link is stale. Go back and press Download again.');
+	}
 
-	// Resume (the downloads UI re-requests with `Range: bytes=N-` after a pause
-	// or an interruption): serve just the requested plaintext tail via ranged
-	// ciphertext fetches instead of restarting - or, before this existed,
-	// failing outright. Only the final ciphertext batch reaches the file's last
-	// byte, so the server still counts at most one download for the resumed
-	// delivery.
+	// Pre-flight from the view page: relay the server gate's verdict (live?
+	// unlocked? limit reached?) so the page only commits the navigation when
+	// the download will actually stream. The server never treats HEAD as a
+	// full delivery, so a probe cannot count a download or burn a one-time
+	// share.
+	if (req.method === 'HEAD') {
+		try {
+			const res = await fetch(entry.fileBase + endpoint, { method: 'HEAD', headers: { ...entry.authHeaders } });
+			return new Response(null, { status: res.status });
+		} catch {
+			return new Response(null, { status: 502 });
+		}
+	}
+
+	// Ranged re-request of the plaintext: serve the requested tail via ranged
+	// ciphertext fetches. Chrome's downloads-bar Resume does NOT reach this
+	// handler (the download manager bypasses Service Workers), but a ranged
+	// caller that does route through the worker gets a correct partial.
 	const rangeHdr = req && req.headers.get('range');
 	if (rangeHdr) {
 		const total = entry.plainTotal;
@@ -347,9 +378,13 @@ async function handleDownload(token, req, endpoint) {
 	try {
 		res = await fetch(entry.fileBase + endpoint, { headers: { ...entry.authHeaders } });
 	} catch (err) {
-		return new Response('fetch failed', { status: 502 });
+		return failPage(502, 'The download could not be started. Check your connection, then go back and try again.');
 	}
-	if (!res.ok && res.status !== 200) return new Response('fetch failed', { status: res.status });
+	if (!res.ok) {
+		return failPage(res.status, res.status === 410
+			? 'This share’s download limit has been reached.'
+			: 'This share is no longer available.');
+	}
 	const { cs, key, plainTotal } = entry;
 	const numChunks = Math.ceil(plainTotal / cs) || 1;
 	// Reassemble fixed-size ciphertext records from arbitrarily-sized network

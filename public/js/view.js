@@ -445,9 +445,20 @@ function e2eFileCard(file, canPreview) {
 			// available on site". A top-level navigation IS matched against the
 			// worker's scope; the worker replies with Content-Disposition:
 			// attachment, so the browser starts saving and the page stays put.
-			location.assign(url);
-			download.disabled = false;
-			return;
+			//
+			// Pre-flight with HEAD first (relayed by the worker; never counted
+			// as a delivery server-side): a navigation to a share that just
+			// died (expired, deleted, limit reached) would COMMIT and replace
+			// this page with the worker's error response. On a failed probe,
+			// fall through to the blob path below for its precise error toasts.
+			try {
+				const probe = await fetch(url, { method: 'HEAD' });
+				if (probe.ok) {
+					location.assign(url);
+					download.disabled = false;
+					return;
+				}
+			} catch { /* worker unreachable: the blob path reports the real error */ }
 		}
 		download.textContent = 'Decrypting...';
 		try {
