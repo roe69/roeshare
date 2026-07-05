@@ -33,17 +33,103 @@
 // fileBase, cipherSize, cs, mime } record keyed by an opaque per-request
 // token; this worker acks with 'e2e-ready' once the key import succeeds. The
 // key material never leaves the browser - it arrives already as raw bytes
-// from the URL fragment (which is never sent to any server) and is only ever
-// held in this worker's memory.
+// from the URL fragment (which is never sent to any server).
+//
+// Registrations are held in memory AND persisted to IndexedDB (a CryptoKey
+// survives structured clone, so the key stays non-extractable). Persistence is
+// what makes the virtual URLs survive this worker being terminated: the
+// browser kills idle/long-running Service Workers at will, and it re-requests
+// a download URL OUTSIDE the page that registered it - a Retry from the
+// downloads bar, a Resume after a pause, or a relaunch. Before persistence,
+// any of those spawned a fresh worker with an empty map, the virtual URL
+// 404'd, and Chrome reported "File wasn't available on site". The key already
+// lives in the recipient's history (it is part of the share link), so the IDB
+// copy adds no new exposure; entries are swept after IDB_TTL regardless.
 
 const IV_LEN = 12;
 const ENC_OVERHEAD = 28; // IV_LEN + 16-byte GCM tag
 
-// token -> { key, fileBase, cipherSize, cs, mime, plainTotal, numChunks, authHeaders }
+// token -> { key, fileBase, cipherSize, cs, mime, plainTotal, numChunks, authHeaders, createdAt }
 const files = new Map();
 
+// ---- IndexedDB persistence ---------------------------------------------------
+
+const IDB_NAME = 'roeshare-e2e';
+const IDB_STORE = 'files';
+const IDB_TTL = 7 * 24 * 60 * 60 * 1000; // sweep registrations older than 7 days
+
+let idbPromise = null;
+function idb() {
+	if (!idbPromise) {
+		idbPromise = new Promise((resolve, reject) => {
+			const req = indexedDB.open(IDB_NAME, 1);
+			req.onupgradeneeded = () => req.result.createObjectStore(IDB_STORE, { keyPath: 'token' });
+			req.onsuccess = () => resolve(req.result);
+			req.onerror = () => reject(req.error);
+		});
+		// A failed open (private mode, storage pressure) must not poison every
+		// later attempt; the worker just runs memory-only.
+		idbPromise.catch(() => { idbPromise = null; });
+	}
+	return idbPromise;
+}
+
+async function idbPut(entry) {
+	try {
+		const db = await idb();
+		await new Promise((resolve, reject) => {
+			const tx = db.transaction(IDB_STORE, 'readwrite');
+			tx.objectStore(IDB_STORE).put(entry);
+			tx.oncomplete = resolve;
+			tx.onerror = () => reject(tx.error);
+		});
+	} catch { /* IDB unavailable: memory-only, same behavior as before */ }
+}
+
+async function idbGet(token) {
+	try {
+		const db = await idb();
+		return await new Promise((resolve, reject) => {
+			const req = db.transaction(IDB_STORE).objectStore(IDB_STORE).get(token);
+			req.onsuccess = () => resolve(req.result || null);
+			req.onerror = () => reject(req.error);
+		});
+	} catch {
+		return null;
+	}
+}
+
+async function idbSweep() {
+	try {
+		const db = await idb();
+		const cutoff = Date.now() - IDB_TTL;
+		await new Promise((resolve, reject) => {
+			const tx = db.transaction(IDB_STORE, 'readwrite');
+			const cur = tx.objectStore(IDB_STORE).openCursor();
+			cur.onsuccess = () => {
+				const c = cur.result;
+				if (!c) return;
+				if (!c.value.createdAt || c.value.createdAt < cutoff) c.delete();
+				c.continue();
+			};
+			tx.oncomplete = resolve;
+			tx.onerror = () => reject(tx.error);
+		});
+	} catch { /* best-effort */ }
+}
+
+// Resolve a token from memory first, then IndexedDB (a fresh worker instance
+// hydrating a registration made by a previous one).
+async function getEntry(token) {
+	let entry = files.get(token);
+	if (entry) return entry;
+	entry = await idbGet(token);
+	if (entry) files.set(token, entry);
+	return entry;
+}
+
 self.addEventListener('install', e => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('activate', e => e.waitUntil(Promise.all([self.clients.claim(), idbSweep()])));
 
 function fromB64u(str) {
 	const b = atob(str.replace(/-/g, '+').replace(/_/g, '/'));
@@ -54,13 +140,18 @@ function fromB64u(str) {
 
 self.addEventListener('message', async e => {
 	const m = e.data;
+	// 'e2e-ping' needs no handling: the message event itself resets the
+	// browser's Service Worker idle timer, which is the whole point (the view
+	// page pings while E2E streams are in use so a long download/playback is
+	// not killed mid-stream).
 	if (!m || m.type !== 'e2e-register') return;
 	try {
 		const key = await crypto.subtle.importKey('raw', fromB64u(m.keyB64), { name: 'AES-GCM' }, false, ['decrypt']);
 		const recordSize = m.cs + ENC_OVERHEAD;
 		const numChunks = Math.max(1, Math.ceil(m.cipherSize / recordSize));
 		const plainTotal = m.cipherSize - numChunks * ENC_OVERHEAD;
-		files.set(m.token, {
+		const entry = {
+			token: m.token,
 			key,
 			fileBase: m.fileBase,
 			cipherSize: m.cipherSize,
@@ -69,7 +160,12 @@ self.addEventListener('message', async e => {
 			plainTotal,
 			numChunks,
 			authHeaders: m.authHeaders || {},
-		});
+			createdAt: Date.now(),
+		};
+		files.set(m.token, entry);
+		// Persist before acking so a Retry/Resume that lands on a future worker
+		// instance can always rehydrate this registration.
+		await idbPut(entry);
 		e.source && e.source.postMessage({ type: 'e2e-ready', token: m.token });
 	} catch (err) {
 		e.source && e.source.postMessage({ type: 'e2e-error', token: m.token, message: String(err) });
@@ -153,7 +249,7 @@ self.addEventListener('fetch', event => {
 	}
 	m = url.pathname.match(/^\/_e2e-dl\/([^/]+)$/);
 	if (m) {
-		event.respondWith(handleDownload(m[1], '/download'));
+		event.respondWith(handleDownload(m[1], event.request, '/download'));
 		return;
 	}
 	// everything else: default network handling.
@@ -163,7 +259,7 @@ self.addEventListener('fetch', event => {
 // <video>/<audio> src so the element can seek. Backed by .../preview, which
 // never counts toward download limits or burns a one-time share.
 async function handleRange(token, req, endpoint) {
-	const entry = files.get(token);
+	const entry = await getEntry(token);
 	if (!entry) return new Response('not found', { status: 404 });
 	const total = entry.plainTotal;
 	const rangeHdr = req.headers.get('range');
@@ -199,9 +295,38 @@ async function handleRange(token, req, endpoint) {
 // server's download counters / one-time burn fire exactly once) and decrypts
 // it record-by-record as bytes arrive, so memory stays bounded even for a
 // multi-GB file.
-async function handleDownload(token, endpoint) {
-	const entry = files.get(token);
+async function handleDownload(token, req, endpoint) {
+	const entry = await getEntry(token);
 	if (!entry) return new Response('not found', { status: 404 });
+
+	// Resume (the downloads UI re-requests with `Range: bytes=N-` after a pause
+	// or an interruption): serve just the requested plaintext tail via ranged
+	// ciphertext fetches instead of restarting - or, before this existed,
+	// failing outright. Only the final ciphertext batch reaches the file's last
+	// byte, so the server still counts at most one download for the resumed
+	// delivery.
+	const rangeHdr = req && req.headers.get('range');
+	if (rangeHdr) {
+		const total = entry.plainTotal;
+		const mm = /^bytes=(\d+)-(\d*)$/.exec(rangeHdr.trim());
+		if (mm) {
+			const start = Number(mm[1]);
+			const end = mm[2] === '' ? total - 1 : Math.min(Number(mm[2]), total - 1);
+			if (start > end || start >= total) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${total}` } });
+			return new Response(plainStream(entry, start, end, endpoint), {
+				status: 206,
+				headers: {
+					'Content-Type': 'application/octet-stream',
+					'Content-Length': String(end - start + 1),
+					'Content-Range': `bytes ${start}-${end}/${total}`,
+					'Accept-Ranges': 'bytes',
+					'Content-Disposition': 'attachment',
+					'Cache-Control': 'no-store',
+				},
+			});
+		}
+	}
+
 	let res;
 	try {
 		res = await fetch(entry.fileBase + endpoint, { headers: { ...entry.authHeaders } });
@@ -254,6 +379,9 @@ async function handleDownload(token, endpoint) {
 		headers: {
 			'Content-Type': 'application/octet-stream',
 			'Content-Length': String(entry.plainTotal),
+			// Advertise ranges so an interrupted download offers Resume (handled
+			// above) instead of only Retry-from-zero.
+			'Accept-Ranges': 'bytes',
 			'Content-Disposition': 'attachment',
 			'Cache-Control': 'no-store',
 		},

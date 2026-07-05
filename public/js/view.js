@@ -43,6 +43,21 @@ const swReadyPromise = SW_OK
 	? navigator.serviceWorker.register('/sw.js').then(() => navigator.serviceWorker.ready).catch(() => null)
 	: null;
 
+// The browser terminates an idle Service Worker after ~30s, which kills a
+// long-running decryption stream (a multi-GB download, a paused video) mid-
+// flight. Once any E2E stream has been registered, ping the worker on an
+// interval for as long as this page is open - each message event resets the
+// worker's idle timer.
+let swKeepalive = null;
+function startSwKeepalive() {
+	if (swKeepalive) return;
+	swKeepalive = setInterval(() => {
+		try {
+			navigator.serviceWorker.controller?.postMessage({ type: 'e2e-ping' });
+		} catch { /* controller gone: nothing to keep alive */ }
+	}, 10_000);
+}
+
 // Registers `file` with the Service Worker and resolves to a virtual URL once
 // it acks readiness - '/_e2e-dl/<token>' for a full counted download,
 // '/_e2e/<token>' for an uncounted, seekable preview. Resolves to null if the
@@ -103,6 +118,7 @@ async function ensureE2eStream(file, count) {
 			authHeaders,
 		});
 		await ready;
+		startSwKeepalive();
 		return (count ? '/_e2e-dl/' : '/_e2e/') + token;
 	} catch {
 		return null;
