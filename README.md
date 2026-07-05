@@ -102,12 +102,14 @@ To keep secrets out of a compose file you commit or share, move them to a
 with `.env` holding `KEY=value` lines. Remove those keys from `environment:`
 when you do - inline values always win over `env_file`.
 
-Most settings can also be edited in the admin panel (**Server** section).
-Panel edits are saved to `settings.env` in the data volume, applied on the
-next restart, and override the container's env until removed from that file.
-Changing `SECRET` there is guarded: it logs everyone out and permanently
-breaks decryption of existing uploads. Because `settings.env` can hold
-secrets, protect and encrypt backups of the data volume.
+Settings can also be edited in the admin panel (Server section); edits are
+saved to `settings.env` in the data volume and applied on the next restart.
+The environment always wins: any key set in your compose file shows as
+locked in the panel and cannot be changed or shadowed there - rotate those
+where you set them. Changing `SECRET` (when it is panel-managed) is guarded:
+it logs everyone out and permanently breaks decryption of existing uploads.
+Because `settings.env` can hold secrets for keys the environment leaves
+unset, protect and encrypt backups of the data volume.
 
 ## HTTPS (reverse proxy)
 

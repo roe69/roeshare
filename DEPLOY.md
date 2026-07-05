@@ -101,10 +101,9 @@ A normal push deploy never resets - it reuses the volume (below).
 > "$PWD":/b alpine tar czf /b/roeshare-data.tgz -C /d .`) or switch the compose
 > volume to a bind mount on shared/persistent storage.
 
-> **Secrets in the volume.** If you edit settings via the admin panel, they're
-> saved to `settings.env` inside the data volume, and that file can hold
-> `SECRET`/passwords (written `0600`). A volume backup therefore may contain your
-> master key, so protect/encrypt those backups. Settings changed in the panel
-> override the deploy-time environment (repository secrets and
-> `deploy/production.yml`) on the next restart; to revert a key, remove it
-> from `settings.env` and restart.
+> **Panel settings never shadow the environment.** Every key this deploy sets
+> (`BASE_URL`, `TRUST_PROXY`, and the secrets) is locked in the admin panel -
+> the environment always wins, so rotating a secret happens in the GitHub
+> repository secrets, never on the box. The panel's `settings.env` (in the
+> data volume, written `0600`) only holds panel-set values for keys the
+> environment leaves unset, such as the size limits.

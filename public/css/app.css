@@ -347,6 +347,24 @@ a:hover {
 	color: var(--rl-success);
 }
 
+/* Quiet list of env-managed (read-only) setting rows: label + current value on
+   one line, a dim "locked" hint below. Sits above the editable fields in the
+   same card, separated by a hairline - unless it's the card's only content. */
+.rl-kv {
+	display: flex;
+	flex-direction: column;
+	gap: var(--rl-space-3);
+}
+.rl-kv:not(:last-child) {
+	padding-bottom: var(--rl-space-3);
+	border-bottom: var(--rl-border-thin) solid var(--rl-border);
+}
+.rl-kv-row {
+	display: flex;
+	flex-direction: column;
+	gap: var(--rl-space-1);
+}
+
 /* Options grid: single column on small screens, two columns on wider ones. */
 .rl-optgrid {
 	display: grid;

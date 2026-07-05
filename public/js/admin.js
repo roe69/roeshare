@@ -1532,8 +1532,9 @@ function settingRow(f, inputs) {
 		const exact = el('p', { class: 'rl-help rl-dim', style: 'margin:0' });
 		const getBytes = () => Math.round(parseFloat(num.value || '0') * Number(unit.value));
 		const sync = () => {
+			// "= 0 bytes" next to a "0 means unlimited" hint reads as a contradiction.
 			const b = getBytes();
-			exact.textContent = f.key === 'MAX_TOTAL_SIZE' && b === 0 ? 'Unlimited' : `= ${new Intl.NumberFormat().format(b)} bytes`;
+			exact.textContent = b > 0 ? `= ${new Intl.NumberFormat().format(b)} bytes` : '';
 		};
 		num.addEventListener('input', sync);
 		unit.addEventListener('change', sync);
@@ -1576,6 +1577,33 @@ function settingRow(f, inputs) {
 		el('label', { class: 'rl-label' }, label),
 		input,
 		settingHint(f.key),
+	);
+}
+
+// A quiet, non-interactive row for a field the environment provides. Never
+// added to `inputs`, so it can never end up in the save payload. Secret
+// values are never shown - only whether one is set (and, for UPLOAD_PASSWORD,
+// that an unset one means uploads are open).
+function envRow(f) {
+	const label = SETTING_LABELS[f.key] || f.label;
+	let valueNode;
+	if (f.secret) {
+		let text = 'Set by the server environment';
+		if (!f.set && f.key === 'UPLOAD_PASSWORD') text += ' (empty - open uploads)';
+		valueNode = el('span', { class: 'rl-dim', style: 'text-align:right' }, text);
+	} else {
+		let display = f.value ?? '';
+		if (f.type === 'bool') display = String(display) === '1' || String(display).toLowerCase() === 'true' ? 'On' : 'Off';
+		else if (BYTE_KEYS.has(f.key)) display = formatBytes(Number(display) || 0);
+		else if (display === '') display = '(empty)';
+		valueNode = el('span', { class: 'rl-mono', style: 'text-align:right;word-break:break-all' }, String(display));
+	}
+	return el('div', { class: 'rl-kv-row', dataset: { settingKey: f.key } },
+		el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:flex-start;gap:var(--rl-space-3)' },
+			el('span', { class: 'rl-label', style: 'margin:0' }, label),
+			valueNode,
+		),
+		el('p', { class: 'rl-help rl-dim', style: 'margin:0' }, 'Locked: set in the server environment. Change it there and restart.'),
 	);
 }
 
@@ -1703,8 +1731,10 @@ function uploadLinkControl() {
 
 function renderServer() {
 	const banner = el('div', { class: 'rl-alert rl-alert-warning rl-hidden' }, 'Saved. Restart to apply.');
-	const formHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' });
-	const instanceStrip = el('div', { class: 'rl-card rl-card-pad-sm rl-stack', style: 'gap:var(--rl-space-2)' });
+	const cardsHost = el('div', { class: 'rl-stack' }, panelSpinner());
+	// A single dim line in the header area, replacing the old full-width
+	// "fixed by the container" card. Filled in once settings load.
+	const hostLine = el('p', { class: 'rl-help rl-dim', style: 'margin:calc(-1 * var(--rl-space-2)) 0 var(--rl-space-1)' }, '');
 
 	const inputs = new Map();
 	const saveBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Save settings');
@@ -1712,7 +1742,9 @@ function renderServer() {
 	saveBtn.addEventListener('click', () => saveSettings(inputs, saveBtn, banner));
 	restartBtn.addEventListener('click', confirmRestart);
 
-	// Fields grouped so the page scans easily instead of reading as one long wall.
+	// Fields grouped into their own cards so the page scans easily instead of
+	// reading as one long wall. A group still renders (informational only) even
+	// if every one of its fields turns out to be env-managed.
 	const GROUPS = [
 		{ title: 'General', keys: ['BASE_URL', 'APP_NAME', 'TRUST_PROXY'] },
 		{ title: 'Limits', keys: ['MAX_FILE_SIZE', 'MAX_SHARE_SIZE', 'MAX_TOTAL_SIZE', 'CHUNK_SIZE', 'MAX_FILES_PER_SHARE', 'MAX_PASSWORD_LENGTH', 'DEFAULT_EXPIRY', 'SWEEP_INTERVAL'] },
@@ -1720,66 +1752,71 @@ function renderServer() {
 	];
 	const COLSPAN = new Set(['BASE_URL', 'SECRET']);
 
-	const group = (title, fields) => {
-		const grid = el('div', { class: 'rl-optgrid' });
-		for (const f of fields) {
-			const node = settingRow(f, inputs);
-			if (COLSPAN.has(f.key)) node.classList.add('rl-col-span');
-			grid.append(node);
+	// One card per group: env-managed fields first as a quiet read-only list,
+	// then the editable fields in the usual two-column grid. Env-managed fields
+	// never touch `inputs`, so they can never end up in the save payload.
+	const card = (title, fields) => {
+		const envFields = fields.filter(f => f.envManaged);
+		const editableFields = fields.filter(f => !f.envManaged);
+		const body = [];
+		if (envFields.length) body.push(el('div', { class: 'rl-kv' }, ...envFields.map(envRow)));
+		if (editableFields.length) {
+			const grid = el('div', { class: 'rl-optgrid' });
+			for (const f of editableFields) {
+				const node = settingRow(f, inputs);
+				if (COLSPAN.has(f.key)) node.classList.add('rl-col-span');
+				grid.append(node);
+			}
+			body.push(grid);
 		}
-		return el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
-			el('div', { class: 'rl-eyebrow', style: 'margin-top:var(--rl-space-3);padding-bottom:var(--rl-space-2);border-bottom:var(--rl-border-thin) solid var(--rl-border)' }, title),
-			grid,
+		return el('div', { class: 'rl-card rl-stack' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, title),
+			...body,
 		);
 	};
 
 	const loadSettings = async () => {
-		formHost.replaceChildren(panelSpinner());
+		cardsHost.replaceChildren(panelSpinner());
 		try {
 			const data = await api.get('/api/admin/settings');
 			inputs.clear();
 			const byKey = new Map(data.fields.map(f => [f.key, f]));
 			const used = new Set();
-			const groups = [];
+			const cards = [];
 			for (const g of GROUPS) {
 				const fields = g.keys.map(k => byKey.get(k)).filter(Boolean);
 				fields.forEach(f => used.add(f.key));
-				if (fields.length) groups.push(group(g.title, fields));
+				if (fields.length) cards.push(card(g.title, fields));
 			}
 			// Anything not in a known group still shows, so a field can never vanish.
 			const extra = data.fields.filter(f => !used.has(f.key));
-			if (extra.length) groups.push(group('Other', extra));
-			formHost.replaceChildren(...groups);
+			if (extra.length) cards.push(card('Other', extra));
+			cardsHost.replaceChildren(...cards);
 
-			// The quick-access upload link sits with the upload password it depends on.
-			const pwField = formHost.querySelector('[data-setting-key="UPLOAD_PASSWORD"]');
+			// The quick-access upload link sits with the upload password it depends
+			// on, whether that field turned out editable or env-managed - the link
+			// itself reflects live config either way, not who manages the field.
+			const pwField = cardsHost.querySelector('[data-setting-key="UPLOAD_PASSWORD"]');
 			if (pwField) pwField.append(uploadLinkControl());
 
 			const ro = data.readOnly || {};
-			const chip = (l, v) => el('span', { class: 'rl-help' }, l + ' ', el('span', { class: 'rl-mono' }, v));
-			instanceStrip.replaceChildren(
-				el('div', { class: 'rl-eyebrow' }, 'Fixed by the container'),
-				el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-3)' }, chip('Host', `${ro.HOST}:${ro.PORT}`), chip('Data', ro.DATA_DIR)),
-			);
+			hostLine.textContent = `Host ${ro.HOST}:${ro.PORT} - data at ${ro.DATA_DIR}`;
 		} catch (err) {
-			formHost.replaceChildren(el('p', { class: 'rl-dim' }, 'Could not load settings.'));
+			cardsHost.replaceChildren(el('p', { class: 'rl-dim' }, 'Could not load settings.'));
 			toastErr(err);
 		}
 	};
 
 	const actionBar = el('div', {
 		class: 'rl-row rl-row-wrap',
-		style: 'position:sticky;bottom:0;justify-content:flex-end;align-items:center;gap:var(--rl-space-3);padding-top:var(--rl-space-3);margin-top:var(--rl-space-2);background:var(--rl-bg-secondary);border-top:var(--rl-border-thin) solid var(--rl-border)',
+		style: 'position:sticky;bottom:0;justify-content:flex-end;align-items:center;gap:var(--rl-space-3);padding-top:var(--rl-space-3);margin-top:var(--rl-space-1);background:var(--rl-bg-secondary);border-top:var(--rl-border-thin) solid var(--rl-border)',
 	}, el('span', { class: 'rl-spacer' }), banner, restartBtn, saveBtn);
 
 	view.replaceChildren(
 		viewHead('Server', 'Settings save to disk and apply on the next restart, not live.'),
-		el('div', { style: 'margin-bottom:var(--rl-space-3)' }, instanceStrip),
-		el('div', { class: 'rl-card rl-stack' },
-			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Settings'),
-			formHost,
-			actionBar,
-		),
+		hostLine,
+		cardsHost,
+		actionBar,
 	);
 
 	loadSettings();

@@ -113,10 +113,20 @@ export function serializeEnv(obj) {
 	return lines.join('\n') + '\n';
 }
 
-// Boot hook: apply the managed file over process.env for allowlisted, VALID
-// keys. Called from config.js right after DATA_DIR resolves, before any other
-// config is read. Never throws; an invalid value is skipped with a warning.
+// Keys that were provided by the process environment at boot (compose file,
+// host env, deploy-time secrets). The environment is the operator's source of
+// truth: these keys are locked - the managed file never overrides them and
+// the editor refuses to change them - so a panel edit can never shadow a
+// deploy-time secret, and rotating one is done where it was set.
+export const envManagedKeys = new Set();
+
+// Boot hook: record which allowlisted keys the environment provides, then
+// apply the managed file over process.env for the REMAINING allowlisted,
+// VALID keys. Called from config.js right after DATA_DIR resolves, before any
+// other config is read. Never throws; an invalid value is skipped with a
+// warning.
 export function applyManagedSettings(dataDir) {
+	for (const key of ALLOWED_KEYS) if (key in process.env) envManagedKeys.add(key);
 	const path = settingsPath(dataDir);
 	if (!existsSync(path)) return {};
 	let raw;
@@ -129,6 +139,10 @@ export function applyManagedSettings(dataDir) {
 	const applied = {};
 	for (const key of ALLOWED_KEYS) {
 		if (!(key in raw)) continue;
+		if (envManagedKeys.has(key)) {
+			console.warn(`  NOTE: managed ${key} ignored - the environment sets it, and the environment wins`);
+			continue;
+		}
 		const r = ALLOWLIST[key].rule(raw[key]);
 		if (r.error) {
 			console.warn(`  WARNING: ignoring managed ${key} (${r.error})`);
@@ -152,7 +166,8 @@ export function readSettings(dataDir) {
 
 // Validate a PUT body { values:{KEY:val}, clear:[keys], confirmSecretChange:bool }
 // into { set, clear, secretChanged } or { error }. Blank secret = leave unchanged;
-// ADMIN_PASSWORD can never be cleared; SECRET needs explicit confirmation.
+// ADMIN_PASSWORD can never be cleared; SECRET needs explicit confirmation;
+// env-managed keys are rejected outright (the environment wins).
 export function validatePatch(body) {
 	if (!body || typeof body !== 'object') return { error: 'Body must be an object' };
 	const values = body.values && typeof body.values === 'object' ? body.values : {};
@@ -165,6 +180,7 @@ export function validatePatch(body) {
 		if (val == null) continue;
 		if (typeof val !== 'string') return { error: `${spec.label} must be text` };
 		if (spec.secret && val === '') continue; // blank secret = leave unchanged
+		if (envManagedKeys.has(key)) return { error: `${spec.label} is set by the server environment and cannot be changed here` };
 		if (key === 'SECRET') {
 			if (body.confirmSecretChange !== true) return { error: 'Changing SECRET requires explicit confirmation' };
 			secretChanged = true;
@@ -177,6 +193,7 @@ export function validatePatch(body) {
 	for (const key of clearReq) {
 		const spec = ALLOWLIST[key];
 		if (!spec) continue;
+		if (envManagedKeys.has(key)) return { error: `${spec.label} is set by the server environment and cannot be changed here` };
 		if (!spec.clearable) return { error: `${spec.label} cannot be cleared` };
 		clear.push(key);
 	}
@@ -192,6 +209,9 @@ export function writeSettings(dataDir, { set = {}, clear = [] } = {}) {
 	const merged = {};
 	for (const k of ALLOWED_KEYS) {
 		if (clear.includes(k)) continue;
+		// Self-clean stale entries for keys the environment now provides - they
+		// would be ignored at boot anyway, and a secret should not linger here.
+		if (envManagedKeys.has(k)) continue;
 		if (k in set) merged[k] = set[k];
 		else if (k in current) merged[k] = current[k];
 	}

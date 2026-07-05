@@ -11,7 +11,7 @@ import { enforce, reset } from '../lib/ratelimit.js';
 import { hashPassword } from '../lib/crypto.js';
 import { slugError } from '../lib/slug.js';
 import { getLogs } from '../lib/logbuffer.js';
-import { ALLOWED_KEYS, ALLOWLIST, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
+import { ALLOWED_KEYS, ALLOWLIST, envManagedKeys, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
 import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
 import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, deleteApiKey, sanitizeLimits } from '../lib/apikeys.js';
 
@@ -475,17 +475,20 @@ export default router => {
 	});
 
 	// Current editable settings. Secret values are NEVER returned - only a
-	// set/unset flag. Non-secret keys show the pending managed value if saved,
-	// else the live effective value.
+	// set/unset flag. Keys provided by the server environment are reported as
+	// envManaged: read-only in the editor, and for secrets not even the value's
+	// origin beyond "the environment sets this". Non-secret keys show the
+	// pending managed value if saved, else the live effective value.
 	router.get('/api/admin/settings', ({ req }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const managed = readSettings(config.dataDir);
 		const eff = effectiveSettings();
 		const fields = ALLOWED_KEYS.map(key => {
 			const s = ALLOWLIST[key];
-			const base = { key, label: s.label, help: s.help || null, type: s.type, secret: !!s.secret, clearable: !!s.clearable, danger: s.danger || null };
+			const envManaged = envManagedKeys.has(key);
+			const base = { key, label: s.label, help: s.help || null, type: s.type, secret: !!s.secret, clearable: !!s.clearable, danger: s.danger || null, envManaged };
 			if (s.secret) return { ...base, set: secretIsSet(key) };
-			return { ...base, value: key in managed ? managed[key] : (eff[key] ?? '') };
+			return { ...base, value: envManaged ? (eff[key] ?? '') : key in managed ? managed[key] : (eff[key] ?? '') };
 		});
 		return json({
 			fields,
