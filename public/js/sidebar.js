@@ -52,12 +52,8 @@ export const ADMIN_GROUPS = [
 	{ label: 'Admin', items: [
 		{ id: 'overview', label: 'Overview', icon: 'overview' },
 		{ id: 'shares', label: 'Shares', icon: 'shares' },
-	] },
-	{ label: 'API', items: [
 		{ id: 'apikeys', label: 'API keys', icon: 'key' },
 		{ id: 'apidocs', label: 'API docs', icon: 'book' },
-	] },
-	{ label: 'System', items: [
 		{ id: 'server', label: 'Server', icon: 'server' },
 		{ id: 'logs', label: 'Logs', icon: 'logs' },
 	] },
@@ -191,16 +187,19 @@ export function mountSidebar({ active, groups, account } = {}) {
 
 	const aside = el('aside', { class: 'rl-side' }, brand, nav, foot);
 
-	// If this visitor is a signed-in admin, swap the lone "Admin" link for the full
-	// panel nav (and footer logout), so the rail is identical everywhere. Non-admins
-	// keep just the "Admin" link, which routes them to the login screen.
+	// If this visitor is a signed-in admin, swap the lone "Admin" link AND the
+	// key-portal "API" link for the full panel nav (and footer logout), so the
+	// rail is identical everywhere: an admin manages keys from the panel and
+	// never needs the key-holder portal. Non-admins keep both links.
 	if (showsDefaultAdmin) {
 		const adminLink = nav.querySelector('.rl-side-item[data-id="admin"]');
+		const apiLink = nav.querySelector('.rl-side-item[data-id="api"]');
 		fetch('/api/admin/me', { headers: { Accept: 'application/json' } })
 			.then(r => (r.ok ? r.json() : null))
 			.then(me => {
 				if (!me || !me.admin) return;
 				adminLink?.classList.add('rl-hidden');
+				apiLink?.classList.add('rl-hidden');
 				adminGatedNodes.forEach(n => n.classList.remove('rl-hidden'));
 			})
 			.catch(() => {});
