@@ -60,6 +60,17 @@ a:hover {
 	text-decoration: underline;
 }
 
+/* A quiet link used inside data rows (e.g. a share title in a table): reads as
+   plain text, picks up the one hot accent only on hover. Keeps a whole table
+   of rows from reading as a wall of accent-coloured links. */
+.rl-link-quiet {
+	color: var(--rl-text);
+	font-weight: var(--rl-weight-medium);
+}
+.rl-link-quiet:hover {
+	color: var(--rl-primary-light);
+}
+
 /* Flat neutral top vignette - barely-there, no colour wash, no motion. The
    drifting warm orbs this used to carry have been removed entirely. */
 .rl-aurora {
@@ -379,6 +390,19 @@ a:hover {
 }
 .rl-col-span {
 	grid-column: 1 / -1;
+}
+
+/* Overview's secondary cards (Biggest shares / Expiring soon / Top uploaders):
+   stack on narrow viewports, sit three abreast once there is room. */
+.rl-overview-secondary {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: var(--rl-space-3);
+}
+@media (min-width: 1100px) {
+	.rl-overview-secondary {
+		grid-template-columns: repeat(3, 1fr);
+	}
 }
 
 /* Input with a leading static affix (e.g. the /s/ prefix on a custom link). */

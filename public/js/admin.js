@@ -123,12 +123,24 @@ function boot() {
 // Overview
 // ===========================================================================
 
+// Cached results from the two independent requests the tiles draw from, so
+// whichever of loadStats()/loadOverview() finishes last can (re)render the
+// tiles with both the live number and the all-time sub-line in place -
+// without waiting on the other or re-fetching it.
+let lastStats = null;
+let lastLifetime = null;
+
 function statCard(label, value, extra) {
 	return el('div', { class: 'rl-card rl-card-pad-sm' },
 		el('div', { class: 'rl-eyebrow', style: 'margin-bottom:var(--rl-space-2)' }, label),
 		el('div', { style: 'font-size:var(--rl-text-2xl);font-weight:var(--rl-weight-bold);line-height:1.1' }, value),
 		extra ? el('div', { style: 'margin-top:var(--rl-space-3)' }, extra) : false,
 	);
+}
+
+// A small dim sub-line under a stat tile's big number (e.g. "46 all-time").
+function statSubline(text) {
+	return el('div', { class: 'rl-dim', style: 'font-size:var(--rl-text-xs)' }, text);
 }
 
 function infoRow(label, value) {
@@ -164,60 +176,84 @@ function shareRowBtn(s, right) {
 }
 
 function renderOverview() {
+	// Reset the cross-request cache so a fresh visit never flashes stale numbers
+	// left over from a previous one.
+	lastStats = null;
+	lastLifetime = null;
+
 	const statsRow = el('div', {
 		id: 'stats',
 		style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:var(--rl-space-3)',
 	});
 	const card = () => el('div', { class: 'rl-card rl-stack', style: 'gap:var(--rl-space-2)' }, panelSpinner());
-	const lifetimeHost = card(), biggestHost = card(), uploadersHost = card(), instanceHost = card(), expiringHost = card();
+	const biggestHost = card(), uploadersHost = card(), expiringHost = card();
+
+	// Instance status is one dim line under the subtitle instead of its own card;
+	// a SECRET-unset warning (rare, but important) can still appear beneath it.
+	const instanceLine = el('p', { class: 'rl-dim', style: 'font-size:var(--rl-text-sm);margin:0' }, 'Checking instance status...');
+	const instanceBlock = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2);margin-bottom:var(--rl-space-4)' }, instanceLine);
 
 	view.replaceChildren(
 		viewHead('Overview', 'Live instance status and current totals first; all-time figures and leaderboards (which survive deleted shares) below.'),
+		instanceBlock,
 		statsRow,
-		el('div', { style: 'display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:var(--rl-space-3);margin-top:var(--rl-space-3)' },
-			instanceHost,
-			lifetimeHost,
-			uploadersHost,
+		// Down from five cards to three, since Instance and All time folded into
+		// the header line and the stat tiles above.
+		el('div', { class: 'rl-overview-secondary', style: 'margin-top:var(--rl-space-3)' },
 			biggestHost,
 			expiringHost,
+			uploadersHost,
 		),
 	);
 
 	loadStats();
-	loadInstance(instanceHost);
-	loadOverview(biggestHost, uploadersHost, expiringHost, lifetimeHost);
+	loadInstance(instanceBlock);
+	loadOverview(biggestHost, uploadersHost, expiringHost);
+}
+
+// Renders the five stat tiles from whatever of lastStats/lastLifetime is
+// available so far. Called after either request resolves; the all-time
+// sub-line simply appears once loadOverview() has landed, whichever order the
+// two requests finish in.
+function renderStatTiles() {
+	const host = $('#stats');
+	if (!host || !lastStats) return;
+	const s = lastStats;
+	const lt = lastLifetime;
+
+	const storageBits = [];
+	if (s.maxTotalSize > 0) {
+		const pct = Math.min(100, Math.round((s.storageUsed / s.maxTotalSize) * 100));
+		storageBits.push(
+			el('div', { class: 'rl-progress' }, el('div', { class: 'rl-progress-bar', style: `width:${pct}%` })),
+			el('div', { class: 'rl-help' }, `${formatBytes(s.storageUsed)} of ${formatBytes(s.maxTotalSize)}`),
+		);
+	}
+	if (lt) storageBits.push(statSubline(`${formatBytes(lt.bytes ?? 0)} all-time`));
+	const storageExtra = storageBits.length ? el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' }, ...storageBits) : false;
+
+	host.replaceChildren(
+		statCard('Shares', String(s.shareCount ?? 0), lt ? statSubline(`${lt.shares ?? 0} all-time`) : false),
+		statCard('Files', String(s.fileCount ?? 0), lt ? statSubline(`${lt.files ?? 0} all-time`) : false),
+		statCard('Storage used', formatBytes(s.storageUsed ?? 0), storageExtra),
+		statCard('Total views', String(s.viewTotal ?? 0), lt ? statSubline(`${lt.views ?? 0} all-time`) : false),
+		statCard('Total downloads', String(s.downloadTotal ?? 0), lt ? statSubline(`${lt.downloads ?? 0} all-time`) : false),
+	);
 }
 
 async function loadStats() {
 	const host = $('#stats');
 	if (!host) return;
 	try {
-		const s = await api.get('/api/admin/stats');
-		let storageExtra = false;
-		if (s.maxTotalSize > 0) {
-			const pct = Math.min(100, Math.round((s.storageUsed / s.maxTotalSize) * 100));
-			storageExtra = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
-				el('div', { class: 'rl-progress' },
-					el('div', { class: 'rl-progress-bar', style: `width:${pct}%` }),
-				),
-				el('div', { class: 'rl-help' }, `${formatBytes(s.storageUsed)} of ${formatBytes(s.maxTotalSize)}`),
-			);
-		}
-		host.replaceChildren(
-			statCard('Shares', String(s.shareCount ?? 0)),
-			statCard('Files', String(s.fileCount ?? 0)),
-			statCard('Storage used', formatBytes(s.storageUsed ?? 0), storageExtra),
-			statCard('Total views', String(s.viewTotal ?? 0)),
-			statCard('Total downloads', String(s.downloadTotal ?? 0)),
-		);
+		lastStats = await api.get('/api/admin/stats');
+		renderStatTiles();
 	} catch (err) {
 		toastErr(err);
 		host.replaceChildren(el('p', { class: 'rl-dim' }, 'Stats unavailable.'));
 	}
 }
 
-async function loadInstance(host) {
-	const body = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' });
+async function loadInstance(block) {
 	try {
 		const [settings, health] = await Promise.all([
 			api.get('/api/admin/settings'),
@@ -225,20 +261,25 @@ async function loadInstance(host) {
 		]);
 		const ro = settings.readOnly || {};
 		const up = health && Number.isFinite(health.uptime) ? formatUptime(health.uptime) : '-';
-		body.append(
-			infoRow('Status', 'Online'),
-			infoRow('Uptime', up),
-			infoRow('Host', `${ro.HOST || '-'}:${ro.PORT || '-'}`),
-			infoRow('Data dir', ro.DATA_DIR || '-'),
+		const dataDir = ro.DATA_DIR || '-';
+		const line = el('p', { class: 'rl-dim', style: 'font-size:var(--rl-text-sm);margin:0' },
+			`Online - up ${up} - `,
+			el('span', { class: 'rl-mono' }, `${ro.HOST || '-'}:${ro.PORT || '-'}`),
+			' - data at ',
+			el('span', {
+				class: 'rl-mono rl-truncate',
+				style: 'display:inline-block;max-width:320px;vertical-align:bottom',
+				title: dataDir,
+			}, dataDir),
 		);
-		if (settings.ephemeralSecret) {
-			body.append(el('div', { class: 'rl-alert rl-alert-warning', style: 'font-size:var(--rl-text-xs)' },
-				'SECRET is unset: sessions and encrypted uploads will not survive a restart. Set one in Server settings.'));
-		}
+		const warning = settings.ephemeralSecret
+			? el('div', { class: 'rl-alert rl-alert-warning', style: 'font-size:var(--rl-text-xs)' },
+				'SECRET is unset: sessions and encrypted uploads will not survive a restart. Set one in Server settings.')
+			: null;
+		block.replaceChildren(...[line, warning].filter(Boolean));
 	} catch {
-		body.append(el('p', { class: 'rl-dim' }, 'Instance info unavailable.'));
+		block.replaceChildren(el('p', { class: 'rl-dim', style: 'font-size:var(--rl-text-sm);margin:0' }, 'Instance info unavailable.'));
 	}
-	host.replaceChildren(panelHead('Instance'), body);
 }
 
 function formatUptime(s) {
@@ -251,31 +292,22 @@ function formatUptime(s) {
 
 // Fill the overview panels from one request. A failure shows a per-panel notice,
 // never a blank page.
-async function loadOverview(biggestHost, uploadersHost, expiringHost, lifetimeHost) {
+async function loadOverview(biggestHost, uploadersHost, expiringHost) {
 	let data;
 	try {
 		data = await api.get('/api/admin/overview');
 	} catch {
 		const fail = title => [panelHead(title), el('p', { class: 'rl-dim' }, 'Could not load.')];
-		lifetimeHost.replaceChildren(...fail('All time'));
 		biggestHost.replaceChildren(...fail('Biggest shares'));
 		uploadersHost.replaceChildren(...fail('Top uploaders'));
 		expiringHost.replaceChildren(...fail('Expiring soon'));
 		return;
 	}
 
-	// All-time totals - persist past deletion.
-	const lt = data.lifetime || {};
-	lifetimeHost.replaceChildren(
-		panelHead('All time'),
-		el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' },
-			infoRow('Shares created', String(lt.shares ?? 0)),
-			infoRow('Files uploaded', String(lt.files ?? 0)),
-			infoRow('Data uploaded', formatBytes(lt.bytes ?? 0)),
-			infoRow('Downloads', String(lt.downloads ?? 0)),
-			infoRow('Views', String(lt.views ?? 0)),
-		),
-	);
+	// All-time totals - persist past deletion. These no longer get their own
+	// card; they fold into a dim sub-line on the matching stat tile above.
+	lastLifetime = data.lifetime || {};
+	renderStatTiles();
 
 	// Biggest shares - clickable rows, size + downloads on the right.
 	const big = data.biggestShares || [];
@@ -481,9 +513,13 @@ function renderRow(s) {
 	check.addEventListener('change', updateBulkState);
 	check.addEventListener('click', e => e.stopPropagation());
 
+	// Neutral text, not an accent-coloured link - the table should read as one
+	// calm scan-line, with colour reserved for badges and Delete. Accent only
+	// shows up as a hover cue that the title is clickable.
 	const link = el('a', {
 		href: shareUrl(s.id), target: '_blank', rel: 'noopener',
-		style: 'font-weight:var(--rl-weight-semibold);text-decoration:none;color:var(--rl-primary)',
+		class: 'rl-link-quiet',
+		style: 'font-weight:var(--rl-weight-medium);text-decoration:none',
 		onclick: e => e.stopPropagation(),
 	}, s.title || s.id);
 
@@ -496,13 +532,15 @@ function renderRow(s) {
 	if (s.oneTime) flags.append(el('span', { class: 'rl-badge rl-badge-warning' }, 'One-time'));
 	if (!s.finalized) flags.append(el('span', { class: 'rl-badge rl-badge-neutral' }, 'Draft'));
 
+	// Copy/Open are ghost buttons (quiet, no border) - only Delete keeps a colour
+	// tint, so the actions column doesn't compete with the row's own content.
 	const actions = el('div', { class: 'rl-row', style: 'gap:var(--rl-space-1);justify-content:flex-end' },
 		el('button', {
-			class: 'rl-btn rl-btn-secondary rl-btn-sm', title: 'Copy link',
+			class: 'rl-btn rl-btn-ghost rl-btn-sm', title: 'Copy link',
 			onclick: e => { e.stopPropagation(); copyText(shareUrl(s.id)); },
 		}, 'Copy'),
 		el('a', {
-			class: 'rl-btn rl-btn-secondary rl-btn-sm', href: shareUrl(s.id), target: '_blank', rel: 'noopener',
+			class: 'rl-btn rl-btn-ghost rl-btn-sm', href: shareUrl(s.id), target: '_blank', rel: 'noopener',
 			onclick: e => e.stopPropagation(),
 		}, 'Open'),
 		el('button', {
@@ -1014,19 +1052,23 @@ async function loadKeys() {
 function keyRow(k) {
 	const st = keyStatus(k);
 
+	// Dim neutral mono, not accent - the prefix is an identifier to copy, not a
+	// call to action.
 	const prefix = el('button', {
-		class: 'rl-mono', title: 'Copy key id',
-		style: 'background:transparent;border:0;padding:0;color:var(--rl-primary);cursor:pointer;font-size:var(--rl-text-xs)',
+		class: 'rl-mono rl-dim', title: 'Copy key id',
+		style: 'background:transparent;border:0;padding:0;cursor:pointer;font-size:var(--rl-text-xs)',
 		onclick: e => { e.stopPropagation(); copyText(k.prefix); },
 	}, `${k.prefix}_...`);
 
+	// Revoke/Reinstate are ghost (quiet, reversible actions); only Delete keeps
+	// a colour tint.
 	const actions = el('div', { class: 'rl-row', style: 'gap:var(--rl-space-1);justify-content:flex-end' },
 		st.active ? el('button', {
-			class: 'rl-btn rl-btn-secondary rl-btn-sm',
+			class: 'rl-btn rl-btn-ghost rl-btn-sm',
 			onclick: e => { e.stopPropagation(); confirmRevoke(k); },
 		}, 'Revoke') : false,
 		k.revokedAt ? el('button', {
-			class: 'rl-btn rl-btn-secondary rl-btn-sm',
+			class: 'rl-btn rl-btn-ghost rl-btn-sm',
 			onclick: e => { e.stopPropagation(); confirmReinstate(k); },
 		}, 'Reinstate') : false,
 		el('button', {
@@ -1036,16 +1078,20 @@ function keyRow(k) {
 	);
 
 	const summary = limitsSummary(k.limits);
+	// Truncate rather than wrap mid-word; the full name is still available on hover.
 	const nameCell = el('td', {},
-		el('span', { style: 'font-weight:var(--rl-weight-semibold)' }, k.name),
+		el('span', { class: 'rl-truncate', style: 'display:block;max-width:140px;font-weight:var(--rl-weight-semibold)', title: k.name }, k.name),
 		summary.length ? el('div', { class: 'rl-dim', style: 'font-size:var(--rl-text-xs)' }, summary.join(' · ')) : false,
 	);
 
 	const tr = el('tr', { class: 'rl-card-interactive', style: 'cursor:pointer' },
 		nameCell,
 		el('td', {}, prefix),
-		el('td', { class: 'rl-col-w' }, formatDate(k.createdAt)),
-		el('td', { class: 'rl-col-w' }, k.lastUsedAt ? formatDate(k.lastUsedAt) : el('span', { class: 'rl-dim' }, 'Never')),
+		// Date-only in the list keeps the table inside the card; the detail view
+		// has the full timestamps.
+		el('td', { class: 'rl-col-w', title: formatDate(k.createdAt) }, new Date(k.createdAt * 1000).toLocaleDateString()),
+		el('td', { class: 'rl-col-w', title: k.lastUsedAt ? formatDate(k.lastUsedAt) : '' },
+			k.lastUsedAt ? new Date(k.lastUsedAt * 1000).toLocaleDateString() : el('span', { class: 'rl-dim' }, 'Never')),
 		el('td', { class: 'rl-col-w' }, k.expiresAt ? timeUntil(k.expiresAt) : 'Never'),
 		el('td', { class: 'rl-col-num' }, String(k.uploadCount ?? 0)),
 		el('td', { class: 'rl-col-num' }, formatBytes(k.bytesUploaded ?? 0)),
