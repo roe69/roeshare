@@ -4,7 +4,8 @@
 *.db-shm
 *.db-wal
 
-# Env
+# Local config (secrets live here, never committed)
+docker-compose.override.yml
 .env
 .env.local
 

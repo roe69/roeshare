@@ -31,8 +31,8 @@ APP_NAME=<col=ffffff>FileVault
 APP_NAME=DropZone
 ```
 
-Set it in `.env` (or your process manager's environment) and restart - no
-CSS edit, no rebuild.
+Set it in `docker-compose.yml` (or your process manager's environment) and
+restart - no CSS edit, no rebuild.
 
 `APP_TITLE` is *not* a separate setting: the plain-text `<title>` used for the
 browser tab and the PWA name is derived automatically from `APP_NAME` by
@@ -93,6 +93,10 @@ need editing - its `name` and `short_name` fields are templated from
 `APP_TITLE` at request time, so they follow `APP_NAME` automatically. It
 references `favicon-32x32.png` as the PWA icon, which you've already replaced
 above.
+
+Replacing these files requires running from source (the prebuilt
+`roe69/roeshare` image bakes in the default icons) - or bind-mount
+your own files over `/app/public/favicon.ico` etc. in the container.
 
 ## 5. Public URL / domains (`BASE_URL`)
 

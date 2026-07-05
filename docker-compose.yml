@@ -1,22 +1,35 @@
-# RoeShare. `bash setup.sh` generates .env and runs this, or once .env exists:
+# RoeShare, built from this source checkout. Set ADMIN_PASSWORD and SECRET
+# below, then:
+#
 #   docker compose up -d --build
+#
+# (Just want to run RoeShare without cloning? Use the prebuilt image instead -
+# see the README's Quick start.)
 services:
   roeshare:
     build: .
     image: roeshare:latest
     container_name: roeshare
     restart: unless-stopped
-    # Host port comes from PORT in .env (default 3300); container is always 3300.
+    # Host port: change the left-hand 3300; the container itself always
+    # listens on 3300.
     ports:
-      - "${PORT:-3300}:3300"
-    # Secrets and public URL come from .env ...
-    env_file:
-      - .env
-    # ... but these are pinned for the container regardless of .env.
+      - "3300:3300"
     environment:
-      HOST: 0.0.0.0
-      PORT: 3300
-      DATA_DIR: /data
+      ADMIN_PASSWORD: change-me # admin panel login - change this
+      # Signs cookies/tokens and derives the at-rest encryption key. Generate
+      # one with `openssl rand -hex 32`. Back it up - losing it makes
+      # encrypted uploads unrecoverable. If left empty, an ephemeral one is
+      # generated each start (sessions and access tokens reset on restart).
+      SECRET: ""
+      BASE_URL: http://localhost:3300 # public URL used in share links/QR codes
+
+      # Uncomment to set; see the README's Configuration table for the full list.
+      # UPLOAD_PASSWORD: ""
+      # TRUST_PROXY: "1"
+      # APP_NAME: "<col=e4e4ce>Roe<b><col=ff6b35>Share</b>"
+      # DEFAULT_EXPIRY: "604800"
+      # MAX_FILE_SIZE: "5368709120"
     volumes:
       - roeshare-data:/data
 

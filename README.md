@@ -33,90 +33,173 @@ defaults - all of it is meant to be changed.
 
 ## Setup
 
-There is more than one way to run RoeShare. Pick the guide that matches your
-setup:
+The recommended way to run RoeShare is the prebuilt Docker image - no cloning
+required. Pick the guide that matches what you need:
 
-- [Quick start (Docker Compose)](#quick-start-docker-compose) - recommended.
-- [Run with plain `docker run`](#run-with-plain-docker-run) - single container, no Compose.
-- [Run with Bun directly (no Docker)](#run-with-bun-directly-no-docker) - bare metal or a VM.
-- [Single compiled binary](#single-compiled-binary) - one executable, no runtime install.
-- [Behind a reverse proxy (TLS)](#behind-a-reverse-proxy-tls) - add HTTPS in front of any of the above.
+- [Quick start (Docker)](#quick-start-docker) - recommended, uses the
+  prebuilt image.
+- [Run from source](#run-from-source) - clone the repo to build the Docker
+  image yourself, run on plain Bun, install as a systemd service, or compile
+  a standalone binary.
+- [Behind a reverse proxy (TLS)](#behind-a-reverse-proxy-tls) - add HTTPS in
+  front of any of the above.
 
-### Quick start (Docker Compose)
+### Quick start (Docker)
 
-One command builds and runs everything. It writes a `.env` with a strong random
-`SECRET` and admin password on first run:
+No cloning, no building. Create a `docker-compose.yml` anywhere with:
 
-```sh
-bash setup.sh
+```yaml
+services:
+  roeshare:
+    image: roe69/roeshare:latest
+    container_name: roeshare
+    restart: unless-stopped
+    ports:
+      - "3300:3300"
+    environment:
+      ADMIN_PASSWORD: change-me # admin panel login - change this
+      SECRET: "" # generate with `openssl rand -hex 32` - back it up!
+      BASE_URL: http://localhost:3300 # public URL used in share links
+    volumes:
+      - roeshare-data:/data
+
+volumes:
+  roeshare-data:
 ```
 
-It prints the URL and the generated admin password. To override values:
+Change `ADMIN_PASSWORD` and fill in `SECRET` (generate one with
+`openssl rand -hex 32`), then start it:
 
 ```sh
-PORT=8080 ADMIN_PASSWORD=hunter2 UPLOAD_PASSWORD=letmein bash setup.sh
+docker compose up -d
 ```
 
-Or run Compose directly once a `.env` exists:
+Open http://localhost:3300 - that's it. The admin panel is at `/admin`.
+
+**Back up `SECRET`.** It derives the at-rest encryption key - losing it makes
+encrypted uploads unrecoverable. Every other setting in the
+[Configuration](#configuration) table below can be added the same way, under
+`environment:`.
+
+Secrets directly in the yaml are fine for a file that stays private to the
+server. If you keep your compose file in version control or share it, move
+them to a `.env` file next to it instead:
+
+```yaml
+    env_file:
+      - .env
+    environment:
+      BASE_URL: http://localhost:3300
+```
+
+with `.env` holding plain `KEY=value` lines (`ADMIN_PASSWORD=hunter2`,
+`SECRET=...`). Move those keys **out** of `environment:` when you do this -
+values under `environment:` always win over `env_file`, so a leftover
+`ADMIN_PASSWORD: change-me` there would silently override your `.env`.
+
+The image is ~150 MB (Bun on Alpine, zero npm dependencies), works on amd64
+and arm64, exposes `/healthz` for the container healthcheck, and persists the
+database and uploads in the `roeshare-data` named volume. (`roeshare` is just
+the container/volume name above - rename it to whatever you'd like.)
+
+Don't use Compose? Run the same image directly:
 
 ```sh
-docker compose up -d --build      # start
+docker run -d --name roeshare -p 3300:3300 -v roeshare-data:/data \
+  -e ADMIN_PASSWORD=hunter2 -e SECRET=$(openssl rand -hex 32) \
+  roe69/roeshare:latest
+```
+
+Data (the SQLite db and uploaded blobs) persists in the `roeshare-data` named
+volume across container recreation either way. (`--env-file some.env` also
+works, if you'd rather maintain your own `KEY=value` file than pass `-e`
+flags.)
+
+### Run from source
+
+Only needed to build the image yourself, run on bare Bun, or work on the
+source. Start by cloning the repo:
+
+```sh
+git clone https://github.com/roe69/roeshare.git
+cd roeshare
+```
+
+#### Docker
+
+The repo's own `docker-compose.yml` builds the image locally instead of
+pulling it. From the cloned repo:
+
+1. Open `docker-compose.yml` in an editor and, under `environment:`, replace
+   the `ADMIN_PASSWORD` value with a password of your choice and the empty
+   `SECRET` value with a fresh random one. Generate it with:
+
+   ```sh
+   openssl rand -hex 32
+   ```
+
+2. Build and start it:
+
+   ```sh
+   docker compose up -d --build
+   ```
+
+3. Open http://localhost:3300 (admin panel at `/admin`, using the password
+   you set above).
+
+Day-to-day commands:
+
+```sh
+docker compose up -d --build      # start (or apply config/source changes)
 docker compose logs -f            # logs
 docker compose down               # stop
 ```
 
-The image is ~150 MB (Bun on Alpine, no build step, zero npm dependencies),
-exposes `/healthz` for the container healthcheck, and persists the database
-and uploads in the `roeshare-data` volume. (`roeshare` is just the default
-container/volume/image name from `docker-compose.yml` - rename it there if
-you'd like something else.)
+Prefer to keep secrets out of the tracked `docker-compose.yml`? Put just the
+keys you're changing in a `docker-compose.override.yml` next to it (gitignored);
+Compose merges it in automatically:
 
-### Run with plain `docker run`
-
-If you don't want Compose, build the image once and run it directly:
-
-```sh
-docker build -t roeshare .
-docker run -d \
-  -p 3300:3300 \
-  -v roeshare-data:/data \
-  --env-file .env \
-  --name roeshare \
-  roeshare
+```yaml
+services:
+  roeshare:
+    environment:
+      ADMIN_PASSWORD: hunter2
+      SECRET: <output of `openssl rand -hex 32`>
 ```
 
-This needs a `.env` file next to where you run the command (copy
-`.env.example` and set at least `ADMIN_PASSWORD` and `SECRET` - see
-[Configuration](#configuration)). Data (the SQLite db and uploaded blobs)
-persists in the `roeshare-data` named volume across container recreation.
+To also publish a different host port from the override, add `ports:
+!override ["8080:3300"]` under the service there - the `!override` tag
+replaces the base port mapping instead of merging into it (needs Compose
+v2.24+).
 
-### Run with Bun directly (no Docker)
+#### Run with Bun directly (no Docker)
+
+From the cloned repo directory:
 
 1. Install Bun (>= 1.1). See https://bun.sh for instructions.
-2. Copy the example environment file and set the required secrets:
-
-   ```sh
-   cp .env.example .env
-   ```
-
-   Edit `.env` and set at least `ADMIN_PASSWORD` (unlocks the admin panel) and
-   `SECRET` (signs cookies and access tokens). Generate a secret with:
+2. Set at least `ADMIN_PASSWORD` (unlocks the admin panel) and `SECRET` (signs
+   cookies and access tokens) as environment variables. Generate a secret
+   with:
 
    ```sh
    bun -e "console.log(crypto.randomUUID()+crypto.randomUUID())"
    ```
 
-3. Start the server:
+3. Start the server with the variables set, e.g.:
 
    ```sh
-   bun run src/server.js
+   ADMIN_PASSWORD=hunter2 SECRET=<hex from above> bun run src/server.js
    ```
+
+   (or `export` them first, then just run `bun run src/server.js`). Bun also
+   auto-loads a `.env` file (plain `KEY=value` lines) from the working
+   directory if you'd rather keep them in a file you write yourself.
 
 The server listens on `http://0.0.0.0:3300` by default. Open it in a browser
 to upload, visit `/s/:id` for a share, and `/admin` for the admin panel. The
 data directory (SQLite db plus uploaded blobs) is created automatically.
 
-#### Running as a systemd service
+##### Running as a systemd service
 
 To keep it running and restart it automatically, install it as a service with
 a unit like:
@@ -129,7 +212,8 @@ After=network.target
 [Service]
 WorkingDirectory=/opt/roeshare
 ExecStart=/usr/local/bin/bun run src/server.js
-EnvironmentFile=/opt/roeshare/.env
+Environment=ADMIN_PASSWORD=hunter2
+Environment=SECRET=change-this-to-a-real-secret
 Restart=always
 
 [Install]
@@ -137,12 +221,15 @@ WantedBy=multi-user.target
 ```
 
 (`/opt/roeshare` is just an example install path - use whatever directory you
-deployed the source to.) Use `Restart=always` (not `on-failure`): the admin
-panel's **Restart** button exits the process cleanly (exit 0), so only
-`always` relaunches it. The Docker `docker-compose.yml` already uses
-`restart: unless-stopped`, which behaves the same way.
+deployed the source to; the two `Environment=` values are placeholders, set
+your own. `EnvironmentFile=/opt/roeshare/.env` still works too, if you'd
+rather maintain a hand-written `KEY=value` file there.) Use `Restart=always`
+(not `on-failure`): the admin panel's **Restart** button exits the process
+cleanly (exit 0), so only `always` relaunches it. The Docker
+`docker-compose.yml` already uses `restart: unless-stopped`, which behaves
+the same way.
 
-### Single compiled binary
+#### Single compiled binary
 
 Bun can compile RoeShare into a standalone executable that bundles the runtime:
 
@@ -150,9 +237,10 @@ Bun can compile RoeShare into a standalone executable that bundles the runtime:
 bun build --compile src/server.js --outfile roeshare
 ```
 
-Ship the resulting `roeshare` binary alongside the `public/` directory and
-your `.env`, then run `./roeshare`. This is handy for environments where you'd
-rather ship one file than install Bun or Docker.
+Ship the resulting `roeshare` binary alongside the `public/` directory, with
+the env vars set (or a hand-written `.env` next to it, which Bun auto-loads),
+then run `./roeshare`. This is handy for environments where you'd rather ship
+one file than install Bun or Docker.
 
 ### Behind a reverse proxy (TLS)
 
@@ -164,7 +252,7 @@ protocol for rate limiting, audit logging, and marking the admin cookie
 default) - otherwise a direct client could spoof its IP and defeat rate
 limits.
 
-**nginx** - minimal example (forward the app port, whatever you set `PORT` to):
+**nginx** - minimal example (forward whatever host port you published; 3300 by default):
 
 ```nginx
 server {
@@ -195,6 +283,25 @@ share.example.com {
 
 For a version with comments and options, see
 [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
+
+**No reverse proxy yet?** If you run RoeShare with Compose, add Caddy as a
+second service in the same compose file for automatic HTTPS:
+
+```yaml
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    command: caddy reverse-proxy --from share.example.com --to roeshare:3300
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - caddy-data:/data # certificates persist here
+```
+
+Add `caddy-data:` under `volumes:`, set `TRUST_PROXY: "1"` and
+`BASE_URL: https://share.example.com` on the `roeshare` service, and remove
+its `ports:` mapping so only Caddy is reachable from outside.
 
 #### Optional: sendfile byte offload
 
@@ -229,7 +336,7 @@ default except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `HOST`           | `0.0.0.0`                | Network interface to bind.                                                   |
 | `PORT`           | `3300`                   | Port to listen on.                                                          |
 | `BASE_URL`       | `http://localhost:3300`  | Public base URL for share links and QR codes. No trailing slash. Comma-separate multiple domains for multi-domain serving (e.g. `https://share.example.com,https://files.example.com`); links are built from the visitor's domain, first entry is the canonical fallback. |
-| `ADMIN_PASSWORD` | `change-me`              | Admin panel password. Required for admin access; if unset, admin is locked. |
+| `ADMIN_PASSWORD` | (empty)                  | Admin panel password. Required for admin access; if unset, admin is locked. |
 | `SECRET`         | (ephemeral)              | Secret used to sign cookies and access tokens. Required in production.       |
 | `TRUST_PROXY`    | `0`                      | Honor X-Forwarded-For/X-Real-IP for client IP. On ONLY behind a trusted proxy; off when exposed directly (else IPs are spoofable). |
 | `DATA_DIR`       | `./data`                 | Directory holding the SQLite db and uploaded blobs.                         |
@@ -237,6 +344,8 @@ default except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `MAX_SHARE_SIZE` | `10737418240` (10 GiB)   | Max total size of one share, in bytes.                                      |
 | `MAX_TOTAL_SIZE` | `0`                      | Total storage cap across all shares, in bytes. 0 = unlimited.              |
 | `CHUNK_SIZE`     | `8388608` (8 MiB)        | Upload chunk size advertised to clients, in bytes.                         |
+| `MAX_FILES_PER_SHARE` | `10000`             | Max number of files in a single share.                                      |
+| `MAX_PASSWORD_LENGTH` | `1024`              | Max length of a share/upload password, in characters (bounds argon2 cost).  |
 | `UPLOAD_PASSWORD`| (empty)                  | Require a password to create shares. Empty = open uploads.                  |
 | `DEFAULT_EXPIRY` | `604800` (7 days)        | Default expiry for new shares, in seconds. 0 = never.                       |
 | `DEFAULT_E2E`    | `1` (true)               | Whether new shares default to end-to-end encryption in the upload UI. 0 = default to server-managed shares. |
@@ -245,8 +354,8 @@ default except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `THEME_ACCENT`   | (empty)                  | Hex colour (e.g. `#22c55e`) to recolour links/highlights. No CSS edit needed. See [CUSTOMIZING.md](CUSTOMIZING.md). |
 | `X_ACCEL_REDIRECT`| (empty)                 | nginx internal `location` prefix for sendfile byte offload (advanced, optional). See [Behind a reverse proxy](#behind-a-reverse-proxy-tls). |
 | `X_SENDFILE`     | `0`                      | Set to `1` to use the Apache/Lighttpd `X-Sendfile` header for byte offload (advanced, optional). See [Behind a reverse proxy](#behind-a-reverse-proxy-tls). |
-| `ABANDONED_UPLOAD_TTL` | `172800` (48 hours) | How long an upload that was never finalized is kept before the background sweep deletes it, in seconds. |
-| `SWEEP_INTERVAL` | `3600` (1 hour)          | Background sweep interval for expired shares, in seconds.                   |
+| `ABANDONED_UPLOAD_TTL` | `86400` (24 hours) | How long an upload that was never finalized is kept before the background sweep deletes it, in seconds. |
+| `SWEEP_INTERVAL` | `3600` (1 hour)          | How often the background sweep deletes expired shares' files from disk, in seconds. Expiry itself is enforced at access time — an expired share stops being served the moment it expires, regardless of this interval. |
 
 If `SECRET` is unset, RoeShare generates an ephemeral key and warns at startup;
 all sessions and access tokens reset on restart, so set a stable secret in
@@ -260,12 +369,12 @@ logs. Panel edits are saved to `${DATA_DIR}/settings.env` (inside the data
 volume) and **applied on the next restart** — they are not live. A few things to
 know:
 
-- **They override `.env`.** At boot, the managed file is layered over the
-  environment for its keys, so a value set once in the panel wins over the host
-  `.env` forever. To hand a key back to `.env`, remove it from
-  `settings.env` (or use the editor's Clear control where available) and
-  restart. `HOST`, `PORT`, and `DATA_DIR` are intentionally **not** editable
-  (they're pinned by the container/compose).
+- **They override the environment.** At boot, the managed file is layered over
+  whatever you set in `docker-compose.yml` (or the host env) for its keys, so a
+  value set once in the panel wins over the compose file forever. To hand a key
+  back to the environment, remove it from `settings.env` (or use the editor's
+  Clear control where available) and restart. `HOST`, `PORT`, and `DATA_DIR`
+  are intentionally **not** editable (they're pinned by the container/compose).
 - **Restart needs a supervisor.** The Restart button exits the process; Docker's
   `restart: unless-stopped` (or systemd `Restart=always`) relaunches it. Without
   one, the app stays down.
@@ -321,7 +430,8 @@ theming via `public/css/tokens.css`.
   request (CTR keeps downloads seekable). **Back up `SECRET`** - without it the
   files are unrecoverable.
   - The "raw disk / backup access can't read the files" guarantee holds when
-    `SECRET` comes from the host env or `.env`, kept outside the data volume. If
+    `SECRET` comes from the environment (the compose file or host env), kept
+    outside the data volume. If
     you set or rotate `SECRET` via the admin panel it is written to
     `${DATA_DIR}/settings.env` inside the volume, next to the ciphertext - so
     protect and encrypt volume backups (see
@@ -420,9 +530,7 @@ shares it created (`GET`/`DELETE /api/v1/shares[/:id]`, range-aware downloads) -
 enough to drive an external backup: push with `expiresIn=0` (and don't set a max
 share lifetime on the key, which would force-expire them), and the owner's own
 restores never count against a download cap or burn a one-time share. The **API
-docs** page has the full backup workflow (push, list, restore, rotate). Key
-holders can also sign in at **`/api`** to manage their shares in the browser -
-no admin access needed.
+docs** page has the full backup workflow (push, list, restore, rotate).
 
 Key holders can also sign in at **`/api`** with the key name and token to list,
 download, and delete that key's shares from the browser - no admin access needed.

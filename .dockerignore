@@ -7,6 +7,7 @@ node_modules/
 data/
 .env
 .env.local
+docker-compose.override.yml
 *.md
 roeshare
 roeshare-*

@@ -5,18 +5,22 @@
 > to run RoeShare - it's a starting point if you want pushes to `main` to
 > redeploy automatically.
 
-Pushes to `main` trigger `.github/workflows/deploy.yml`, which runs on a
-**self-hosted runner on the target server** and rebuilds/restarts the container.
-CI never holds secrets: all config lives in a `.env` you place on the host once.
+Pushes to `main` first run `.github/workflows/publish.yml`, which builds the
+image once and pushes it to `roe69/roeshare:latest` on Docker Hub. When that
+succeeds, `.github/workflows/deploy.yml` runs on a **self-hosted runner on
+the target server**, pulls the freshly published image, and swaps the
+container onto it — the server never builds anything and runs the exact image
+users get. The server itself holds no config at all: instance settings (port,
+domains) live in the tracked [`deploy/production.yml`](deploy/production.yml)
+overlay, and the secret values are GitHub **repository secrets** injected as
+environment variables at deploy time, interpolated into the overlay by
+Compose. Nothing is written to disk on the host.
 
-## One-time host setup
+## One-time setup
 
-The runner box needs three things. Docker + the runner are assumed present; the
-only RoeShare-specific step is the config file.
-
-1. **Docker Engine + Compose v2 plugin** — `docker compose version` must work
-   for the runner's user (add it to the `docker` group, or run the runner as a
-   user that can reach the Docker socket).
+1. **Docker Engine + Compose v2 plugin** on the server — `docker compose
+   version` must work for the runner's user (add it to the `docker` group, or
+   run the runner as a user that can reach the Docker socket).
 
 2. **A registered self-hosted runner** for `YOUR-ORG/YOUR-REPO`
    (*Settings → Actions → Runners → New self-hosted runner*), installed as a
@@ -24,41 +28,38 @@ only RoeShare-specific step is the config file.
    runner an extra label (e.g. `roeshare`) and change the workflow's
    `runs-on: [self-hosted]` to `runs-on: [self-hosted, roeshare]`.
 
-3. **The persisted config** at `/opt/roeshare/.env` (an example path — use
-   whatever directory you like, and override it with a repo Variable named
-   `ENV_PATH`). Create it once — CI reads it but never generates or overwrites it:
+3. **Repository secrets** (*Settings → Secrets and variables → Actions*):
 
-   ```sh
-   sudo install -d -m 700 /opt/roeshare
-   sudo tee /opt/roeshare/.env >/dev/null <<EOF
-   HOST=0.0.0.0
-   PORT=3300
-   # Multi-domain: comma-separated, first is canonical. Links are built from
-   # whichever of these the visitor is on.
-   BASE_URL=https://share.example.com,https://files.example.com
-   TRUST_PROXY=1
-   ADMIN_PASSWORD=$(openssl rand -hex 9)
-   UPLOAD_PASSWORD=
-   SECRET=$(openssl rand -hex 32)
-   EOF
-   sudo chmod 600 /opt/roeshare/.env
-   ```
+   | Secret               | Value                                                        |
+   | -------------------- | ------------------------------------------------------------ |
+   | `DOCKERHUB_USERNAME` | Docker Hub account the publish workflow pushes as.           |
+   | `DOCKERHUB_TOKEN`    | Docker Hub access token (read & write scope).                |
+   | `ADMIN_PASSWORD`     | Admin panel login.                                           |
+   | `SECRET`             | `openssl rand -hex 32` — signs tokens, derives the at-rest encryption key. |
+   | `UPLOAD_PASSWORD`    | Optional; unset/empty = open uploads.                        |
 
-   > **Back up `SECRET`.** It derives the at-rest encryption key — lose it and
-   > every uploaded file becomes unrecoverable. Note the generated
-   > `ADMIN_PASSWORD` too (`sudo grep ADMIN_PASSWORD /opt/roeshare/.env`).
+   > **Back up `SECRET` somewhere outside GitHub too.** It derives the at-rest
+   > encryption key — lose it and every uploaded file becomes unrecoverable
+   > (GitHub secrets cannot be read back out).
 
-That's it. The first push (or a manual *Run workflow*) builds and starts it.
+4. **Instance config** — edit [`deploy/production.yml`](deploy/production.yml):
+   the published host port (`!override` replaces the base mapping; keep the
+   `127.0.0.1:` bind so only the local reverse proxy can reach the app) and
+   `BASE_URL` (comma-separated for multi-domain serving — first entry is
+   canonical, links are built from whichever of these the visitor is on).
+
+That's it. The first push publishes the image and starts it on the server
+(or run the two workflows manually via *Run workflow*, publish first).
 
 ## Reverse proxy
 
 `TRUST_PROXY=1` requires a proxy in front that forwards the real host. One server
 block per domain (or both in one), each forwarding `Host` and `X-Forwarded-Proto`
-to the container's published `PORT` (3300). Caddy example:
+to the host port published in `deploy/production.yml`. Caddy example:
 
 ```
 share.example.com, files.example.com {
-    reverse_proxy 127.0.0.1:3300
+    reverse_proxy 127.0.0.1:6968
 }
 ```
 
@@ -85,10 +86,11 @@ A normal push deploy never resets - it reuses the volume (below).
 
 ## How redeploys stay safe and fast
 
-- **Data persists** in the named volume `roeshare_roeshare-data`. `up -d --build`
+- **Data persists** in the named volume `roeshare_roeshare-data`. A deploy
   recreates only the container; uploads and the SQLite db are untouched.
-- **Fast**: the Docker layer cache is reused (no `--no-cache`), so an unchanged
-  tree rebuilds in seconds; `concurrency` cancels superseded deploys.
+- **Fast and light**: the image is built once on GitHub's runners; the server
+  only pulls it and restarts. `concurrency` cancels superseded deploys, and
+  the previous image is pruned after the swap.
 - **Deterministic**: `COMPOSE_PROJECT_NAME=roeshare` fixes the container and
   volume names regardless of which runner or checkout path runs the job — so you
   can swap the runner to a fresh box and redeploy with no renaming surprises.
@@ -103,5 +105,6 @@ A normal push deploy never resets - it reuses the volume (below).
 > saved to `settings.env` inside the data volume — and that file can hold
 > `SECRET`/passwords (written `0600`). A volume backup therefore may contain your
 > master key, so protect/encrypt those backups. Settings changed in the panel
-> override `/opt/roeshare/.env` on the next restart; to revert a key to `.env`
-> control, remove it from `settings.env` and restart.
+> override the deploy-time environment (repository secrets and
+> `deploy/production.yml`) on the next restart; to revert a key, remove it
+> from `settings.env` and restart.

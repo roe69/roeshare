@@ -21,5 +21,5 @@ example.com {
 	}
 }
 
-# Remember to also set in the app's .env:
+# Remember to also set in docker-compose.yml (or your environment):
 #   TRUST_PROXY=1
