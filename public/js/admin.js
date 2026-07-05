@@ -1480,7 +1480,7 @@ const SETTING_HINTS = {
 	MAX_TOTAL_SIZE: '0 means unlimited.',
 	CHUNK_SIZE: 'Advanced. Leave the default.',
 	DEFAULT_EXPIRY: '0 means never.',
-	SWEEP_INTERVAL: 'How often expired shares are purged.',
+	SWEEP_INTERVAL: 'Disk cleanup cadence. Expired shares stop being served immediately either way.',
 	ADMIN_PASSWORD: 'Blank keeps the current one.',
 	UPLOAD_PASSWORD: 'Blank keeps it; tick Clear for open uploads.',
 };

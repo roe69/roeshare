@@ -186,7 +186,7 @@ export const config = Object.freeze({
 	defaultExpiry: int('DEFAULT_EXPIRY', 7 * 24 * 3600),
 	sweepInterval: int('SWEEP_INTERVAL', 3600),
 	// Non-finalized (abandoned) uploads are swept after this many seconds.
-	abandonedUploadTtl: int('ABANDONED_UPLOAD_TTL', 48 * 3600),
+	abandonedUploadTtl: int('ABANDONED_UPLOAD_TTL', 24 * 3600),
 
 	// Session lifetime for the admin cookie, in seconds (7 days).
 	adminSessionTtl: 7 * 24 * 3600,

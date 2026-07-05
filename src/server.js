@@ -104,6 +104,10 @@ async function serveStatic(req, pathname) {
 
 // ---- Expired-share sweeper -------------------------------------------------
 
+// Disk/db cleanup only: every read and upload path already refuses an expired
+// share at request time, so this interval never gates visibility - the sweep
+// just reclaims the bytes.
+//
 // Only a finalized share's published-link expiry is enforced here - a
 // not-yet-finalized (still uploading) share must never be swept out from
 // under an in-progress upload just because its (not-yet-started) expiry
