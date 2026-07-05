@@ -1,12 +1,14 @@
 /* ==========================================================================
    Design tokens - the single source of truth for the palette.
-   OSRS-inspired: pure black surfaces, gold/orange/brown trim.
+   Quiet, neutral, dark: a near-black foundation with hairline glass surfaces
+   and ONE hot accent (the brand orange) reserved for primary actions, the
+   active nav item, focus states, and the brand itself.
    Edit these for full control over theming; or set THEME_PRIMARY / THEME_ACCENT
    env vars for a quick accent recolour without editing CSS.
    ========================================================================== */
 
 :root {
-	/* ---------- Color: Gold scale (primary) ---------- */
+	/* ---------- Color: Gold scale (rare warm accent, e.g. E2E badge) ---------- */
 	--rl-gold-50: #fff6e3;
 	--rl-gold-100: #ffe7b8;
 	--rl-gold-200: #ffd486;
@@ -18,64 +20,65 @@
 	--rl-gold-800: #6e4000;
 	--rl-gold-900: #3a2100;
 
-	/* ---------- Color: Orange scale (accent) ---------- */
+	/* ---------- Color: Orange scale (primary brand accent) ---------- */
 	--rl-orange-50: #fff0e6;
 	--rl-orange-100: #ffd2b3;
 	--rl-orange-200: #ffa366;
-	--rl-orange-300: #ff8c1a;
+	--rl-orange-300: #ff8a5c;
 	--rl-orange-400: #ff6b35;
-	--rl-orange-500: #e55100;
+	--rl-orange-500: #e5561f;
 	--rl-orange-600: #b34000;
 	--rl-orange-700: #802d00;
 	--rl-orange-800: #4d1b00;
 	--rl-orange-900: #1a0900;
 
-	/* ---------- Color: Brown scale (trim, leather, stone) ---------- */
-	--rl-brown-50: #d4a574;
-	--rl-brown-100: #a67c3d;
-	--rl-brown-200: #8b6914;
-	--rl-brown-300: #6b5010;
-	--rl-brown-400: #5a4a3a;
-	--rl-brown-500: #3d2817;
-	--rl-brown-600: #2a1a0e;
-	--rl-brown-700: #1a1008;
-	--rl-brown-800: #0d0804;
-	--rl-brown-900: #050200;
+	/* ---------- Color: Brown scale - retuned NEUTRAL (was leather/stone trim).
+	   Kept for any leftover reference; reads as plain gray now, not warm. ---------- */
+	--rl-brown-50: #c4c4cb;
+	--rl-brown-100: #a8a8b0;
+	--rl-brown-200: #8c8c95;
+	--rl-brown-300: #6f6f78;
+	--rl-brown-400: #3a3a41;
+	--rl-brown-500: #232329;
+	--rl-brown-600: #1a1a1f;
+	--rl-brown-700: #131316;
+	--rl-brown-800: #0e0e10;
+	--rl-brown-900: #08080a;
 
 	/* ---------- Color: State scales ---------- */
 	--rl-success-100: #bbf7d0;
-	--rl-success-400: #22c55e;
-	--rl-success-600: #15803d;
-	--rl-success-rgb: 34, 197, 94;
+	--rl-success-400: #4ade80;
+	--rl-success-600: #16a34a;
+	--rl-success-rgb: 74, 222, 128;
 
-	--rl-danger-100: #f5c6a8;
-	--rl-danger-400: #f08068;
-	--rl-danger-600: #b8351a;
-	--rl-danger-rgb: 240, 128, 104;
+	--rl-danger-100: #fecaca;
+	--rl-danger-400: #f87171;
+	--rl-danger-600: #dc2626;
+	--rl-danger-rgb: 248, 113, 113;
 
-	--rl-warning-100: #ffe9a8;
-	--rl-warning-400: #ffc107;
-	--rl-warning-600: #b45309;
-	--rl-warning-rgb: 255, 193, 7;
+	--rl-warning-100: #fef3c7;
+	--rl-warning-400: #fbbf24;
+	--rl-warning-600: #d97706;
+	--rl-warning-rgb: 251, 191, 36;
 
-	--rl-info-100: #d4d4d4;
-	--rl-info-400: #b8c8d4;
-	--rl-info-600: #6b8290;
-	--rl-info-rgb: 184, 200, 212;
+	--rl-info-100: #e2e8f0;
+	--rl-info-400: #94a3b8;
+	--rl-info-600: #475569;
+	--rl-info-rgb: 148, 163, 184;
 
 	/* ---------- Semantic: Brand ---------- */
-	--rl-primary: var(--rl-gold-500);
-	--rl-primary-dark: var(--rl-gold-600);
-	--rl-primary-light: var(--rl-gold-300);
-	--rl-primary-rgb: 255, 159, 9;
-	--rl-accent: var(--rl-orange-400);
-	--rl-accent-dark: var(--rl-orange-500);
-	--rl-accent-light: var(--rl-orange-300);
-	--rl-accent-rgb: 255, 107, 53;
+	--rl-primary: #ff6b35;
+	--rl-primary-dark: #e5561f;
+	--rl-primary-light: #ff8a5c;
+	--rl-primary-rgb: 255, 107, 53;
+	--rl-accent: #ffb02b;
+	--rl-accent-dark: #d98200;
+	--rl-accent-light: #ffc14f;
+	--rl-accent-rgb: 255, 176, 43;
 	--rl-trim: var(--rl-brown-200);
 	--rl-trim-dark: var(--rl-brown-500);
-	--rl-trim-rgb: 139, 105, 20;
-	--rl-brown-100-rgb: 168, 124, 61;
+	--rl-trim-rgb: 140, 140, 149;
+	--rl-brown-100-rgb: 168, 168, 176;
 
 	/* The brand wordmark colours live in the brand string itself (APP_NAME),
 	   via OSRS-style <col=RRGGBB> tags - see src/config.js. Nothing to set here. */
@@ -85,32 +88,32 @@
 	--rl-side-mini-width: 52px;
 
 	/* ---------- Semantic: Surfaces ---------- */
-	--rl-bg: #000000;
-	--rl-bg-secondary: #0a0807;
-	--rl-bg-tertiary: #14100c;
-	--rl-bg-elevated: #1c1610;
-	--rl-surface: rgba(20, 16, 12, 0.85);
-	--rl-surface-glass: rgba(20, 16, 12, 0.5);
-	--rl-overlay: rgba(0, 0, 0, 0.75);
+	--rl-bg: #0a0a0c;
+	--rl-bg-secondary: #0e0e11;
+	--rl-bg-tertiary: #131317;
+	--rl-bg-elevated: #18181d;
+	--rl-surface: rgba(255, 255, 255, 0.03);
+	--rl-surface-glass: rgba(255, 255, 255, 0.05);
+	--rl-overlay: rgba(8, 8, 10, 0.7);
 
 	/* ---------- Semantic: Text ---------- */
-	--rl-text: #e4e4ce;
-	--rl-text-muted: #b8a87a;
-	--rl-text-dim: #9a8c5c;
-	--rl-text-placeholder: #c8c8c8;
-	--rl-text-form: #c8c8c8;
-	--rl-text-gold: var(--rl-gold-200);
-	--rl-text-on-primary: #1a1008;
-	--rl-text-on-accent: #1a0900;
-	--rl-text-on-success: #0d2008;
-	--rl-text-on-danger: #2a0a04;
-	--rl-text-on-warning: #1a1008;
+	--rl-text: #ededf0;
+	--rl-text-muted: #a2a2ab;
+	--rl-text-dim: #71717b;
+	--rl-text-placeholder: #55555e;
+	--rl-text-form: #d6d6db;
+	--rl-text-gold: #ffc466;
+	--rl-text-on-primary: #180d07;
+	--rl-text-on-accent: #1f1400;
+	--rl-text-on-success: #062812;
+	--rl-text-on-danger: #2a0605;
+	--rl-text-on-warning: #241a02;
 
 	/* ---------- Semantic: Borders ---------- */
-	--rl-border: rgba(255, 159, 9, 0.15);
-	--rl-border-strong: rgba(255, 159, 9, 0.35);
-	--rl-border-gold: var(--rl-gold-600);
-	--rl-border-brown: var(--rl-brown-400);
+	--rl-border: rgba(255, 255, 255, 0.07);
+	--rl-border-strong: rgba(255, 255, 255, 0.14);
+	--rl-border-gold: var(--rl-border-strong);
+	--rl-border-brown: var(--rl-border);
 
 	/* ---------- Semantic: States ---------- */
 	--rl-success: var(--rl-success-400);
@@ -168,7 +171,7 @@
 	--rl-radius-sm: 8px;
 	--rl-radius: 12px;
 	--rl-radius-md: 12px;
-	--rl-radius-lg: 20px;
+	--rl-radius-lg: 16px;
 	--rl-radius-pill: 9999px;
 
 	/* ---------- Borders ---------- */
@@ -177,30 +180,30 @@
 	--rl-border-thick: 3px;
 
 	/* ---------- Shadows ---------- */
-	--rl-shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
-	--rl-shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
-	--rl-shadow-lg: 0 8px 32px rgba(0, 0, 0, 0.6);
-	--rl-shadow-xl: 0 20px 48px rgba(0, 0, 0, 0.7);
-	--rl-shadow-glow: 0 0 24px rgba(255, 159, 9, 0.25);
-	--rl-shadow-glow-strong: 0 0 48px rgba(255, 159, 9, 0.4);
-	--rl-shadow-glow-orange: 0 0 24px rgba(255, 107, 53, 0.3);
-	--rl-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+	--rl-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+	--rl-shadow-md: 0 8px 24px rgba(0, 0, 0, 0.35);
+	--rl-shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.45);
+	--rl-shadow-xl: 0 24px 64px rgba(0, 0, 0, 0.55);
+	--rl-shadow-glow: 0 0 0 4px rgba(var(--rl-primary-rgb), 0.1);
+	--rl-shadow-glow-strong: 0 0 0 6px rgba(var(--rl-primary-rgb), 0.16);
+	--rl-shadow-glow-orange: 0 0 0 4px rgba(var(--rl-primary-rgb), 0.1);
+	--rl-shadow-inset: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 
 	/* ---------- Motion ---------- */
 	--rl-ease: cubic-bezier(0.4, 0, 0.2, 1);
 	--rl-ease-out: cubic-bezier(0, 0, 0.2, 1);
 	--rl-ease-in: cubic-bezier(0.4, 0, 1, 1);
 	--rl-ease-bounce: cubic-bezier(0.34, 1.56, 0.64, 1);
-	--rl-duration-fast: 150ms;
-	--rl-duration-normal: 300ms;
+	--rl-duration-fast: 120ms;
+	--rl-duration-normal: 200ms;
 	--rl-duration-slow: 500ms;
 	--rl-transition: all var(--rl-duration-normal) var(--rl-ease);
 
 	/* ---------- Focus ring ---------- */
-	--rl-focus-ring: 0 0 0 3px rgba(var(--rl-primary-rgb), 0.45);
+	--rl-focus-ring: 0 0 0 3px rgba(var(--rl-primary-rgb), 0.35);
 	--rl-focus-ring-danger: 0 0 0 3px rgba(var(--rl-danger-rgb), 0.45);
 	--rl-focus-ring-offset: 2px;
-	--rl-focus-outline: 2px solid var(--rl-gold-300);
+	--rl-focus-outline: 2px solid var(--rl-primary);
 
 	/* ---------- Z-index scale ---------- */
 	--rl-z-base: 1;
@@ -219,12 +222,12 @@
 	--rl-container-wide: min(92vw, 2400px);
 	--rl-container-prose: min(90vw, 720px);
 
-	/* ---------- Gradients (signature OSRS treatments) ---------- */
-	--rl-gradient-gold: linear-gradient(135deg, var(--rl-gold-400) 0%, var(--rl-gold-600) 100%);
-	--rl-gradient-fire: linear-gradient(135deg, var(--rl-orange-300) 0%, var(--rl-orange-500) 100%);
-	--rl-gradient-ember: linear-gradient(135deg, var(--rl-gold-400) 0%, var(--rl-orange-400) 100%);
+	/* ---------- Gradients (now flat/neutral, no glow) ---------- */
+	--rl-gradient-gold: linear-gradient(135deg, var(--rl-primary) 0%, var(--rl-primary-dark) 100%);
+	--rl-gradient-fire: linear-gradient(135deg, var(--rl-primary) 0%, var(--rl-primary-dark) 100%);
+	--rl-gradient-ember: linear-gradient(135deg, var(--rl-primary-light) 0%, var(--rl-primary) 100%);
 	--rl-gradient-stone: linear-gradient(180deg, var(--rl-brown-500) 0%, var(--rl-brown-700) 100%);
-	--rl-gradient-aurora: radial-gradient(ellipse at top, rgba(255, 159, 9, 0.08) 0%, rgba(255, 107, 53, 0.04) 40%, transparent 70%);
+	--rl-gradient-aurora: radial-gradient(ellipse at top, rgba(255, 255, 255, 0.03), transparent 60%);
 }
 
 @media (min-width: 1440px) {
