@@ -4,7 +4,8 @@
 // path is additionally validated to stay within storageDir.
 
 import { mkdir, open, rm, stat, readdir, rename } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, createReadStream } from 'node:fs';
+import { Readable } from 'node:stream';
 import { join, resolve, sep } from 'node:path';
 import { config } from '../config.js';
 import { transformAt, decryptStream } from './filecrypt.js';
@@ -57,8 +58,13 @@ export async function writeChunk(shareId, fileId, offset, data, iv) {
 // ciphertext slice and decrypts it (when the file has an iv). Used for download,
 // preview, and zip so plaintext is only ever produced for an authorized request.
 export function blobRangeStream(shareId, fileId, start, end, iv) {
-	const f = Bun.file(blobPath(shareId, fileId));
-	const src = (end < start ? f.slice(0, 0) : f.slice(start, end + 1)).stream();
+	// Not Bun.file().slice(start, end).stream(): Bun ignores the slice end when
+	// streaming and reads from `start` to EOF in huge buffered chunks, so on a
+	// large blob a small Range request never terminates (the client hangs after
+	// Content-Length bytes) and each seek materializes the file tail in memory.
+	// fs.createReadStream honors start/end and reads in small chunks.
+	if (end < start) return new ReadableStream({ start(c) { c.close(); } });
+	const src = Readable.toWeb(createReadStream(blobPath(shareId, fileId), { start, end }));
 	if (iv) return decryptStream(iv, start, src);
 	return src;
 }

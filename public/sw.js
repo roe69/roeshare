@@ -102,7 +102,7 @@ function plainStream(entry, start, end, endpoint) {
 			const cipherB = Math.min((bEnd + 1) * recordSize, cipherSize) - 1;
 			let res;
 			try {
-				res = await fetch(fileBase + endpoint, { headers: { ...authHeaders, Range: `bytes=${cipherA}-${cipherB}` } });
+				res = await fetch(fileBase + endpoint, { cache: 'no-store', headers: { ...authHeaders, Range: `bytes=${cipherA}-${cipherB}` } });
 			} catch (err) {
 				controller.error(err);
 				return;
@@ -111,7 +111,16 @@ function plainStream(entry, start, end, endpoint) {
 				controller.error(new Error('cipher fetch failed: ' + res.status));
 				return;
 			}
-			const buf = new Uint8Array(await res.arrayBuffer());
+			let buf = new Uint8Array(await res.arrayBuffer());
+			// A 200 means the Range was ignored somewhere (a cache, a proxy) and
+			// buf is the whole ciphertext; slice out the records we asked for.
+			// Anything else that isn't the exact requested window would silently
+			// misframe every record, so fail loudly instead of corrupting.
+			if (res.status === 200 && buf.length === cipherSize) buf = buf.subarray(cipherA, cipherB + 1);
+			if (buf.length !== cipherB - cipherA + 1) {
+				controller.error(new Error(`cipher fetch returned ${buf.length} bytes, expected ${cipherB - cipherA + 1}`));
+				return;
+			}
 			let pos = 0;
 			for (let i = bStart; i <= bEnd; i++) {
 				const cStart = i * cs;
