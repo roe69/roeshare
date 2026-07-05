@@ -111,58 +111,20 @@ secrets, protect and encrypt backups of the data volume.
 
 ## HTTPS (reverse proxy)
 
-RoeShare speaks plain HTTP. For a public deployment, put a reverse proxy in
-front for TLS, set `BASE_URL` to your `https://` domain, and set
-`TRUST_PROXY=1` so rate limiting and logging see real client IPs (leave it
-`0` when exposed directly - otherwise clients can spoof their IP).
+RoeShare speaks plain HTTP; TLS is up to whatever you already run in front of
+it (a reverse proxy, a tunnel, nothing at all on a LAN). Two settings matter
+when something proxies for it:
 
-**Caddy** (TLS is automatic):
+- `BASE_URL` - set it to the public https URL so share links and QR codes
+  point at the right place.
+- `TRUST_PROXY=1` - makes rate limiting and logs use the forwarded client IP.
+  Only behind a proxy you trust; when the app is exposed directly, leave it
+  `0` or clients can spoof their IP.
 
-```
-share.example.com {
-    reverse_proxy 127.0.0.1:3300
-}
-```
-
-**nginx**:
-
-```nginx
-server {
-    listen 443 ssl;
-    server_name share.example.com;
-
-    location / {
-        proxy_pass http://127.0.0.1:3300;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Real-IP $remote_addr;
-        client_max_body_size 0;
-    }
-}
-```
-
-Full annotated versions: [`deploy/Caddyfile.example`](deploy/Caddyfile.example),
-[`deploy/nginx.example.conf`](deploy/nginx.example.conf) (including TLS
-directives and the optional `X_ACCEL_REDIRECT` sendfile offload, which lets
-nginx serve encryption-free file bytes straight off disk at high concurrency).
-
-If you don't have a reverse proxy yet, add Caddy to the same compose file:
-
-```yaml
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    command: caddy reverse-proxy --from share.example.com --to roeshare:3300
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - caddy-data:/data # certificates persist here
-```
-
-Add `caddy-data:` under `volumes:`, set `TRUST_PROXY: "1"` and the `https://`
-`BASE_URL` on the app, and remove the app's `ports:` mapping so only Caddy is
-reachable.
+Ready-to-adapt configs, including the optional `X_ACCEL_REDIRECT` sendfile
+offload for high-concurrency streaming, live in
+[`deploy/nginx.example.conf`](deploy/nginx.example.conf) and
+[`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
 ## Running from source
 
