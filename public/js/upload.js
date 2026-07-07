@@ -2,7 +2,7 @@
 // card with link, copy, and QR. Uses shared helpers and the rl-* design system.
 
 import { el, $, api, ApiError, toast, toastOk, toastErr, copyText, formatBytes, fileGlyph } from '/js/shared.js';
-import { generateKey, encryptBytes, encryptString, ENC_OVERHEAD } from '/js/e2e.js';
+import { generateKey, importKey, encryptBytes, encryptString, ENC_OVERHEAD } from '/js/e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
 
 // The shared rail. The quick-access upload link is an admin-only control (it
@@ -18,6 +18,36 @@ const MAX_OFFSET_FAILURES = 5;
 const SLUG_RE = /^[A-Za-z0-9_-]{3,64}$/;
 const SLUG_BAD_CHARS = /[^A-Za-z0-9_-]/g;
 
+// ---- Resume drafts (tus-style) --------------------------------------------
+// A refresh or a return-after-disconnect drops the in-memory File objects, so a
+// mid-flight upload cannot continue on its own. We persist a small draft to
+// localStorage (share id, edit token, chunk size, the E2E key, and a fingerprint
+// per file) as the upload runs; on load we offer to resume it once the user
+// re-selects the same files. The server stays the source of truth for how many
+// bytes each file already holds (its `received` count), so the draft never
+// stores per-chunk progress. Cleared on finalize or discard.
+const DRAFT_KEY = 'roeshare:draft';
+const DRAFT_MAX_AGE_MS = 24 * 3600 * 1000; // aligns with the server's abandoned-upload sweep
+
+// tus-style file fingerprint: recognizes "the same file" after a reload, so a
+// re-selected file can be matched back to its in-progress server upload.
+const fingerprint = f => `${f.name}::${f.size}::${f.lastModified}::${f.type || ''}`;
+
+function readDraft() {
+	try {
+		const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
+		if (!d || d.v !== 1 || !d.id || !d.token || !Array.isArray(d.files)) return null;
+		if (Date.now() - (d.createdAt || 0) > DRAFT_MAX_AGE_MS) return null;
+		return d;
+	} catch { return null; }
+}
+function writeDraft(d) {
+	try { localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); } catch { /* quota/private mode: resume just won't be offered */ }
+}
+function clearDraft() {
+	try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
+}
+
 // Exponential backoff with jitter between chunk-retry attempts, so a persistent
 // server/network error does not hammer the server back-to-back on a large upload.
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -27,7 +57,8 @@ let config = null;
 // Captured from config on load so resetForm() can restore the checkbox to the
 // server's default even though config may be refreshed again by then.
 let defaultE2e = false;
-const selected = []; // { file, key, row: { wrap, bar, status }, done }
+const selected = []; // { file, key, row: { wrap, bar, status }, done, _resume }
+let draft = null; // the current in-progress resume draft (see writeDraft), or null
 let uploading = false;
 let keyCounter = 0;
 let overallBar = null;
@@ -470,20 +501,30 @@ function wireValidation() {
 	$('#opt-password-confirm').addEventListener('input', refreshPasswordConfirm);
 }
 
-async function uploadFile(id, token, file, chunkSize, onProgress, name) {
-	const mime = file.type || 'application/octet-stream';
-	const reg = await api.post(`/api/shares/${id}/files`, { name: name || file.name, size: file.size, mime }, { headers: { 'X-Edit-Token': token } });
-	const fileId = reg.fileId;
-	let received = typeof reg.received === 'number' ? reg.received : 0;
+// `existing` ({ fileId, received }) resumes a file already registered on the
+// server instead of registering a fresh one; `onRegister(fileId)` fires right
+// after a fresh registration so the caller can persist the id for resuming.
+async function uploadFile(id, token, file, chunkSize, onProgress, name, existing, onRegister) {
+	let fileId, received;
+	if (existing && existing.fileId) {
+		fileId = existing.fileId;
+		received = existing.received || 0;
+	} else {
+		const mime = file.type || 'application/octet-stream';
+		const reg = await api.post(`/api/shares/${id}/files`, { name: name || file.name, size: file.size, mime }, { headers: { 'X-Edit-Token': token } });
+		fileId = reg.fileId;
+		received = typeof reg.received === 'number' ? reg.received : 0;
+		if (onRegister) onRegister(fileId);
+	}
 	onProgress(received, file.size);
 
 	const headers = { 'X-Edit-Token': token, 'Content-Type': 'application/octet-stream' };
 
-	// Zero-byte file: a single empty chunk completes it.
+	// Zero-byte file: a single empty chunk completes it (skip if already written).
 	if (file.size === 0) {
-		await api.raw('PATCH', `/api/shares/${id}/files/${fileId}?offset=0`, new Blob([]), { headers });
+		if (received === 0) await api.raw('PATCH', `/api/shares/${id}/files/${fileId}?offset=0`, new Blob([]), { headers });
 		onProgress(0, 0);
-		return;
+		return fileId;
 	}
 
 	let guard = 0;
@@ -556,21 +597,31 @@ async function uploadFile(id, token, file, chunkSize, onProgress, name) {
 // End-to-end upload: encrypt each chunk in the browser before sending. The server
 // receives only ciphertext; the filename/mime/chunk-size are encrypted into the
 // stored `name`. `onProgress` reports ciphertext bytes.
-async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name) {
+// See uploadFile for `existing`/`onRegister`. Resume must reuse the SAME chunk
+// size the share was created with, so records line up with the server's offset;
+// re-encrypting a resumed record with a fresh IV is fine (each record is
+// self-contained), the server only ever reports whole-record offsets.
+async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name, existing, onRegister) {
 	const recordSize = chunkSize + ENC_OVERHEAD;
 	const plainSize = file.size;
 	const numChunks = Math.max(1, Math.ceil(plainSize / chunkSize));
 	const cipherSize = plainSize + numChunks * ENC_OVERHEAD;
 
-	// Encrypted metadata: real name (incl. folder path), mime, and the plaintext
-	// chunk size so the recipient can frame the records for decryption.
-	const meta = await encryptString(key, JSON.stringify({ name: name || file.name, mime: file.type || 'application/octet-stream', cs: chunkSize }));
-	const reg = await api.post(`/api/shares/${id}/files`, { name: meta, size: cipherSize, mime: 'application/octet-stream' }, { headers: { 'X-Edit-Token': token } });
-	const fileId = reg.fileId;
+	let fileId;
+	if (existing && existing.fileId) {
+		fileId = existing.fileId;
+	} else {
+		// Encrypted metadata: real name (incl. folder path), mime, and the plaintext
+		// chunk size so the recipient can frame the records for decryption.
+		const meta = await encryptString(key, JSON.stringify({ name: name || file.name, mime: file.type || 'application/octet-stream', cs: chunkSize }));
+		const reg = await api.post(`/api/shares/${id}/files`, { name: meta, size: cipherSize, mime: 'application/octet-stream' }, { headers: { 'X-Edit-Token': token } });
+		fileId = reg.fileId;
+		if (onRegister) onRegister(fileId);
+	}
 	const headers = { 'X-Edit-Token': token, 'Content-Type': 'application/octet-stream' };
 
-	let cipherOff = 0;
-	onProgress(0, cipherSize);
+	let cipherOff = existing && existing.fileId ? (existing.received || 0) : 0;
+	onProgress(cipherOff, cipherSize);
 	let guard = 0;
 	const maxGuard = numChunks * 4 + 16;
 	// Track attempts/failures per offset so backoff grows across retry rounds and
@@ -740,6 +791,7 @@ async function doUpload() {
 		return;
 	}
 
+	removeResumeBanner(); // starting a fresh upload supersedes any offered resume
 	setUploading(true);
 	resultEl.classList.add('rl-hidden');
 
@@ -789,13 +841,43 @@ async function doUpload() {
 		}
 	}
 
+	// Persist a resume draft before any bytes go up, so a refresh mid-upload can
+	// continue. The E2E key is stored too (a deliberate tradeoff: it lets an E2E
+	// upload resume, and lives only until finalize/discard). fileIds fill in as
+	// each file registers.
+	draft = {
+		v: 1, id, token, chunkSize,
+		e2e: !!e2eKey, key: e2eKeyB64 || null,
+		createdAt: Date.now(),
+		files: selected.map(item => ({ fp: fingerprint(item.file), path: item.path, size: item.file.size, fileId: null })),
+	};
+	writeDraft(draft);
+	for (const item of selected) item._resume = null; // a fresh upload, nothing to resume
+
+	await runUpload({ id, token, chunkSize, e2eKey, e2eKeyB64 });
+}
+
+// Upload every item in `selected` (fresh or resumed, per item._resume), then
+// finalize the share, clear the draft, and show the result. Shared by a fresh
+// upload and a resumed one.
+async function runUpload({ id, token, chunkSize, e2eKey, e2eKeyB64 }) {
+	// Persist a file's server id into the draft the moment it registers, so a
+	// refresh between registration and the first chunk can still resume it.
+	const onReg = fp => fileId => {
+		if (!draft) return;
+		const fe = draft.files.find(f => f.fp === fp);
+		if (fe) { fe.fileId = fileId; writeDraft(draft); }
+	};
+
 	let failed = false;
 	for (const item of selected) {
 		try {
+			const fp = fingerprint(item.file);
+			const existing = item._resume || null;
 			if (e2eKey) {
-				await uploadFileE2E(id, token, item.file, e2eKey, chunkSize, (rec, size) => setProgress(item, Math.round((rec / size) * item.file.size), item.file.size), item.path);
+				await uploadFileE2E(id, token, item.file, e2eKey, chunkSize, (rec, size) => setProgress(item, Math.round((rec / size) * item.file.size), item.file.size), item.path, existing, onReg(fp));
 			} else {
-				await uploadFile(id, token, item.file, chunkSize, (rec, size) => setProgress(item, rec, size), item.path);
+				await uploadFile(id, token, item.file, chunkSize, (rec, size) => setProgress(item, rec, size), item.path, existing, onReg(fp));
 			}
 			item.done = true;
 			setProgress(item, item.file.size, item.file.size);
@@ -814,12 +896,15 @@ async function doUpload() {
 
 	if (failed) {
 		setUploading(false);
-		toast('Some files did not upload. You can retry.', 'error');
+		toast('Some files did not upload. Your progress is saved - refresh to resume, or retry.', 'error');
 		return;
 	}
 
 	try {
 		const fin = await api.post(`/api/shares/${id}/finalize`, undefined, { headers: { 'X-Edit-Token': token } });
+		clearDraft();
+		draft = null;
+		removeResumeBanner();
 		setUploading(false);
 		uploading = false;
 		toastOk('Upload complete');
@@ -834,7 +919,160 @@ async function doUpload() {
 
 uploadBtn.addEventListener('click', doUpload);
 
+// ---- Resume (tus-style) ----------------------------------------------------
+
+function removeResumeBanner() {
+	const b = document.getElementById('resume-banner');
+	if (b) b.remove();
+}
+
+// Draft files not yet fully uploaded on the server - the ones the user must
+// re-select to continue.
+function pendingFiles(d, meta) {
+	const byId = new Map((meta.files || []).map(m => [m.id, m]));
+	return d.files.filter(f => {
+		const m = f.fileId ? byId.get(f.fileId) : null;
+		return !(m && m.complete);
+	});
+}
+
+// On load: if a valid unfinished draft exists and its share is still live and
+// unfinalized, offer to resume it. A share that has vanished (expired, deleted,
+// or swept) or already finished quietly clears the stale draft.
+async function maybeOfferResume() {
+	const d = readDraft();
+	if (!d) return;
+	let meta;
+	try {
+		meta = await api.get(`/api/shares/${d.id}`, { headers: { 'X-Edit-Token': d.token } });
+	} catch (e) {
+		clearDraft();
+		return;
+	}
+	if (!meta || !meta.owner || meta.finalized || !pendingFiles(d, meta).length) {
+		clearDraft();
+		return;
+	}
+	renderResumeBanner(d, meta);
+}
+
+function renderResumeBanner(d, meta) {
+	removeResumeBanner();
+	if (uploading) return;
+	const byId = new Map((meta.files || []).map(m => [m.id, m]));
+	const pending = pendingFiles(d, meta);
+	const totalBytes = d.files.reduce((s, f) => s + f.size, 0);
+	const doneBytes = d.files.reduce((s, f) => {
+		const m = f.fileId ? byId.get(f.fileId) : null;
+		if (m && m.complete) return s + f.size;
+		return s + Math.min(m ? m.received || 0 : 0, f.size);
+	}, 0);
+	const doneCount = d.files.length - pending.length;
+
+	const matched = new Map(); // fingerprint -> re-selected File
+	const picker = el('input', { type: 'file', multiple: true, style: 'display:none' });
+	const listHost = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-1)' });
+	const statusLine = el('p', { class: 'rl-help', style: 'margin:0' });
+	const resumeBtn = el('button', { class: 'rl-btn rl-btn-primary', disabled: true }, 'Resume upload');
+
+	const refresh = () => {
+		listHost.textContent = '';
+		for (const f of pending) {
+			const ok = matched.has(f.fp);
+			const base = f.path.slice(f.path.lastIndexOf('/') + 1);
+			listHost.append(el('div', { class: 'rl-row', style: 'justify-content:space-between;gap:var(--rl-space-2);font-size:var(--rl-text-sm)' },
+				el('span', { class: 'rl-truncate', title: f.path }, base),
+				el('span', { class: `rl-badge ${ok ? 'rl-badge-success' : 'rl-badge-neutral'}` }, ok ? 'ready' : `${formatBytes(f.size)} - needed`),
+			));
+		}
+		resumeBtn.disabled = !pending.every(f => matched.has(f.fp));
+		statusLine.textContent = `${matched.size} of ${pending.length} files re-selected. Pick the exact same files to continue.`;
+	};
+
+	picker.addEventListener('change', () => {
+		for (const f of picker.files) {
+			const fp = fingerprint(f);
+			if (pending.some(p => p.fp === fp)) matched.set(fp, f);
+		}
+		picker.value = '';
+		refresh();
+	});
+	resumeBtn.addEventListener('click', () => startResume(d, meta, [...matched.values()]));
+
+	const banner = el('section', { id: 'resume-banner', class: 'rl-card rl-stack' },
+		el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center;gap:var(--rl-space-2)' },
+			el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg);margin:0' }, 'Resume your upload'),
+			d.e2e ? el('span', { class: 'rl-badge rl-badge-gold' }, 'End-to-end') : null,
+		),
+		el('p', { class: 'rl-muted', style: 'margin:0' },
+			`Unfinished upload - ${doneCount} of ${d.files.length} files done (${formatBytes(doneBytes)} of ${formatBytes(totalBytes)}). Re-select the remaining files to continue where you left off.`),
+		listHost,
+		statusLine,
+		el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' },
+			el('button', { class: 'rl-btn rl-btn-secondary', onClick: () => picker.click() }, 'Select files'),
+			resumeBtn,
+			el('span', { class: 'rl-spacer' }),
+			el('button', { class: 'rl-btn rl-btn-ghost', onClick: () => discardDraft(d) }, 'Discard'),
+		),
+		picker,
+	);
+	$('#share-form').prepend(banner);
+	refresh();
+}
+
+// Rebuild `selected` from the draft + re-selected files (matched by fingerprint),
+// attaching each file's server id and current offset, then resume the upload.
+async function startResume(d, meta, files) {
+	const byFp = new Map(files.map(f => [fingerprint(f), f]));
+	const byId = new Map((meta.files || []).map(m => [m.id, m]));
+
+	selected.length = 0;
+	for (const df of d.files) {
+		const m = df.fileId ? byId.get(df.fileId) : null;
+		if (m && m.complete) continue; // already fully uploaded server-side
+		const file = byFp.get(df.fp);
+		if (!file) { toastErr('Please re-select all of the remaining files.'); return; }
+		selected.push({
+			file, path: df.path, key: ++keyCounter, row: null, done: false,
+			_resume: df.fileId && m ? { fileId: df.fileId, received: m.received || 0 } : null,
+		});
+	}
+	if (!selected.length) { clearDraft(); removeResumeBanner(); return; }
+
+	draft = d;
+	let e2eKey = null;
+	if (d.e2e) {
+		try {
+			e2eKey = await importKey(d.key);
+		} catch (e) {
+			toastErr('Could not restore the encryption key; discarding this upload.');
+			await discardDraft(d);
+			return;
+		}
+	}
+	removeResumeBanner();
+	setUploading(true);
+	resultEl.classList.add('rl-hidden');
+	// Resume always uses the draft's chunk size so E2E records line up with the
+	// server's stored offset.
+	await runUpload({ id: d.id, token: d.token, chunkSize: d.chunkSize, e2eKey, e2eKeyB64: d.key || '' });
+}
+
+async function discardDraft(d) {
+	try {
+		await api.del(`/api/shares/${d.id}`, { headers: { 'X-Edit-Token': d.token } });
+	} catch (e) {
+		/* already gone - fine */
+	}
+	try { localStorage.removeItem(EDIT_KEY(d.id)); } catch (_) {}
+	clearDraft();
+	draft = null;
+	removeResumeBanner();
+	toast('Unfinished upload discarded.', 'info');
+}
+
 // ---- Init ------------------------------------------------------------------
 wireConditionalOptions();
 wireValidation();
 loadConfig();
+maybeOfferResume();

@@ -16,7 +16,8 @@ SQLite, zero npm dependencies).
 
 - **Resumable chunked uploads.** Large files go up in chunks and continue from
   the last byte the server confirmed after a dropped connection or transient
-  error, instead of restarting from zero.
+  error. If the page is refreshed or reopened mid-upload, it offers to resume
+  once you re-select the same files - including for end-to-end shares.
 - **End-to-end encryption by default.** New shares are encrypted in your browser;
   the key lives in the link's `#fragment` and never reaches the server, which
   only ever stores ciphertext. Toggle it off for server-managed shares.

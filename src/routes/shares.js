@@ -18,7 +18,7 @@ const insertShare = db.query(
 	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e)
 	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
-const getFiles = db.query('SELECT id, name, size, mime, complete, download_count FROM files WHERE share_id = ? ORDER BY created_at ASC');
+const getFiles = db.query('SELECT id, name, size, received, mime, complete, download_count FROM files WHERE share_id = ? ORDER BY created_at ASC');
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
 // Shifts a share's expiry forward by the time spent uploading, so the
 // published-link expiry clock effectively starts at finalize rather than at
@@ -251,6 +251,9 @@ export default function shares(router) {
 				mime: f.mime,
 				complete: !!f.complete,
 				downloadCount: f.download_count,
+				// Owners get the resume offset (bytes received so far) so a refreshed
+				// upload page can continue an in-flight file. Not exposed to visitors.
+				...(owner ? { received: f.received } : {}),
 			})),
 		});
 	});
