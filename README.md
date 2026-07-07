@@ -14,14 +14,23 @@ SQLite, zero npm dependencies).
 
 ![RoeShare upload page](docs/screenshot.png)
 
-- Resumable chunked uploads that survive refreshes and dropped connections.
-- End-to-end encryption by default: the key lives in the link's `#fragment`
-  and never reaches the server.
-- Per-share password, expiry, download cap, one-time burn, custom URL slug.
-- In-browser preview (video, audio, images, PDF, text), zip download of a
-  whole share, QR code per link.
-- Admin panel: share management, stats, settings editor, API keys.
-- JSON API for scripted uploads and backups.
+- **Resumable chunked uploads.** Large files go up in chunks and continue from
+  the last byte the server confirmed after a dropped connection or transient
+  error, instead of restarting from zero.
+- **End-to-end encryption by default.** New shares are encrypted in your browser;
+  the key lives in the link's `#fragment` and never reaches the server, which
+  only ever stores ciphertext. Toggle it off for server-managed shares.
+- **Encrypted at rest.** Server-managed (non-E2E) files are AES-256-CTR encrypted
+  on disk by default, keyed from `SECRET`.
+- **Per-share controls.** Password, expiry, download-count cap, one-time
+  burn-after-download, and a custom link slug.
+- **In-browser preview.** Images, video, audio, PDFs, and text/code render
+  inline (video and audio stream with seeking, even for E2E shares); download a
+  whole share as one zip; a QR code for every link.
+- **Admin panel.** Browse and manage shares, usage stats, an in-app settings
+  editor, and API keys (create, limit, rotate, revoke).
+- **JSON API.** Per-key tokens with byte, expiry, and scope limits for
+  programmatic uploads and managing that key's shares.
 
 The name, colours, and icons are just defaults - rebrand it with a couple of
 env vars, see [CUSTOMIZING.md](CUSTOMIZING.md).
