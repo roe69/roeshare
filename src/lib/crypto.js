@@ -62,6 +62,18 @@ export async function verifyPassword(plain, hash) {
 	}
 }
 
+// A short, domain-separated fingerprint of a credential (an admin/upload
+// password), keyed by SECRET. Embedded in the session tokens minted after that
+// credential is verified, and re-checked on every request: when the credential
+// is rotated (or SECRET changes), the fingerprint no longer matches and every
+// outstanding session that carried the old value is invalidated. `purpose`
+// domain-separates the tags so an admin fingerprint can never equal an upload
+// one. Not secret material itself (the whole token is already HMAC-signed) - it
+// is a tamper-proof "which password was this issued under" marker.
+export function credentialTag(purpose, credential) {
+	return createHmac('sha256', config.secret).update(`${purpose}\0${credential ?? ''}`).digest('base64url').slice(0, 22);
+}
+
 // Constant-time string compare for shared secrets (admin/upload passwords and
 // edit tokens) where we do not store a hash. Both sides are first hashed to a
 // fixed 32-byte digest so the comparison never short-circuits on a length
