@@ -13,7 +13,7 @@ import { slugError } from '../lib/slug.js';
 import { getLogs } from '../lib/logbuffer.js';
 import { ALLOWED_KEYS, ALLOWLIST, envManagedKeys, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
 import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
-import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, deleteApiKey, sanitizeLimits } from '../lib/apikeys.js';
+import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, rotateApiKey, deleteApiKey, sanitizeLimits } from '../lib/apikeys.js';
 
 // The editable settings keys mapped to their current effective (booted) values,
 // for pre-filling the editor. Secret keys are reported only as set/unset.
@@ -455,6 +455,16 @@ export default router => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		if (!reinstateApiKey(params.id)) return error(404, 'Not found');
 		return json({ ok: true });
+	});
+
+	// Rotate a key's secret: the old token stops working at once and portal
+	// sessions bound to it are signed out. The new token is returned exactly once,
+	// like creation; afterwards only its hash exists.
+	router.post('/api/admin/api-keys/:id/rotate', ({ req, params }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const made = rotateApiKey(params.id);
+		if (!made) return error(404, 'Not found');
+		return json({ id: made.id, name: made.name, token: made.token, prefix: made.prefix });
 	});
 
 	router.delete('/api/admin/api-keys/:id', ({ req, params }) => {

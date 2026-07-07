@@ -187,7 +187,7 @@ export default function apiV1(router) {
 		if (!key || name.toLowerCase() !== String(key.name).toLowerCase()) {
 			return error(403, 'That name and token do not match an active key');
 		}
-		const setCookie = cookie(APIKEY_COOKIE, issueApiKeySession(key.id), {
+		const setCookie = cookie(APIKEY_COOKIE, issueApiKeySession(key), {
 			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url) === 'https',
 		});
 		return json({ id: key.id, name: key.name }, { headers: { 'Set-Cookie': setCookie } });

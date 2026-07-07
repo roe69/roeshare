@@ -1065,6 +1065,10 @@ function keyRow(k) {
 	const actions = el('div', { class: 'rl-row', style: 'gap:var(--rl-space-1);justify-content:flex-end' },
 		st.active ? el('button', {
 			class: 'rl-btn rl-btn-ghost rl-btn-sm',
+			onclick: e => { e.stopPropagation(); confirmRotateKey(k); },
+		}, 'Rotate') : false,
+		st.active ? el('button', {
+			class: 'rl-btn rl-btn-ghost rl-btn-sm',
 			onclick: e => { e.stopPropagation(); confirmRevoke(k); },
 		}, 'Revoke') : false,
 		k.revokedAt ? el('button', {
@@ -1102,8 +1106,9 @@ function keyRow(k) {
 	return tr;
 }
 
-// One-time reveal of a freshly minted token, with copy-able request examples.
-function showNewKeyModal(made) {
+// One-time reveal of a freshly minted (or rotated) token, with copy-able request
+// examples. `title`/`note` let the rotate flow reuse the same reveal.
+function showNewKeyModal(made, { title = 'API key created', note } = {}) {
 	const origin = location.origin;
 	const tokenBox = el('div', {
 		class: 'rl-mono',
@@ -1122,6 +1127,7 @@ function showNewKeyModal(made) {
 	}, curl);
 
 	const body = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-3)' },
+		note ? el('div', { class: 'rl-alert rl-alert-info' }, note) : false,
 		el('div', { class: 'rl-alert rl-alert-warning' }, 'Copy this key now. For security it is not stored and cannot be shown again.'),
 		el('div', { class: 'rl-field' },
 			el('label', { class: 'rl-label' }, `Key "${made.name}"`),
@@ -1140,7 +1146,35 @@ function showNewKeyModal(made) {
 		),
 	);
 
-	openModal({ title: 'API key created', body, actions: [{ label: 'Done', variant: 'primary' }] });
+	openModal({ title, body, actions: [{ label: 'Done', variant: 'primary' }] });
+}
+
+// Rotate a key's secret: mint a new token, invalidating the old one and any
+// portal session bound to it, then reveal the new token once.
+function confirmRotateKey(k, onDone) {
+	openModal({
+		title: 'Rotate key secret',
+		body: el('div', { class: 'rl-stack' },
+			el('p', {}, `Generate a new secret for "${k.name}"? The current token stops working immediately, and any browser portal session using it is signed out.`),
+			el('p', { class: 'rl-help', style: 'margin:0' }, 'The key keeps its name, limits, scopes, and usage history - only the secret changes. Update anything that uploads with this key.'),
+		),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Rotate secret', variant: 'danger',
+				onClick: async () => {
+					try {
+						const made = await api.post(`/api/admin/api-keys/${encodeURIComponent(k.id)}/rotate`, {});
+						loadKeys();
+						onDone?.();
+						showNewKeyModal(made, { title: 'API key rotated', note: 'The previous token has stopped working. Update anything using this key with the new token below.' });
+					} catch (err) {
+						toastErr(err);
+					}
+				},
+			},
+		],
+	});
 }
 
 function confirmRevoke(k) {
@@ -1291,6 +1325,7 @@ async function openKeyDetail(id) {
 			k.revokedAt
 				? el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); confirmReinstate(k); } }, 'Reinstate')
 				: el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => { modal.close(); confirmRevoke(k); } }, 'Revoke'),
+			k.revokedAt ? false : el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onclick: () => confirmRotateKey(k, () => modal.close()) }, 'Rotate secret'),
 			el('button', { class: 'rl-btn rl-btn-danger rl-btn-sm', onclick: () => confirmDeleteKey(k, () => modal.close()) }, 'Delete'),
 		);
 

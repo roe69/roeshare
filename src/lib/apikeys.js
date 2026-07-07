@@ -15,7 +15,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { randomId } from './ids.js';
-import { signToken, verifyToken } from './crypto.js';
+import { signToken, verifyToken, credentialTag } from './crypto.js';
 import { parseCookies } from './http.js';
 
 const KEY_PREFIX = 'rsk';
@@ -31,6 +31,7 @@ const getKey = db.query('SELECT * FROM api_keys WHERE id = ?');
 const touchKey = db.query('UPDATE api_keys SET last_used_at = ? WHERE id = ?');
 const bumpKey = db.query('UPDATE api_keys SET upload_count = upload_count + ?, bytes_uploaded = bytes_uploaded + ? WHERE id = ?');
 const revokeQ = db.query('UPDATE api_keys SET revoked_at = ? WHERE id = ?');
+const rotateQ = db.query('UPDATE api_keys SET key_hash = ? WHERE id = ?');
 const deleteQ = db.query('DELETE FROM api_keys WHERE id = ?');
 const updateQ = db.query(
 	`UPDATE api_keys SET name = ?, max_file_size = ?, max_share_size = ?, max_shares = ?, max_expiry = ?, allow_slug = ?, allow_password = ? WHERE id = ?`,
@@ -169,11 +170,18 @@ export function readApiKey(req) {
 	return x ? x.trim() : null;
 }
 
-// A signed cookie for the browser portal. It only names the key id; the row is
-// re-fetched and re-checked (revoke/expiry) on every use, so revoking a key kills
-// its sessions immediately.
-export function issueApiKeySession(keyId) {
-	return signToken({ scope: 'apikey', kid: keyId }, config.adminSessionTtl);
+// Fingerprint of a key's current secret (via its stored hash), keyed by SECRET.
+// Baked into the portal session token so rotating the key's secret invalidates
+// every outstanding browser session for it - the same credential-binding the
+// admin/upload cookies use for password rotation.
+const keyTag = keyHash => credentialTag('apikey', keyHash);
+
+// A signed cookie for the browser portal. It names the key id and a fingerprint
+// of its current secret; the row is re-fetched and re-checked (revoke / expiry /
+// fingerprint) on every use, so revoking OR rotating a key kills its browser
+// sessions immediately.
+export function issueApiKeySession(key) {
+	return signToken({ scope: 'apikey', kid: key.id, k: keyTag(key.key_hash) }, config.adminSessionTtl);
 }
 
 export function readApiKeySession(req) {
@@ -184,6 +192,7 @@ export function readApiKeySession(req) {
 	const row = getKey.get(p.kid);
 	if (!row || row.revoked_at != null) return null;
 	if (row.expires_at != null && row.expires_at < now()) return null;
+	if (p.k !== keyTag(row.key_hash)) return null; // secret rotated -> session invalidated
 	return row;
 }
 
@@ -266,6 +275,19 @@ export function reinstateApiKey(id) {
 	if (!k) return false;
 	if (k.revoked_at != null) revokeQ.run(null, id);
 	return true;
+}
+
+// Rotate a key's secret in place: same id, name, limits, scopes, and usage
+// history, but a brand-new secret. The old token stops verifying immediately (its
+// hash no longer matches) and every browser portal session bound to the old
+// secret is invalidated. Returns the new full token (surfaced to the operator
+// exactly once, like creation), or null if the key does not exist.
+export function rotateApiKey(id) {
+	const k = getKey.get(id);
+	if (!k) return null;
+	const secret = randomId(40);
+	rotateQ.run(sha256(secret).toString('hex'), id);
+	return { id, name: k.name, token: `${KEY_PREFIX}_${id}_${secret}`, prefix: `${KEY_PREFIX}_${id}` };
 }
 
 // Hard-delete a key row. Shares it created keep their (now dangling) api_key_id.
