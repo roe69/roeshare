@@ -12,6 +12,8 @@ Self-hosted file sharing: drag files in, get an opaque share link, and
 control who can fetch it and for how long. A single small container (Bun +
 SQLite, zero npm dependencies).
 
+![RoeShare upload page](docs/screenshot.png)
+
 - Resumable chunked uploads that survive refreshes and dropped connections.
 - End-to-end encryption by default: the key lives in the link's `#fragment`
   and never reaches the server.
