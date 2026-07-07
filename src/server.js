@@ -86,14 +86,19 @@ async function serveStatic(req, pathname) {
 	// Only assets under these prefixes are public. Everything else 404s.
 	// `sw.js` is served from the root so its Service Worker scope covers the whole
 	// origin (it intercepts the virtual /_e2e/* URLs used for streamed E2E media).
-	if (!/^\/(css|js|fonts|assets|favicon|apple-touch-icon|android-chrome|icon|robots|manifest|site\.webmanifest|sw\.js)/.test(pathname)) return null;
+	// Normalize the request path ONCE up front and gate on the *normalized* value,
+	// so the access checks below can never disagree with the file that actually gets
+	// served. `path.normalize` collapses `..`, `.` and repeated slashes, so e.g.
+	// `/js//admin.js` becomes `/js/admin.js`; gating on the raw pathname let that
+	// slip past the string equality check yet still resolve to the real file.
+	const rel = normalize(pathname).replace(/\\/g, '/').replace(/^(\.\.\/)+/, '');
+	if (!/^\/(css|js|fonts|assets|favicon|apple-touch-icon|android-chrome|icon|robots|manifest|site\.webmanifest|sw\.js)/.test(rel)) return null;
 	// The upload portal's code is gated behind the upload-password cookie: an
 	// unauthorized visitor gets a 404 for it, so the source never leaks.
-	if (pathname === '/js/upload.js' && !hasUploadAccess(req)) return null;
+	if (rel === '/js/upload.js' && !hasUploadAccess(req)) return null;
 	// Likewise, the admin dashboard's code is served only to a logged-in admin.
 	// The /login page uses the separate, ungated /js/login.js instead.
-	if (pathname === '/js/admin.js' && !isAdmin(req)) return null;
-	const rel = normalize(pathname).replace(/^(\.\.[/\\])+/, '');
+	if (rel === '/js/admin.js' && !isAdmin(req)) return null;
 	const full = join(PUBLIC_DIR, rel);
 	if (full !== PUBLIC_DIR && !full.startsWith(PUBLIC_DIR + sep)) return null; // traversal guard
 	if (!(await Bun.file(full).exists())) return null;
