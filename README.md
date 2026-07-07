@@ -1,5 +1,13 @@
 # RoeShare
 
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Publish](https://github.com/roe69/roeshare/actions/workflows/publish.yml/badge.svg)](https://github.com/roe69/roeshare/actions/workflows/publish.yml)
+[![Docker Pulls](https://img.shields.io/docker/pulls/roe69/roeshare)](https://hub.docker.com/r/roe69/roeshare)
+[![Docker Image Size](https://img.shields.io/docker/image-size/roe69/roeshare/latest)](https://hub.docker.com/r/roe69/roeshare)
+[![Runtime: Bun](https://img.shields.io/badge/runtime-Bun-f9f1e1?logo=bun&logoColor=black)](https://bun.sh)
+[![SQLite](https://img.shields.io/badge/storage-SQLite-044a64?logo=sqlite&logoColor=white)](https://www.sqlite.org/)
+[![Built with Claude Code](https://img.shields.io/badge/built%20with-Claude%20Code-D97757?logo=claude&logoColor=white)](https://claude.com/claude-code)
+
 Self-hosted file sharing: drag files in, get an opaque share link, and
 control who can fetch it and for how long. A single small container (Bun +
 SQLite, zero npm dependencies).

@@ -4,7 +4,7 @@
 	"private": true,
 	"description": "A secure, self-hosted, end-to-end-encryptable file sharing platform. No build step, zero runtime dependencies, single SQLite file.",
 	"author": "Roe <admin@roelite.net>",
-	"license": "SEE LICENSE IN LICENSE",
+	"license": "MIT",
 	"type": "module",
 	"module": "src/server.js",
 	"scripts": {
