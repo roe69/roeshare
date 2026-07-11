@@ -14,6 +14,7 @@ import { blobPath, blobRangeStream, deleteShareFiles, fileEnc, plainSize } from 
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
+import * as quota from '../lib/quota.js';
 
 // Whether a resolved Range (or the absence of one) covers the ENTIRE file in
 // one shot - i.e. letting the stream drain would deliver the file in full.
@@ -144,10 +145,17 @@ function uniqueZipName(name, used) {
 }
 
 // Remove a one-time share's blobs once the in-flight response has finished. The
-// share row is soft-deleted up front so it disappears immediately; the bytes are
-// only dropped after the stream drains (or is cancelled) so we never yank the
-// file out from under a download that is still being read.
+// share row is soft-deleted up front (via claimOneTime, at claim time) so it
+// disappears immediately; the bytes are only dropped after the stream drains
+// (or is cancelled) so we never yank the file out from under a download that
+// is still being read. Quota is released HERE, not at claim time - burnBlobs
+// is the single once-only burn point shared by the single-file and zip
+// one-time paths (see the burnPending/readEnd bookkeeping below), whereas a
+// claim can still be undone by restoreShare if the delivery is cancelled, so
+// releasing quota at claim time could reclaim bytes for a share that is about
+// to un-delete itself.
 function burnBlobs(shareId) {
+	quota.releaseShare(shareId);
 	deleteShareFiles(shareId).catch(e => console.error('one-time cleanup failed for', shareId, e));
 }
 

@@ -20,7 +20,7 @@ import { json, error, requestOrigin, cookie, clearCookie, requestScheme } from '
 import { hashPassword, hashSecretToken } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
 import { writeChunk, deleteShareFiles, isCleanupPending } from '../lib/storage.js';
-import { sharedTotalUsage } from './uploads.js';
+import * as quota from '../lib/quota.js';
 import { newFileSalt } from '../lib/filecrypt.js';
 import { CURRENT_AT_REST_KEY_ID } from '../lib/keys.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
@@ -368,16 +368,26 @@ export default function apiV1(router) {
 		if (size === 0) return error(400, 'Empty request body');
 		if (size > caps.maxFileSize) return error(413, 'File exceeds this key\'s per-file size limit');
 		if (size > caps.maxShareSize) return error(413, 'File exceeds this key\'s per-share size limit');
-		if (config.maxTotalSize > 0 && (await sharedTotalUsage()) + size > config.maxTotalSize) {
+
+		// Reserve the global quota atomically (replacing the old cached-disk-walk
+		// check-then-act) BEFORE any row exists - shareId is null here since no
+		// share has been created yet for a one-shot upload.
+		const fileId = newFileId();
+		if (!quota.reserve(fileId, null, size)) {
 			return error(413, 'Server storage limit reached');
 		}
 		const sha256 = createHash('sha256').update(buf).digest('hex');
 
 		const made = await createShare(ctx, key, parsed.values);
-		if (made.conflict) return error(409, made.conflict);
-		if (made.limited) return error(403, made.limited);
+		if (made.conflict) {
+			quota.releaseFile(fileId);
+			return error(409, made.conflict);
+		}
+		if (made.limited) {
+			quota.releaseFile(fileId);
+			return error(403, made.limited);
+		}
 
-		const fileId = newFileId();
 		const iv = newFileSalt();
 		// Write the bytes BEFORE recording the file as complete, so a write failure
 		// never leaves a phantom "complete" row pointing at a missing/partial blob.
@@ -385,12 +395,14 @@ export default function apiV1(router) {
 			await writeChunk(made.id, fileId, 0, buf, { version: 2, keyId: CURRENT_AT_REST_KEY_ID, fileSalt: iv, fileId });
 		} catch (e) {
 			console.error('one-shot upload write failed for', made.id, e);
+			quota.releaseFile(fileId);
 			softDeleteShare.run(now(), made.id);
 			await deleteShareFiles(made.id).catch(() => {});
 			return error(500, 'Could not store the file');
 		}
 		insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv, sha256, 2, CURRENT_AT_REST_KEY_ID);
 		setFinalized.run(made.id);
+		quota.commit(fileId, size);
 
 		// File-completion stats (the chunked flow records these in uploads.js; the
 		// one-shot path writes the bytes directly, so it records them here).
@@ -468,6 +480,7 @@ export default function apiV1(router) {
 		const share = getOwnedShare.get(ctx.params.id, key.id);
 		if (!share) return error(404, 'Not found');
 		softDeleteShare.run(now(), share.id);
+		quota.releaseShare(share.id);
 		await deleteShareFiles(share.id);
 		return json({ ok: true });
 	});

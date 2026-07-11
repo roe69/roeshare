@@ -9,13 +9,14 @@ import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { json, error } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
-import { writeChunk, totalUsage, blobRangeStream, fileEnc } from '../lib/storage.js';
+import { writeChunk, blobRangeStream, fileEnc } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
 import { newFileSalt } from '../lib/filecrypt.js';
 import { CURRENT_AT_REST_KEY_ID } from '../lib/keys.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare } from '../lib/apikeys.js';
 import { enforceKey } from '../lib/ratelimit.js';
+import { reserveInTx, commitInTx, touchInTx } from '../lib/quota.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
@@ -25,36 +26,6 @@ const insertFile = db.query(
 const getFile = db.query('SELECT id, size, received, complete, iv, enc_version, key_id FROM files WHERE id = ? AND share_id = ?');
 const updateReceived = db.query('UPDATE files SET received = ?, complete = ? WHERE id = ?');
 const updateSha256 = db.query('UPDATE files SET sha256 = ? WHERE id = ?');
-
-// totalUsage() performs a full recursive readdir+stat walk over every file in
-// every share on the instance. Calling it once per file registration lets a
-// flood of cheap (e.g. zero-byte) registrations against a single share force
-// repeated whole-instance disk walks, so cost scales with the whole server
-// while the attacker's own per-request cost stays trivial. Memoize behind a
-// short TTL and dedupe concurrent misses so a burst of registrations shares
-// one walk. Exported so other one-shot upload paths (api.js) can reuse the
-// same cached figure instead of walking the tree again themselves.
-let cachedTotal = null; // { value, at }
-let totalUsageInFlight = null;
-const TOTAL_USAGE_TTL_MS = 5000;
-export async function sharedTotalUsage() {
-	const t = Date.now();
-	if (cachedTotal && t - cachedTotal.at < TOTAL_USAGE_TTL_MS) return cachedTotal.value;
-	if (!totalUsageInFlight) {
-		totalUsageInFlight = totalUsage().then(
-			value => {
-				cachedTotal = { value, at: Date.now() };
-				totalUsageInFlight = null;
-				return value;
-			},
-			err => {
-				totalUsageInFlight = null;
-				throw err;
-			}
-		);
-	}
-	return totalUsageInFlight;
-}
 
 // Keep a SAFE relative path so dragged folders preserve their structure (used as
 // the display name and the zip entry path). Drops any "." / ".." / empty / drive
@@ -163,10 +134,6 @@ export default function uploads(router) {
 		if (agg.count >= config.maxFilesPerShare) return error(413, 'Too many files in this share');
 		if (agg.total + size > caps.maxShareSize) return error(413, 'Share exceeds the per-share size limit');
 
-		if (config.maxTotalSize > 0 && (await sharedTotalUsage()) + size > config.maxTotalSize) {
-			return error(413, 'Server storage limit reached');
-		}
-
 		const fileId = newFileId();
 		// E2E shares arrive already encrypted by the client - store the bytes raw
 		// (iv = null means storage does not apply its own encryption layer). A
@@ -178,18 +145,23 @@ export default function uploads(router) {
 		// columns are inert whenever iv is null.
 		const iv = share.e2e || !config.encryptAtRest ? null : newFileSalt();
 
-		// Re-check the per-share aggregate and insert inside one synchronous
-		// transaction: the `agg` snapshot above can go stale under concurrent
-		// registrations against the same share, each passing the same stale check
-		// and together exceeding maxShareSize. Re-reading fresh right before the
-		// insert (with no await in between) closes that race.
+		// Re-check the per-share aggregate, atomically reserve global quota, and
+		// insert - all inside one synchronous transaction: the `agg` snapshot
+		// above can go stale under concurrent registrations against the same
+		// share (or against the server's global cap), each passing the same
+		// stale check and together exceeding maxShareSize/maxTotalSize.
+		// Re-reading fresh and reserving right before the insert (with no await
+		// in between) closes both races - reserveInTx is what makes the global
+		// cap atomic instead of the old cached-disk-walk check-then-act.
 		const registered = db.transaction(() => {
 			const fresh = shareTotal.get(share.id);
-			if (fresh.total + size > caps.maxShareSize) return false;
+			if (fresh.total + size > caps.maxShareSize) return 'share';
+			if (!reserveInTx(fileId, share.id, size)) return 'server';
 			insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv, 2, CURRENT_AT_REST_KEY_ID);
 			return true;
 		})();
-		if (!registered) return error(413, 'Share exceeds the per-share size limit');
+		if (registered === 'share') return error(413, 'Share exceeds the per-share size limit');
+		if (registered === 'server') return error(413, 'Server storage limit reached');
 
 		return json({ fileId, received: 0 });
 	});
@@ -253,7 +225,17 @@ export default function uploads(router) {
 
 			const received = await writeChunk(share.id, file.id, offset, chunk, fileEnc(file));
 			const complete = received === file.size ? 1 : 0;
-			updateReceived.run(received, complete, file.id);
+			// Commit the file's bytes from "reserved" to "used" the moment it
+			// finishes, or touch the reservation's TTL forward otherwise - a live
+			// multi-day upload's quota hold must never be reaped out from under it
+			// just because a single chunk PATCH took a while. Same transaction as
+			// the received/complete write so a crash between them cannot desync
+			// the ledger from what the row says.
+			db.transaction(() => {
+				updateReceived.run(received, complete, file.id);
+				if (complete && !file.complete) commitInTx(file.id, file.size);
+				else touchInTx(file.id);
+			})();
 			// Lifetime stats when a file first finishes (persist past deletion).
 			if (complete && !file.complete) {
 				bumpMetric('files_uploaded');

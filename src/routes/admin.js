@@ -14,6 +14,7 @@ import { getLogs } from '../lib/logbuffer.js';
 import { ALLOWED_KEYS, ALLOWLIST, envManagedKeys, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
 import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
 import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, rotateApiKey, deleteApiKey, sanitizeLimits } from '../lib/apikeys.js';
+import * as quota from '../lib/quota.js';
 
 // The editable settings keys mapped to their current effective (booted) values,
 // for pre-filling the editor. Secret keys are reported only as set/unset.
@@ -296,8 +297,16 @@ export default router => {
 		const limited = enforce('admin-share-delete', ip, 120, 60 * 1000);
 		if (limited) return limited;
 
-		const share = db.query('SELECT id FROM shares WHERE id = ?').get(params.id);
+		const share = db.query('SELECT id, deleted_at FROM shares WHERE id = ?').get(params.id);
 		if (!share) return error(404, 'Not found');
+
+		// A soft-deleted share already released its quota at the moment it went
+		// out of live (see lib/quota.js's idempotency rule) - releasing again here
+		// would double-subtract. Only a still-live share (deleted_at IS NULL,
+		// e.g. an admin hard-deleting without a prior soft-delete) needs it now,
+		// and it must happen BEFORE the files rows are deleted below (releaseShare
+		// reads them to total the committed bytes).
+		if (share.deleted_at == null) quota.releaseShare(params.id);
 
 		await deleteShareFiles(params.id);
 		db.query('DELETE FROM files WHERE share_id = ?').run(params.id);
@@ -315,6 +324,9 @@ export default router => {
 		const file = db.query('SELECT id FROM files WHERE id = ? AND share_id = ?').get(params.fileId, params.id);
 		if (!file) return error(404, 'Not found');
 
+		// Before removing the row: releases the file's committed usage (if it was
+		// complete) and/or its still-open reservation.
+		quota.releaseFile(params.fileId);
 		await deleteBlob(params.id, params.fileId);
 		db.query('DELETE FROM files WHERE id = ? AND share_id = ?').run(params.fileId, params.id);
 

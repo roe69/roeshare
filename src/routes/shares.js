@@ -13,6 +13,7 @@ import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
 import { slugError } from '../lib/slug.js';
 import { keyValidForShare } from '../lib/apikeys.js';
+import * as quota from '../lib/quota.js';
 
 const getShare = db.query('SELECT * FROM shares WHERE id = ?');
 // Case-insensitive slug-conflict check: a soft-deleted share no longer holds
@@ -314,6 +315,7 @@ export default function shares(router) {
 		if (!isOwner(ctx.req, share) && !isAdmin(ctx.req)) return error(403, 'Forbidden');
 
 		softDelete.run(now(), share.id);
+		quota.releaseShare(share.id);
 		await deleteShareFiles(share.id);
 		return json({ ok: true });
 	});

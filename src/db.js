@@ -149,6 +149,32 @@ const schema = {
 		key:   'TEXT PRIMARY KEY',
 		value: 'TEXT',
 	},
+	// Single-row running total backing the atomic global storage quota (see
+	// lib/quota.js). Counts LOGICAL (plaintext-declared) bytes - files.size -
+	// not physical disk bytes, so it can be maintained purely from SQL without
+	// touching the filesystem. used_bytes is the sum of `size` over complete
+	// files of live (non-soft-deleted) shares; reserved_bytes is in-flight
+	// uploads that have not finished yet (see storage_reservations below). The
+	// CHECK pins this to exactly one row, updated in place.
+	storage_ledger: {
+		id:             'INTEGER PRIMARY KEY CHECK (id = 1)',
+		used_bytes:     'INTEGER NOT NULL DEFAULT 0',
+		reserved_bytes: 'INTEGER NOT NULL DEFAULT 0',
+	},
+	// One row per in-flight (not yet committed) upload, so a burst of concurrent
+	// registrations can never together exceed MAX_TOTAL_SIZE even though none of
+	// them individually would (the race lib/quota.js closes). share_id is
+	// nullable: the api.js one-shot upload path reserves space before the share
+	// row exists yet. A reservation is TTL'd (see lib/quota.js's
+	// RESERVATION_TTL) and lazily reaped so an abandoned upload cannot pin
+	// quota forever.
+	storage_reservations: {
+		file_id:    'TEXT PRIMARY KEY',
+		share_id:   'TEXT',
+		bytes:      'INTEGER NOT NULL',
+		created_at: 'INTEGER NOT NULL',
+		expires_at: 'INTEGER NOT NULL',
+	},
 };
 
 for (const [table, columns] of Object.entries(schema)) {
@@ -161,6 +187,8 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_shares_expires ON shares(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_shares_apikey ON shares(api_key_id);
 	CREATE INDEX IF NOT EXISTS idx_events_share ON download_events(share_id);
+	CREATE INDEX IF NOT EXISTS idx_reservations_share ON storage_reservations(share_id);
+	CREATE INDEX IF NOT EXISTS idx_reservations_expires ON storage_reservations(expires_at);
 `);
 
 const getMeta = db.query('SELECT value FROM meta WHERE key = ?');

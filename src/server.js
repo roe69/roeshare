@@ -14,6 +14,15 @@ import { clientIp, error, json, SECURITY_HEADERS } from './lib/http.js';
 import { hasUploadAccess, isAdmin } from './lib/auth.js';
 import { deleteShareFiles } from './lib/storage.js';
 import { pickEncoding, compressBytes, isCompressibleType, compressResponse } from './lib/compress.js';
+import * as quota from './lib/quota.js';
+
+// Authoritative recompute of the storage quota ledger (see lib/quota.js) -
+// self-initializing (creates the single ledger row) and self-healing (a crash
+// between a disk write and a ledger update, or any missed release call, is
+// corrected here rather than diverging forever). Runs once, before the server
+// starts accepting requests, so every request from the first one onward sees
+// an accurate ledger.
+quota.reconcile();
 
 const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 
@@ -129,6 +138,7 @@ async function sweep() {
 		try {
 			await deleteShareFiles(id);
 			markDeleted.run(ts, id);
+			quota.releaseShare(id);
 		} catch (e) {
 			console.error('sweep failed for', id, e);
 		}
@@ -144,6 +154,9 @@ async function sweep() {
 		try {
 			await deleteShareFiles(id);
 			markDeleted.run(ts, id);
+			// Also clears any dead (never-completed) upload's reservation under
+			// this share, since it never transitioned via releaseShare before now.
+			quota.releaseShare(id);
 		} catch (e) {
 			console.error('sweep failed for', id, e);
 		}
