@@ -9,18 +9,21 @@ import { config } from '../config.js';
 import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
-import { verifyApiKey, readApiKey, readApiKeySession } from '../lib/apikeys.js';
+import { verifyApiKey, readApiKey, readApiKeySession, keyValidForShare } from '../lib/apikeys.js';
 import { blobFile, blobPath, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
 
-// Whether a resolved Range (or the absence of one) reaches the last byte of
-// the file - i.e. letting the stream drain would deliver the file in full.
+// Whether a resolved Range (or the absence of one) covers the ENTIRE file in
+// one shot - i.e. letting the stream drain would deliver the file in full.
 // Used to decide whether a request is a "full" delivery worth counting/
-// claiming/burning, as opposed to a partial range probe or seek.
+// claiming/burning, as opposed to a partial range probe or seek. A range that
+// merely reaches the last byte (e.g. a tail probe like `bytes=-1`, or any
+// start offset other than 0) is NOT full - only an unranged GET or an
+// explicit `bytes=0-<size-1>` request transfers every byte of the file.
 function reachesEnd(range, size) {
-	return range === null || (!range.invalid && range.end === size - 1);
+	return range === null || (!range.invalid && range.start === 0 && range.end === size - 1);
 }
 
 // Only these MIME types are ever served inline (rendered in the browser on our
@@ -61,6 +64,13 @@ const insertEvent = db.query('INSERT INTO download_events (share_id, file_id, ts
 // cancelled before completion, so the recipient can simply retry.
 const claimOneTime = db.query('UPDATE shares SET deleted_at = ? WHERE id = ? AND deleted_at IS NULL AND one_time = 1');
 const restoreShare = db.query('UPDATE shares SET deleted_at = NULL WHERE id = ?');
+// Atomically claim one slot of a download-capped share: only succeeds
+// (changes > 0) while the cap has not yet been reached, so N concurrent full
+// deliveries against a maxDownloads=1 share can never all win the claim - the
+// same guarantee claimOneTime gives one-time shares. releaseDownload undoes a
+// claim whose delivery was cancelled before completion, mirroring restoreShare.
+const claimDownload = db.query('UPDATE shares SET download_count = download_count + 1 WHERE id = ? AND (max_downloads IS NULL OR download_count < max_downloads)');
+const releaseDownload = db.query('UPDATE shares SET download_count = download_count - 1 WHERE id = ?');
 
 // Resolve a share that is safe to serve: present, not soft-deleted, not expired.
 function liveShare(id) {
@@ -76,7 +86,13 @@ function liveShare(id) {
 // otherwise a password-gated share requires a valid per-share access token.
 function accessCheck(share, req, url) {
 	const editToken = req.headers.get('x-edit-token');
-	let owner = !!editToken && verifySecretToken(editToken, share.edit_token);
+	// A matching edit token alone is not enough when the share was made via an
+	// API key that has since been revoked or expired - keyValidForShare treats
+	// that exactly like an invalid token, so "revoke" actually cuts off read/
+	// download access too, not just new bearer-token calls. (The api_key_id
+	// branch just below is already safe: verifyApiKey/readApiKeySession reject
+	// a revoked/expired key on their own.)
+	let owner = !!editToken && verifySecretToken(editToken, share.edit_token) && keyValidForShare(share);
 	if (!owner && share.api_key_id) {
 		const key = verifyApiKey(readApiKey(req)) || readApiKeySession(req);
 		if (key && key.id === share.api_key_id) owner = true;
@@ -87,10 +103,14 @@ function accessCheck(share, req, url) {
 	return { ok: false, owner };
 }
 
-function recordDownload(shareId, fileId, ip, ua, creatorIp) {
+// countShare is false for a max_downloads-capped delivery, whose slot was
+// already atomically claimed (via claimDownload) up front - incrementing
+// shares.download_count here too would double-count it. Event logging and
+// lifetime stats always run regardless.
+function recordDownload(shareId, fileId, ip, ua, creatorIp, { countShare = true } = {}) {
 	const ts = now();
 	if (fileId) incFileDownload.run(fileId);
-	incShareDownload.run(shareId);
+	if (countShare) incShareDownload.run(shareId);
 	insertEvent.run(shareId, fileId, ts, ip ?? null, ua ?? null);
 	// Lifetime stats, credited to the uploader (persist past deletion).
 	bumpMetric('downloads');
@@ -227,10 +247,13 @@ export default function download(router) {
 	// stays blocked because inline streaming would defeat burn-on-first-access.
 	router.get('/api/shares/:id/files/:fileId/preview', async ({ req, url, params, ip, server }) => {
 		server?.timeout?.(req, 0);
-		const limited = enforce('dl:' + params.id, ip, 600, 60_000);
-		if (limited) return limited;
+		// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
+		// of nonexistent ids would each mint their own bucket in the process-wide
+		// rate-limit map at zero cost to the attacker.
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
+		const limited = enforce('dl:' + params.id, ip, 600, 60_000);
+		if (limited) return limited;
 		const { ok, owner } = accessCheck(share, req, url);
 		if (!ok) return error(403, 'Password required');
 		// The owner (edit token or the API key that created the share) manages and
@@ -273,9 +296,11 @@ export default function download(router) {
 
 	// Attachment download: counts as one download - and, for a one-time share,
 	// claims and eventually burns it - only once the delivery is a "full" one
-	// (a GET whose range reaches the last byte) and only after that stream has
-	// fully drained. A dropped/paused/partial download never counts or burns,
-	// so a multi-GB video survives an interrupted transfer and can be resumed.
+	// (a GET that transfers the entire file: no Range header, or an explicit
+	// `bytes=0-<size-1>`) and only after that stream has fully drained. A
+	// dropped/paused/partial/tail-probe download never counts or burns, so a
+	// multi-GB video survives an interrupted transfer and can be resumed - and
+	// a Range request cannot be used to dodge a one-time burn or a download cap.
 	router.get('/api/shares/:id/files/:fileId/download', async ({ req, url, params, ip, server }) => {
 		// Long video downloads/pauses must not be killed by an idle timeout.
 		server?.timeout?.(req, 0);
@@ -284,10 +309,13 @@ export default function download(router) {
 		// scrubbing through a file makes many small Range requests), and keeps
 		// one hot video from exhausting the budget for other shares behind the
 		// same IP.
-		const limited = enforce('dl:' + params.id, ip, 600, 60_000);
-		if (limited) return limited;
+		// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
+		// of nonexistent ids would each mint their own bucket in the process-wide
+		// rate-limit map at zero cost to the attacker.
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
+		const limited = enforce('dl:' + params.id, ip, 600, 60_000);
+		if (limited) return limited;
 		const { ok, owner } = accessCheck(share, req, url);
 		if (!ok) return error(403, 'Password required');
 		const file = getFile.get(params.fileId, share.id);
@@ -307,9 +335,10 @@ export default function download(router) {
 			return rangeResponse(share, file, req, { inline: false, size, range, head: true });
 		}
 		// A "full" delivery is a non-owner GET whose range (or the absence of
-		// one) reaches the last byte - i.e. draining the stream delivers the
-		// whole file. Anything else (a partial range probe, a HEAD, or the
-		// owner's own restore) never counts, claims, or burns.
+		// one) covers the entire file in one shot - i.e. draining the stream
+		// delivers every byte. Anything else (a partial range probe, a tail
+		// probe, a HEAD, or the owner's own restore) never counts, claims, or
+		// burns.
 		const full = req.method === 'GET' && !owner && reachesEnd(range, size);
 		const ua = req.headers.get('user-agent');
 
@@ -343,8 +372,21 @@ export default function download(router) {
 
 		// A download-capped share must count only a COMPLETED full delivery, so a
 		// cancelled/paused transfer never consumes the cap - wrap just that stream.
+		// The slot is claimed atomically up front (not check-then-increment) so N
+		// concurrent requests against a maxDownloads=1 share cannot all pass; a lost
+		// claim race means the cap was reached by a racing request.
 		if (full && share.max_downloads !== null) {
-			const makeBody = src => trackedStream(src, { onComplete: () => recordDownload(share.id, file.id, ip, ua, share.creator_ip) });
+			const claimed = claimDownload.run(share.id).changes > 0;
+			if (!claimed) return error(410, 'Download limit reached');
+			let completed = false;
+			const makeBody = src =>
+				trackedStream(src, {
+					onComplete: () => {
+						completed = true;
+						recordDownload(share.id, file.id, ip, ua, share.creator_ip, { countShare: false });
+					},
+					onEnd: () => { if (!completed) releaseDownload.run(share.id); },
+				});
 			return rangeResponse(share, file, req, { inline: false, makeBody, size, range });
 		}
 

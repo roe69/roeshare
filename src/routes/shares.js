@@ -12,6 +12,7 @@ import { newShareId, newToken } from '../lib/ids.js';
 import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
 import { slugError } from '../lib/slug.js';
+import { keyValidForShare } from '../lib/apikeys.js';
 
 const getShare = db.query('SELECT * FROM shares WHERE id = ?');
 // Case-insensitive slug-conflict check: a soft-deleted share no longer holds
@@ -41,9 +42,14 @@ function liveShare(id) {
 	return share;
 }
 
+// A matching edit token is not enough on its own: if the share was created via
+// an API key that has since been revoked or expired, treat it exactly like an
+// invalid token - otherwise "revoke" would only stop that key's own
+// bearer-token calls while the shares it already made keep accepting owner
+// actions via the edit token forever.
 function isOwner(req, share) {
 	const token = req.headers.get('x-edit-token');
-	return !!token && verifySecretToken(token, share.edit_token);
+	return !!token && verifySecretToken(token, share.edit_token) && keyValidForShare(share);
 }
 
 async function readJson(req) {
@@ -275,10 +281,12 @@ export default function shares(router) {
 	// ---- Finalize ----------------------------------------------------------
 
 	router.post('/api/shares/:id/finalize', ctx => {
-		const limited = enforce(`finalize:${ctx.params.id}`, ctx.ip, 60, 60_000);
-		if (limited) return limited;
+		// Resolve the share first so attempts against random/nonexistent ids cannot
+		// mint a long-lived rate-limit bucket each (a memory-growth vector).
 		const share = liveShare(ctx.params.id);
 		if (!share) return error(404, 'Not found');
+		const limited = enforce(`finalize:${ctx.params.id}`, ctx.ip, 60, 60_000);
+		if (limited) return limited;
 		if (!isOwner(ctx.req, share)) return error(403, 'Forbidden');
 
 		// Start the published-link expiry clock at finalize, not at creation: shift
@@ -294,10 +302,12 @@ export default function shares(router) {
 	// ---- Delete (owner or admin) -------------------------------------------
 
 	router.delete('/api/shares/:id', async ctx => {
-		const limited = enforce(`delete:${ctx.params.id}`, ctx.ip, 60, 60_000);
-		if (limited) return limited;
+		// Resolve the share first so attempts against random/nonexistent ids cannot
+		// mint a long-lived rate-limit bucket each (a memory-growth vector).
 		const share = liveShare(ctx.params.id);
 		if (!share) return error(404, 'Not found');
+		const limited = enforce(`delete:${ctx.params.id}`, ctx.ip, 60, 60_000);
+		if (limited) return limited;
 		if (!isOwner(ctx.req, share) && !isAdmin(ctx.req)) return error(403, 'Forbidden');
 
 		softDelete.run(now(), share.id);

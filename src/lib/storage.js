@@ -84,8 +84,26 @@ export function blobFile(shareId, fileId) {
 	return Bun.file(blobPath(shareId, fileId));
 }
 
+// Tracks share ids whose on-disk blobs are currently being removed by an
+// in-flight deleteShareFiles() call, so a slug-reuse hard-delete-and-reinsert
+// (routes/api.js) can tell "this id's directory is still being torn down"
+// apart from "already gone" and wait/retry instead of writing into a
+// directory a concurrent rm() is still walking. Tracked here (not per-caller)
+// so every route that deletes a share's files - the web portal (shares.js),
+// the API-key backup flow (api.js), and the sweeper (server.js) - shares one
+// source of truth, regardless of which of them triggered the cleanup.
+const cleanupPending = new Set();
+export function isCleanupPending(shareId) {
+	return cleanupPending.has(shareId);
+}
+
 export async function deleteShareFiles(shareId) {
-	await rm(shareDir(shareId), { recursive: true, force: true });
+	cleanupPending.add(shareId);
+	try {
+		await rm(shareDir(shareId), { recursive: true, force: true });
+	} finally {
+		cleanupPending.delete(shareId);
+	}
 }
 
 // Rename a share's storage directory (used when an admin changes the slug).

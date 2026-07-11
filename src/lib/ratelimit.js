@@ -13,12 +13,15 @@ const buckets = new Map(); // key -> { count, resetAt(ms) }
 // cannot grow the Map without bound and exhaust the heap.
 const MAX_BUCKETS = 200000;
 
-// Drop expired buckets, then if still over the ceiling evict the oldest entries
-// (Map preserves insertion order) to keep memory bounded.
+// Evict the oldest entries (Map preserves insertion order) down to the
+// ceiling. Deliberately does NOT do a full-map expiry scan first - that would
+// make every call that creates a new bucket while at/over MAX_BUCKETS pay an
+// O(buckets.size) cost, which is exactly the hot path an attacker minting
+// unique keys (e.g. a flood of requests against random nonexistent ids) would
+// force into a sustained, process-wide slowdown shared by every rate-limited
+// route. Expiry is already handled by the periodic sweep below; this only
+// needs to do the cheap, bounded part.
 function reclaim() {
-	const t = Date.now();
-	for (const [k, b] of buckets) if (t >= b.resetAt) buckets.delete(k);
-	if (buckets.size <= MAX_BUCKETS) return;
 	const over = buckets.size - MAX_BUCKETS;
 	let n = 0;
 	for (const k of buckets.keys()) {

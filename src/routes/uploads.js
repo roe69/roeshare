@@ -13,7 +13,7 @@ import { writeChunk, totalUsage, blobRangeStream } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
-import { recordKeyUsage, apiKeyRow, effectiveCaps } from '../lib/apikeys.js';
+import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare } from '../lib/apikeys.js';
 import { enforceKey } from '../lib/ratelimit.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
@@ -24,6 +24,36 @@ const insertFile = db.query(
 const getFile = db.query('SELECT id, size, received, complete, iv FROM files WHERE id = ? AND share_id = ?');
 const updateReceived = db.query('UPDATE files SET received = ?, complete = ? WHERE id = ?');
 const updateSha256 = db.query('UPDATE files SET sha256 = ? WHERE id = ?');
+
+// totalUsage() performs a full recursive readdir+stat walk over every file in
+// every share on the instance. Calling it once per file registration lets a
+// flood of cheap (e.g. zero-byte) registrations against a single share force
+// repeated whole-instance disk walks, so cost scales with the whole server
+// while the attacker's own per-request cost stays trivial. Memoize behind a
+// short TTL and dedupe concurrent misses so a burst of registrations shares
+// one walk. Exported so other one-shot upload paths (api.js) can reuse the
+// same cached figure instead of walking the tree again themselves.
+let cachedTotal = null; // { value, at }
+let totalUsageInFlight = null;
+const TOTAL_USAGE_TTL_MS = 5000;
+export async function sharedTotalUsage() {
+	const t = Date.now();
+	if (cachedTotal && t - cachedTotal.at < TOTAL_USAGE_TTL_MS) return cachedTotal.value;
+	if (!totalUsageInFlight) {
+		totalUsageInFlight = totalUsage().then(
+			value => {
+				cachedTotal = { value, at: Date.now() };
+				totalUsageInFlight = null;
+				return value;
+			},
+			err => {
+				totalUsageInFlight = null;
+				throw err;
+			}
+		);
+	}
+	return totalUsageInFlight;
+}
 
 // Keep a SAFE relative path so dragged folders preserve their structure (used as
 // the display name and the zip entry path). Drops any "." / ".." / empty / drive
@@ -65,13 +95,11 @@ function checkFinalized(share) {
 // or expired must lose write access through the edit-token path too - otherwise
 // revoking/expiring a key only blocks its own bearer-token API calls while the
 // share it already created keeps accepting uploads via the edit token forever.
+// keyValidForShare (lib/apikeys.js) is shared with shares.js isOwner()/
+// finalize/DELETE and download.js accessCheck(), so every owner-gated route
+// treats a revoked key's edit token the same way, not just this file's.
 function checkKeyValid(share) {
-	if (!share.api_key_id) return null;
-	const row = apiKeyRow(share.api_key_id);
-	if (!row || row.revoked_at != null || (row.expires_at != null && row.expires_at < now())) {
-		return error(403, 'API key is no longer valid');
-	}
-	return null;
+	return keyValidForShare(share) ? null : error(403, 'API key is no longer valid');
 }
 
 // Serialize chunk writes per file id: concurrent PATCHes for the same file
@@ -134,7 +162,7 @@ export default function uploads(router) {
 		if (agg.count >= config.maxFilesPerShare) return error(413, 'Too many files in this share');
 		if (agg.total + size > caps.maxShareSize) return error(413, 'Share exceeds the per-share size limit');
 
-		if (config.maxTotalSize > 0 && (await totalUsage()) + size > config.maxTotalSize) {
+		if (config.maxTotalSize > 0 && (await sharedTotalUsage()) + size > config.maxTotalSize) {
 			return error(413, 'Server storage limit reached');
 		}
 

@@ -19,7 +19,8 @@ import { db, now } from '../db.js';
 import { json, error, requestOrigin, cookie, clearCookie, requestScheme } from '../lib/http.js';
 import { hashPassword, hashSecretToken } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
-import { writeChunk, totalUsage, deleteShareFiles } from '../lib/storage.js';
+import { writeChunk, deleteShareFiles, isCleanupPending } from '../lib/storage.js';
+import { sharedTotalUsage } from './uploads.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce, enforceKey } from '../lib/ratelimit.js';
@@ -32,7 +33,9 @@ import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry,
 // just deleted (the delete-then-recreate backup rotation flow), but the old
 // row still holds the id's PRIMARY KEY slot, so createShare below must clear
 // it before inserting rather than just checking deleted_at IS NULL here.
-const getShareById = db.query('SELECT id, deleted_at FROM shares WHERE lower(id) = lower(?)');
+// api_key_id is selected too so createShare can confirm the CALLER owns a
+// soft-deleted row before it is allowed to hard-delete it.
+const getShareById = db.query('SELECT id, deleted_at, api_key_id FROM shares WHERE lower(id) = lower(?)');
 const hardDeleteShare = db.query('DELETE FROM shares WHERE id = ?');
 const insertShare = db.query(
 	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e, api_key_id)
@@ -175,6 +178,10 @@ async function createShare(ctx, key, opts) {
 
 	const CONFLICT = { conflict: 'That custom link is already taken' };
 	const LIMITED = { limited: 'This key has reached its share limit' };
+	// Distinct from CONFLICT so callers can tell "taken for good" apart from
+	// "taken right now, try again shortly" - but shaped the same (a `conflict`
+	// message) so it flows through the existing 409 handling below unchanged.
+	const CLEANUP_PENDING = { conflict: 'That link was just deleted and is still being cleaned up; try again shortly' };
 
 	const attempt = db.transaction(() => {
 		let id;
@@ -182,10 +189,22 @@ async function createShare(ctx, key, opts) {
 			const existing = getShareById.get(opts.slug);
 			if (existing) {
 				if (existing.deleted_at == null) throw CONFLICT;
-				// Soft-deleted row squatting on this id: its files were already
-				// removed from disk when it was deleted, so hard-delete the stale
-				// row (cascades to any leftover file rows) to free the slug up
-				// for the insert below instead of hitting a PRIMARY KEY collision.
+				// Soft-deleted row squatting on this id: only the key that owns it
+				// may reclaim the slug by hard-deleting it - otherwise any caller
+				// requesting the same slug could permanently destroy another
+				// tenant's soft-deleted share (edit_token hash, IPs, counters,
+				// audit trail). Fall back to the ordinary CONFLICT when it is not
+				// ours; from the caller's perspective the slug is simply taken.
+				if (existing.api_key_id !== key.id) throw CONFLICT;
+				// The previous occupant's directory may still be mid-removal
+				// (deleteShareFiles runs as an unguarded background await after
+				// the soft-delete - possibly triggered by shares.js's own DELETE
+				// route rather than this file's; isCleanupPending is shared across
+				// every caller via storage.js). Hard-deleting and reinserting now
+				// would race that rm(), so make the caller retry until it has
+				// finished instead of risking corrupting/losing the new tenant's
+				// blobs.
+				if (isCleanupPending(existing.id)) throw CLEANUP_PENDING;
 				hardDeleteShare.run(existing.id);
 			}
 			id = opts.slug;
@@ -205,7 +224,7 @@ async function createShare(ctx, key, opts) {
 	try {
 		id = attempt();
 	} catch (e) {
-		if (e === CONFLICT || e === LIMITED) return e;
+		if (e === CONFLICT || e === LIMITED || e === CLEANUP_PENDING) return e;
 		throw e;
 	}
 
@@ -348,7 +367,7 @@ export default function apiV1(router) {
 		if (size === 0) return error(400, 'Empty request body');
 		if (size > caps.maxFileSize) return error(413, 'File exceeds this key\'s per-file size limit');
 		if (size > caps.maxShareSize) return error(413, 'File exceeds this key\'s per-share size limit');
-		if (config.maxTotalSize > 0 && (await totalUsage()) + size > config.maxTotalSize) {
+		if (config.maxTotalSize > 0 && (await sharedTotalUsage()) + size > config.maxTotalSize) {
 			return error(413, 'Server storage limit reached');
 		}
 		const sha256 = createHash('sha256').update(buf).digest('hex');

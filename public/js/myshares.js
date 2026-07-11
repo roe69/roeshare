@@ -75,7 +75,7 @@ function shareRow(entry) {
 	del.addEventListener('click', () => {
 		openModal({
 			title: 'Delete this share?',
-			body: `Permanently delete "${share.title || id}" and its files? This cannot be undone.`,
+			body: el('p', {}, 'Permanently delete "', share.title || id, '" and its files? This cannot be undone.'),
 			actions: [
 				{ label: 'Cancel', variant: 'ghost' },
 				{

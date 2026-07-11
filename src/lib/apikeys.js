@@ -240,6 +240,19 @@ export function clampExpiry(row, expiresAt) {
 	return Math.min(expiresAt, limit);
 }
 
+// Whether the API key backing `share` (if any) is still usable. A share with
+// no api_key_id was made via the web portal and is unaffected. Used by every
+// owner-gated action (uploads.js write routes, shares.js isOwner/finalize/
+// delete, download.js accessCheck) so that revoking or expiring a key cuts
+// off the shares it created too - otherwise an edit token handed back at
+// share-creation time would keep granting full owner access forever, even
+// after the key that created it is revoked.
+export function keyValidForShare(share) {
+	if (!share.api_key_id) return true;
+	const row = apiKeyRow(share.api_key_id);
+	return !!row && row.revoked_at == null && (row.expires_at == null || row.expires_at >= now());
+}
+
 // ---- Admin management ------------------------------------------------------
 
 export function listApiKeys() {

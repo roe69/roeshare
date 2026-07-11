@@ -8,6 +8,16 @@ const SECURITY_HEADERS = {
 	'X-Frame-Options': 'SAMEORIGIN',
 	'Referrer-Policy': 'strict-origin-when-cross-origin',
 	'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+	// HSTS: only sent when the deployment's canonical public origin (BASE_URL) is
+	// https, so a plain-http local/dev instance is never told to force https on
+	// itself. Decided once at boot from config rather than per-request via
+	// requestScheme(): a CDN-fronted deployment (e.g. Cloudflare) commonly
+	// terminates TLS upstream and hands this process a plain http connection, so
+	// requestScheme() would see 'http' on every request and this header would
+	// never go out at all - even though the site is TLS-only to every visitor.
+	// BASE_URL is the operator-declared public origin, so it reflects that truth
+	// regardless of which proxy/CDN sits in front.
+	...(config.baseUrl.startsWith('https://') ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };
 
 export function json(data, init = {}) {

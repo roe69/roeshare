@@ -37,8 +37,8 @@ const secretIsSet = key =>
 // row. Done as one transaction so FK constraints never see a dangling parent.
 const renameShare = db.transaction((oldId, newId) => {
 	db.query(
-		`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id)
-		 SELECT ?, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id FROM shares WHERE id = ?`,
+		`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id, e2e, view_count)
+		 SELECT ?, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id, e2e, view_count FROM shares WHERE id = ?`,
 	).run(newId, oldId);
 	db.query('UPDATE files SET share_id = ? WHERE share_id = ?').run(newId, oldId);
 	db.query('UPDATE download_events SET share_id = ? WHERE share_id = ?').run(newId, oldId);
