@@ -11,6 +11,17 @@ services:
     environment:
       BASE_URL: ${BASE_URL}
       TRUST_PROXY: "1"
+      # nginx runs on the host and reaches the container through Docker's
+      # published-port NAT, so the socket peer the app sees is the Docker
+      # bridge gateway, not literally 127.0.0.1 - trust Docker's whole
+      # default bridge IPAM pool (172.16.0.0/12) alongside real loopback.
+      # This is still safe against an outside attacker: nobody on the public
+      # internet can complete a TCP handshake that appears to originate from
+      # a private RFC1918 address, so this range is only reachable from
+      # inside the host/Docker network. nginx is the sole hop (see
+      # deploy/nginx.example.conf's $proxy_add_x_forwarded_for).
+      TRUSTED_PROXY_CIDRS: "127.0.0.1/32,::1/128,172.16.0.0/12"
+      TRUSTED_PROXY_HOPS: "1"
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       UPLOAD_PASSWORD: ${UPLOAD_PASSWORD:-}
       SECRET: ${SECRET}
