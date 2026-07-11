@@ -165,9 +165,16 @@ const trustedProxyCidrs = trustedProxyCidrsRaw
 		: [];
 // Number of trusted-proxy hops to skip from the RIGHT of X-Forwarded-For
 // before taking the client address (the standard "walk from the right"
-// algorithm - each hop appends its own entry, so the real client is exactly
-// this many entries in from the end). Clamped to at least 1.
-const trustedProxyHops = Math.max(1, int('TRUSTED_PROXY_HOPS', 1));
+// algorithm - each additional relay hop appends its own entry, so the real
+// client is exactly this many entries in from the end). Defaults to 1, the
+// shape of a single local reverse proxy (nginx/Caddy on the same host) that
+// appends its own peer address to whatever it received. Set to 0 when the
+// ONE trusted proxy is the thing that directly terminates the client
+// connection and sets (not appends to) X-Forwarded-For itself - e.g. a CDN
+// like Cloudflare connecting straight to this origin with no local reverse
+// proxy in between: its single XFF entry already IS the real client, so nothing
+// should be skipped. Clamped to at least 0 (never negative).
+const trustedProxyHops = Math.max(0, int('TRUSTED_PROXY_HOPS', 1));
 
 export const config = Object.freeze({
 	host: str('HOST', '0.0.0.0'),

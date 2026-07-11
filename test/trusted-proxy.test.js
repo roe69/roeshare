@@ -200,6 +200,36 @@ describe('trusted-proxy client IP resolution', () => {
 		}
 	});
 
+	test('hops=0: a single trusted edge (e.g. a CDN with no local reverse proxy) is trusted directly, not skipped', async () => {
+		const dir = freshDataDir('hops-zero');
+		const proc = await bootServer(dir, 3615, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '0' });
+		try {
+			const base = 'http://127.0.0.1:3615';
+			const cookie = await adminCookie(base);
+
+			// Only ONE entry: the trusted edge set X-Forwarded-For to the real client
+			// directly (it terminates the client connection itself, it did not relay
+			// an existing chain from a further-upstream proxy). With hops=0 nothing is
+			// skipped, so this single entry must be taken as-is.
+			const ip = await createShareAndReadCreatorIp(base, cookie, {
+				'X-Forwarded-For': '203.0.113.42',
+			});
+			expect(ip).toBe('203.0.113.42');
+
+			// A forged SECOND entry appended by the client before reaching the trusted
+			// edge must still be discarded - the trusted edge's own (rightmost, i.e.
+			// last-appended) determination of the client always wins over anything
+			// earlier in the chain.
+			const spoofedPrefix = await createShareAndReadCreatorIp(base, cookie, {
+				'X-Forwarded-For': '6.6.6.6, 203.0.113.42',
+			});
+			expect(spoofedPrefix).toBe('203.0.113.42');
+		} finally {
+			await stopServer(proc);
+			cleanupDir(dir);
+		}
+	});
+
 	test('malformed or oversized X-Forwarded-For falls back safely to the socket peer, no crash', async () => {
 		const dir = freshDataDir('malformed-header');
 		const proc = await bootServer(dir, 3614, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '1' });

@@ -70,6 +70,33 @@ the "HTTPS (reverse proxy)" section in [README.md](README.md) and
 [`deploy/nginx.example.conf`](deploy/nginx.example.conf) /
 [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
+### `TRUSTED_PROXY_HOPS`: local reverse proxy vs. a CDN connecting directly
+
+`TRUSTED_PROXY_HOPS` (default `1`) is how many of X-Forwarded-For's trailing
+entries are a trusted proxy's own relayed address rather than the real
+client, and so get skipped:
+
+- **A local reverse proxy on the same host** (nginx/Caddy per the examples
+  above, appending its own peer address via `$proxy_add_x_forwarded_for` or
+  equivalent) - use the default, `1`.
+- **A CDN/edge network connects straight to this host's published port**,
+  with no local reverse proxy in front of it (e.g. Cloudflare DNS-proxied
+  straight to the origin IP) - use `TRUSTED_PROXY_HOPS=0`. That one trusted
+  hop terminates the client connection itself and sets X-Forwarded-For to the
+  real visitor IP outright, so nothing should be skipped; also set
+  `TRUSTED_PROXY_CIDRS` to that provider's published edge IP ranges (for
+  Cloudflare: https://www.cloudflare.com/ips/ - re-check occasionally, they
+  change rarely but do change), not a local/loopback range.
+
+If a CDN connects directly to the origin's published port, that port is also
+reachable by anyone who finds the host's real IP, bypassing the CDN's own
+WAF/DDoS protection entirely (forwarding-header spoofing is still safe -
+requests arriving that way come from an untrusted peer and get their headers
+ignored - but the CDN's own protections are skipped). Where the host's
+firewall supports it, restrict the published port to only the CDN's IP
+ranges (e.g. Cloudflare's, kept current from the same URL above) so direct-IP
+traffic is dropped before it reaches Docker at all.
+
 ## Schema changes migrate automatically - you never need to reset
 
 `src/db.js` declares the full schema once and migrates an existing database
