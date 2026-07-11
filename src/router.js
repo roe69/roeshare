@@ -13,7 +13,10 @@ export class Router {
 
 	add(method, pattern, handler) {
 		const segments = pattern.split('/').filter(Boolean);
-		this.routes.push({ method: method.toUpperCase(), segments, handler, wildcard: pattern.endsWith('*') });
+		// `pattern` is kept verbatim (not just its parsed segments) so tests can
+		// enumerate registered routes by their exact declared pattern string - see
+		// lib/routePolicy.js's coverage gate (test/route-policy.test.js).
+		this.routes.push({ method: method.toUpperCase(), segments, handler, wildcard: pattern.endsWith('*'), pattern });
 		return this;
 	}
 

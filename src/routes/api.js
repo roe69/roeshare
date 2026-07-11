@@ -29,6 +29,7 @@ import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
 import { authenticate, authenticateSource, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow, requireScope } from '../lib/apikeys.js';
 import { audit } from '../lib/audit.js';
+import { declareRoutePolicy } from '../lib/routePolicy.js';
 
 // lower(id) so a slug can never collide-by-case with an existing one (the
 // on-disk share directory is effectively case-insensitive on some
@@ -254,6 +255,7 @@ async function createShare(ctx, key, opts) {
 export default function apiV1(router) {
 	// ---- Browser portal session (name + token login) -----------------------
 	// Lets a key holder sign in to the web portal and manage the key's shares.
+	declareRoutePolicy('POST', '/api/v1/login', { auth: 'public', csrf: true, rateLimit: 'apikey-login', audit: 'apikey.login.failure|apikey.login.success' });
 	router.post('/api/v1/login', async ctx => {
 		const csrf = requireSameOrigin(ctx.req);
 		if (csrf) return csrf;
@@ -277,11 +279,13 @@ export default function apiV1(router) {
 		return json({ id: key.id, name: key.name }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
+	declareRoutePolicy('GET', '/api/v1/session', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/v1/session', ctx => {
 		const key = readApiKeySession(ctx.req);
 		return json({ session: key ? { id: key.id, name: key.name } : null });
 	});
 
+	declareRoutePolicy('POST', '/api/v1/logout', { auth: 'public', csrf: true, rateLimit: null, audit: null });
 	router.post('/api/v1/logout', ctx => {
 		const csrf = requireSameOrigin(ctx.req);
 		if (csrf) return csrf;
@@ -290,6 +294,7 @@ export default function apiV1(router) {
 
 	// ---- Key check ---------------------------------------------------------
 	// A cheap endpoint a client can hit to confirm its key works.
+	declareRoutePolicy('GET', '/api/v1/me', { auth: 'apiKeyOrSession', csrf: false, rateLimit: 'api-me', audit: null });
 	router.get('/api/v1/me', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
@@ -307,6 +312,7 @@ export default function apiV1(router) {
 	});
 
 	// ---- Create a share (resumable flow) -----------------------------------
+	declareRoutePolicy('POST', '/api/v1/shares', { auth: 'apiKeyOrSession', csrf: true, rateLimit: 'api-create', audit: 'share.created' });
 	router.post('/api/v1/shares', async ctx => {
 		const auth = authenticateSource(ctx.req);
 		if (!auth) return error(401, 'Invalid or missing API key');
@@ -359,6 +365,7 @@ export default function apiV1(router) {
 	// the `X-Upload-Password` header instead. `?password=` still works for
 	// backwards compatibility for one release but is deprecated - remove it in a
 	// future release once clients have migrated.
+	declareRoutePolicy('POST', '/api/v1/upload', { auth: 'apiKeyOrSession', csrf: true, rateLimit: 'api-upload', audit: 'share.created' });
 	router.post('/api/v1/upload', async ctx => {
 		const auth = authenticateSource(ctx.req);
 		if (!auth) return error(401, 'Invalid or missing API key');
@@ -494,6 +501,7 @@ export default function apiV1(router) {
 	});
 
 	// ---- List this key's shares (enumerate a backup) -----------------------
+	declareRoutePolicy('GET', '/api/v1/shares', { auth: 'apiKeyOrSession', csrf: false, rateLimit: 'api-list', audit: null });
 	router.get('/api/v1/shares', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
@@ -532,6 +540,7 @@ export default function apiV1(router) {
 	});
 
 	// ---- Inspect one of this key's shares ----------------------------------
+	declareRoutePolicy('GET', '/api/v1/shares/:id', { auth: 'apiKeyOrSession', csrf: false, rateLimit: 'api-get', audit: null });
 	router.get('/api/v1/shares/:id', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
@@ -546,6 +555,7 @@ export default function apiV1(router) {
 	});
 
 	// ---- Delete one of this key's shares (backup rotation) -----------------
+	declareRoutePolicy('DELETE', '/api/v1/shares/:id', { auth: 'apiKeyOrSession', csrf: true, rateLimit: 'api-delete', audit: 'share.deleted' });
 	router.delete('/api/v1/shares/:id', async ctx => {
 		const auth = authenticateSource(ctx.req);
 		if (!auth) return error(401, 'Invalid or missing API key');

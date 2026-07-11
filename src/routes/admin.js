@@ -27,6 +27,7 @@ import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reins
 import * as quota from '../lib/quota.js';
 import { performShareRename, BUSY } from '../lib/renames.js';
 import { audit } from '../lib/audit.js';
+import { declareRoutePolicy } from '../lib/routePolicy.js';
 import {
 	mfaEnabled, pendingEnrollment, backupCodesRemaining, beginEnrollment, confirmEnrollment,
 	disableMfa, regenerateBackupCodes, verifyLoginCode, consumeBackupCode, verifyMfaCode,
@@ -69,6 +70,7 @@ async function readBody(req) {
 export default router => {
 	// ---- Session ----------------------------------------------------------
 
+	declareRoutePolicy('POST', '/api/admin/login', { auth: 'public', csrf: true, rateLimit: 'admin-login', audit: 'admin.login.failure|admin.login.success' });
 	router.post('/api/admin/login', async ({ req, ip, url, server }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -106,6 +108,7 @@ export default router => {
 	// backup code (any non-6-digit input is tried as one). Requires the
 	// intermediate cookie from a just-passed password check, not the real admin
 	// cookie - so it never grants anything on its own.
+	declareRoutePolicy('POST', '/api/admin/login/mfa', { auth: 'adminIntermediate', csrf: true, rateLimit: 'admin-mfa', audit: 'admin.login.mfa_failure|admin.login.success|admin.mfa.backup_code_used' });
 	router.post('/api/admin/login/mfa', async ({ req, ip, url, server }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -138,6 +141,7 @@ export default router => {
 		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
+	declareRoutePolicy('POST', '/api/admin/logout', { auth: 'public', csrf: true, rateLimit: null, audit: 'admin.logout' });
 	router.post('/api/admin/logout', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -148,18 +152,21 @@ export default router => {
 		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
+	declareRoutePolicy('GET', '/api/admin/me', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/me', async ({ req }) => {
 		return json({ admin: isAdmin(req) });
 	});
 
 	// ---- MFA management (F-13) ---------------------------------------------
 
+	declareRoutePolicy('GET', '/api/admin/mfa', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/mfa', ({ req }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const enabled = mfaEnabled();
 		return json({ enabled, pendingSetup: pendingEnrollment(), backupCodesRemaining: enabled ? backupCodesRemaining() : 0 });
 	});
 
+	declareRoutePolicy('POST', '/api/admin/mfa/setup', { auth: 'admin', csrf: true, rateLimit: 'admin-mfa-setup', audit: 'admin.mfa.setup_started' });
 	router.post('/api/admin/mfa/setup', ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -171,6 +178,7 @@ export default router => {
 		return json({ secret, otpauth });
 	});
 
+	declareRoutePolicy('POST', '/api/admin/mfa/confirm', { auth: 'admin', csrf: true, rateLimit: 'admin-mfa-confirm', audit: 'admin.mfa.confirm_failed|admin.mfa.enabled' });
 	router.post('/api/admin/mfa/confirm', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -190,6 +198,7 @@ export default router => {
 	// Requires the admin PASSWORD (not just the ambient cookie) and a valid
 	// second factor (TOTP or backup code), so a hijacked admin cookie alone can
 	// never silently strip MFA off the account.
+	declareRoutePolicy('POST', '/api/admin/mfa/disable', { auth: 'admin', csrf: true, rateLimit: 'admin-mfa-disable', audit: 'admin.mfa.disable_failed|admin.mfa.disabled' });
 	router.post('/api/admin/mfa/disable', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -210,6 +219,7 @@ export default router => {
 		return json({ ok: true });
 	});
 
+	declareRoutePolicy('POST', '/api/admin/mfa/backup-codes', { auth: 'admin', csrf: true, rateLimit: 'admin-mfa-backup-codes', audit: 'admin.mfa.backup_codes_regen_failed|admin.mfa.backup_codes_regenerated' });
 	router.post('/api/admin/mfa/backup-codes', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -229,6 +239,7 @@ export default router => {
 
 	// ---- Share browsing ---------------------------------------------------
 
+	declareRoutePolicy('GET', '/api/admin/shares', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/shares', async ({ req, query }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 
@@ -292,6 +303,7 @@ export default router => {
 		return json({ shares, total });
 	});
 
+	declareRoutePolicy('GET', '/api/admin/shares/:id', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/shares/:id', async ({ req, params }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 
@@ -348,6 +360,7 @@ export default router => {
 
 	// ---- Edit (full field control) ----------------------------------------
 
+	declareRoutePolicy('PATCH', '/api/admin/shares/:id', { auth: 'admin', csrf: true, rateLimit: 'admin-share-edit', audit: 'share.renamed' });
 	router.patch('/api/admin/shares/:id', async ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -451,6 +464,7 @@ export default router => {
 
 	// ---- Hard deletes -----------------------------------------------------
 
+	declareRoutePolicy('DELETE', '/api/admin/shares/:id', { auth: 'admin', csrf: true, rateLimit: 'admin-share-delete', audit: 'share.deleted' });
 	router.delete('/api/admin/shares/:id', async ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -478,6 +492,7 @@ export default router => {
 		return json({ ok: true });
 	});
 
+	declareRoutePolicy('DELETE', '/api/admin/shares/:id/files/:fileId', { auth: 'admin', csrf: true, rateLimit: 'admin-share-file-delete', audit: null });
 	router.delete('/api/admin/shares/:id/files/:fileId', async ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -499,6 +514,7 @@ export default router => {
 
 	// ---- Dashboard --------------------------------------------------------
 
+	declareRoutePolicy('GET', '/api/admin/stats', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/stats', async ({ req }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 
@@ -528,6 +544,7 @@ export default router => {
 	// At-a-glance leaderboards for the Overview: biggest shares by size, top
 	// uploaders aggregated by creator IP (a "power user" view), and what is
 	// expiring soonest.
+	declareRoutePolicy('GET', '/api/admin/overview', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/overview', ({ req }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 
@@ -570,11 +587,13 @@ export default router => {
 	// routes/api.js). The secret is shown ONCE at creation and only its hash is
 	// stored, so it can never be retrieved again - revoke and reissue if lost.
 
+	declareRoutePolicy('GET', '/api/admin/api-keys', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/api-keys', ({ req }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		return json({ keys: listApiKeys() });
 	});
 
+	declareRoutePolicy('POST', '/api/admin/api-keys', { auth: 'admin', csrf: true, rateLimit: 'admin-apikey', audit: 'apikey.created' });
 	router.post('/api/admin/api-keys', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -603,6 +622,7 @@ export default router => {
 	});
 
 	// Edit a key's name and limits/scopes (does not touch the secret or expiry).
+	declareRoutePolicy('PATCH', '/api/admin/api-keys/:id', { auth: 'admin', csrf: true, rateLimit: 'admin-apikey-edit', audit: 'apikey.updated' });
 	router.patch('/api/admin/api-keys/:id', async ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -631,6 +651,7 @@ export default router => {
 		return json({ ok: true });
 	});
 
+	declareRoutePolicy('GET', '/api/admin/api-keys/:id', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/api-keys/:id', ({ req, params }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const key = getApiKey(params.id);
@@ -647,6 +668,7 @@ export default router => {
 		return json({ ...key, shares });
 	});
 
+	declareRoutePolicy('POST', '/api/admin/api-keys/:id/revoke', { auth: 'admin', csrf: true, rateLimit: 'admin-apikey-revoke', audit: 'apikey.revoked' });
 	router.post('/api/admin/api-keys/:id/revoke', ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -658,6 +680,7 @@ export default router => {
 		return json({ ok: true });
 	});
 
+	declareRoutePolicy('POST', '/api/admin/api-keys/:id/reinstate', { auth: 'admin', csrf: true, rateLimit: 'admin-apikey-reinstate', audit: 'apikey.reinstated' });
 	router.post('/api/admin/api-keys/:id/reinstate', ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -672,6 +695,7 @@ export default router => {
 	// Rotate a key's secret: the old token stops working at once and portal
 	// sessions bound to it are signed out. The new token is returned exactly once,
 	// like creation; afterwards only its hash exists.
+	declareRoutePolicy('POST', '/api/admin/api-keys/:id/rotate', { auth: 'admin', csrf: true, rateLimit: 'admin-apikey-rotate', audit: 'apikey.rotated' });
 	router.post('/api/admin/api-keys/:id/rotate', ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -684,6 +708,7 @@ export default router => {
 		return json({ id: made.id, name: made.name, token: made.token, prefix: made.prefix });
 	});
 
+	declareRoutePolicy('DELETE', '/api/admin/api-keys/:id', { auth: 'admin', csrf: true, rateLimit: 'admin-apikey-delete', audit: 'apikey.deleted' });
 	router.delete('/api/admin/api-keys/:id', ({ req, params, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -700,6 +725,7 @@ export default router => {
 	// Quick-access upload link (the HMAC-derived token, not the password). The
 	// admin needs no upload cookie, so this is a separate route from the
 	// upload-cookie-gated /api/upload/link.
+	declareRoutePolicy('GET', '/api/admin/upload-link', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/upload-link', ({ req, url, server }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		if (!config.uploadPassword) return json({ enabled: false });
@@ -711,6 +737,7 @@ export default router => {
 	// envManaged: read-only in the editor, and for secrets not even the value's
 	// origin beyond "the environment sets this". Non-secret keys show the
 	// pending managed value if saved, else the live effective value.
+	declareRoutePolicy('GET', '/api/admin/settings', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/admin/settings', ({ req }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const managed = readSettings(config.dataDir);
@@ -731,6 +758,7 @@ export default router => {
 	});
 
 	// Save settings to the managed file (does NOT apply live - needs a restart).
+	declareRoutePolicy('PUT', '/api/admin/settings', { auth: 'admin', csrf: true, rateLimit: 'admin-settings', audit: 'admin.settings.updated' });
 	router.put('/api/admin/settings', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -762,6 +790,7 @@ export default router => {
 
 	// Restart by exiting; a supervisor (Docker restart: unless-stopped, systemd)
 	// relaunches the process, which re-reads the managed settings file.
+	declareRoutePolicy('POST', '/api/admin/restart', { auth: 'admin', csrf: true, rateLimit: 'admin-restart', audit: 'admin.restart' });
 	router.post('/api/admin/restart', ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
@@ -776,6 +805,7 @@ export default router => {
 	});
 
 	// Recent process logs (newest-last), from the in-memory ring buffer.
+	declareRoutePolicy('GET', '/api/admin/logs', { auth: 'admin', csrf: false, rateLimit: 'admin-logs', audit: null });
 	router.get('/api/admin/logs', ({ req, ip, query }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-logs', ip, 120, 60 * 1000);
@@ -791,6 +821,7 @@ export default router => {
 	// filter. detail is stored as a JSON string; parsed back here for the
 	// caller's convenience (falls back to the raw string if it somehow isn't
 	// valid JSON, rather than dropping it).
+	declareRoutePolicy('GET', '/api/admin/audit', { auth: 'admin', csrf: false, rateLimit: 'admin-audit', audit: null });
 	router.get('/api/admin/audit', ({ req, ip, query }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-audit', ip, 120, 60 * 1000);

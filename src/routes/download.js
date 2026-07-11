@@ -17,6 +17,7 @@ import { enforce } from '../lib/ratelimit.js';
 import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import * as quota from '../lib/quota.js';
 import { audit } from '../lib/audit.js';
+import { declareRoutePolicy } from '../lib/routePolicy.js';
 
 // Whether a resolved Range (or the absence of one) covers the ENTIRE file in
 // one shot - i.e. letting the stream drain would deliver the file in full.
@@ -259,6 +260,7 @@ export default function download(router) {
 	// a one-time burn. maxDownloads caps the Download action (a saved copy), not
 	// inline viewing, so a download-limited share still previews fine; one-time
 	// stays blocked because inline streaming would defeat burn-on-first-access.
+	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/preview', { auth: 'shareAccess', csrf: false, rateLimit: 'dl:<shareId>', audit: null });
 	router.get('/api/shares/:id/files/:fileId/preview', async ({ req, url, params, ip, server }) => {
 		server?.timeout?.(req, 0);
 		// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
@@ -355,6 +357,7 @@ export default function download(router) {
 	// dropped/paused/partial/tail-probe download never counts or burns, so a
 	// multi-GB video survives an interrupted transfer and can be resumed - and
 	// a Range request cannot be used to dodge a one-time burn or a download cap.
+	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/download', { auth: 'shareAccess', csrf: false, rateLimit: 'dl:<shareId>', audit: 'share.burned' });
 	router.get('/api/shares/:id/files/:fileId/download', async ({ req, url, params, ip, server }) => {
 		// Long video downloads/pauses must not be killed by an idle timeout.
 		server?.timeout?.(req, 0);
@@ -490,6 +493,7 @@ export default function download(router) {
 	// same one-time claim/burn-on-completion treatment as a full single-file
 	// download: only the request whose stream actually drains to the end gets
 	// to count the download and burn the share.
+	declareRoutePolicy('GET', '/api/shares/:id/download-all', { auth: 'shareAccess', csrf: false, rateLimit: 'zip', audit: 'share.burned' });
 	router.get('/api/shares/:id/download-all', async ({ req, url, params, ip, server }) => {
 		// A long archive stream must not be killed by an idle timeout.
 		server?.timeout?.(req, 0);
