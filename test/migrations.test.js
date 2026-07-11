@@ -217,6 +217,68 @@ describe('database migrations', () => {
 		}
 	});
 
+	test('a failed pre-migration backup leaves the live database untouched, logs an actionable error, and exits non-zero', async () => {
+		const dir = freshDataDir('backup-fail');
+		// Force backupBeforeMigrating() to throw: put a plain FILE where the backups
+		// directory needs to go, so mkdirSync(BACKUP_DIR, { recursive: true }) fails
+		// (stands in for an unwritable/read-only mounted backups directory).
+		writeFileSync(join(dir, 'backups'), 'not a directory');
+
+		const db = new Database(join(dir, 'roeshare.db'), { create: true });
+		db.exec(`
+			CREATE TABLE shares (${SHARES_COLUMNS_LEGACY});
+			CREATE TABLE files (${FILES_COLUMNS_LEGACY});
+			CREATE TABLE api_keys (${API_KEYS_COLUMNS});
+		`);
+		const rawToken = 'LEGACYtoken1234567890abcdefghXY';
+		db.query(
+			`INSERT INTO shares (id,title,created_at,expires_at,password_hash,max_downloads,one_time,edit_token,finalized,deleted_at,creator_ip,creator_ua,e2e,view_count,api_key_id)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		).run('legacyshare1', 'old', Math.floor(Date.now() / 1000), null, null, null, 0, rawToken, 0, null, '127.0.0.1', 'test', 0, 0, null);
+		db.close();
+
+		try {
+			const proc = Bun.spawn({
+				cmd: [process.execPath, 'run', 'src/server.js'],
+				cwd: ROOT,
+				env: {
+					...process.env,
+					HOST: '127.0.0.1',
+					PORT: '3599',
+					DATA_DIR: dir,
+					ADMIN_PASSWORD: 'MigrationTest-Pw-2026',
+					SECRET: 'migration-test-secret-3599',
+					UPLOAD_PASSWORD: 'migration-test-upload-pw',
+					TRUST_PROXY: '0',
+					BASE_URL: 'http://127.0.0.1:3599',
+				},
+				stdout: 'pipe',
+				stderr: 'pipe',
+			});
+
+			await Promise.race([proc.exited, new Promise(r => setTimeout(r, 10_000))]);
+			const stderr = await new Response(proc.stderr).text();
+			await stopServer(proc);
+
+			// Must die loudly (non-zero exit), not hang or silently boot degraded.
+			expect(proc.exitCode).not.toBe(0);
+			expect(proc.exitCode).not.toBeNull();
+			expect(stderr).toContain('[migrate] FAILED');
+			expect(stderr).toContain('live database was NOT modified');
+
+			// The live database must be exactly as it was before boot: no column
+			// migration and no edit_token rehash applied.
+			const after = new Database(join(dir, 'roeshare.db'));
+			const cols = after.query('PRAGMA table_info(files)').all().map(c => c.name);
+			expect(cols).not.toContain('sha256');
+			const row = after.query('SELECT edit_token FROM shares WHERE id = ?').get('legacyshare1');
+			expect(row.edit_token).toBe(rawToken);
+			after.close();
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
 	test('running the same legacy migration twice is a no-op the second time', async () => {
 		const dir = freshDataDir('legacy-twice');
 		const db = new Database(join(dir, 'roeshare.db'), { create: true });

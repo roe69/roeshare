@@ -195,6 +195,8 @@ export default function uploads(router) {
 	router.get('/api/shares/:id/files/:fileId/status', ({ req, params }) => {
 		const { share, res } = authShare(req, params.id);
 		if (res) return res;
+		const keyErr = checkKeyValid(share);
+		if (keyErr) return keyErr;
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
 		return json({ received: file.received, size: file.size, complete: !!file.complete });

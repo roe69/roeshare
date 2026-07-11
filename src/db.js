@@ -230,7 +230,20 @@ function backupBeforeMigrating() {
 const pendingCols = pendingColumns();
 const pendingMigs = pendingMigrations();
 if (pendingCols.length || pendingMigs.length) {
-	backupBeforeMigrating();
-	applyColumns(pendingCols);
-	applyMigrations(pendingMigs);
+	console.warn('[migrate] Pending schema/data migrations detected. Backing up and migrating now - THIS CAN TAKE SEVERAL MINUTES ON A LARGE DATABASE AND THE APP WILL NOT SERVE ANY REQUESTS (INCLUDING /health) UNTIL IT COMPLETES. DO NOT restart the container or re-run the deploy while this is in progress.');
+	// Diagnostics wrapper only - it does not itself break the crash-loop. backupBeforeMigrating()
+	// runs before either write step, so a failure caught here always means the live database was
+	// NOT modified (applyColumns/applyMigrations, the only ALTER/UPDATE writes, never ran). We
+	// still re-throw: a persistent disk/permission fault should keep failing loudly on every
+	// restart rather than silently skip the backup and boot into an unmigrated/half-migrated db.
+	try {
+		backupBeforeMigrating();
+		applyColumns(pendingCols);
+		applyMigrations(pendingMigs);
+	} catch (err) {
+		console.error(`[migrate] FAILED - the live database was NOT modified (the pre-migration backup did not complete, or a migration step failed after it): ${err.message}`);
+		console.error('[migrate] Most likely cause: DATA_DIR is full (VACUUM INTO needs room for a full copy of the database), or the backups directory is unwritable / a read-only mount.');
+		console.error('[migrate] Free up disk space or fix the backups directory permissions, then restart the container to retry.');
+		throw err;
+	}
 }

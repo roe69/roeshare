@@ -326,20 +326,36 @@ export default function download(router) {
 
 		const size = blobFile(share.id, file.id).size;
 		const range = parseRange(req.headers.get('range'), size);
+		// A controlled share (one-time, or under a download cap) can only ever
+		// be delivered whole to a non-owner: an ordinary pair of non-overlapping
+		// Range requests could otherwise reconstruct the entire file across two
+		// requests without either one individually looking like a "full"
+		// delivery below, defeating the claim/burn/cap machinery entirely. Force
+		// such a Range to be ignored (served as a normal full 200) instead of
+		// honored as a 206 partial, so "stream drained" and "visitor got the
+		// whole file" stay the same event. An exact bytes=0-(size-1) range is
+		// left alone since it is already a full delivery per reachesEnd, and a
+		// genuinely malformed range still falls through to rangeResponse's 416.
+		const effRange =
+			!owner &&
+			(share.one_time || share.max_downloads !== null) &&
+			range && !range.invalid && !(range.start === 0 && range.end === size - 1)
+				? null
+				: range;
 		// HEAD is a pure probe (the E2E view page pre-flights one before
 		// committing a navigation download): answer from metadata alone, before
 		// the one-time read tracking below. Reaching that machinery with a body
 		// Bun never drains would bump activeReads without a matching readEnd,
 		// stalling a later burn forever.
 		if (req.method === 'HEAD') {
-			return rangeResponse(share, file, req, { inline: false, size, range, head: true });
+			return rangeResponse(share, file, req, { inline: false, size, range: effRange, head: true });
 		}
 		// A "full" delivery is a non-owner GET whose range (or the absence of
 		// one) covers the entire file in one shot - i.e. draining the stream
 		// delivers every byte. Anything else (a partial range probe, a tail
 		// probe, a HEAD, or the owner's own restore) never counts, claims, or
 		// burns.
-		const full = req.method === 'GET' && !owner && reachesEnd(range, size);
+		const full = req.method === 'GET' && !owner && reachesEnd(effRange, size);
 		const ua = req.headers.get('user-agent');
 
 		// One-time shares carry the full claim/burn machinery: track every read so
@@ -367,7 +383,7 @@ export default function download(router) {
 						readEnd(share.id);
 					},
 				});
-			return rangeResponse(share, file, req, { inline: false, makeBody, size, range });
+			return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
 		}
 
 		// A download-capped share must count only a COMPLETED full delivery, so a
@@ -387,13 +403,13 @@ export default function download(router) {
 					},
 					onEnd: () => { if (!completed) releaseDownload.run(share.id); },
 				});
-			return rangeResponse(share, file, req, { inline: false, makeBody, size, range });
+			return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
 		}
 
 		// Uncontrolled share (the common, hot path): tally a full delivery up front
 		// and stream with no wrapper and no per-share read tracking.
 		if (full) recordDownload(share.id, file.id, ip, ua, share.creator_ip);
-		return rangeResponse(share, file, req, { inline: false, size, range });
+		return rangeResponse(share, file, req, { inline: false, size, range: effRange });
 	});
 
 	// Whole-share zip: one chunked archive of every complete file. A zip is

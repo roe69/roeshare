@@ -226,7 +226,7 @@ export default router => {
 			newSlug = body.slug.trim();
 			const err = slugError(newSlug);
 			if (err) return error(400, err);
-			if (db.query('SELECT id FROM shares WHERE id = ?').get(newSlug)) return error(409, 'That custom link is already taken');
+			if (db.query('SELECT id FROM shares WHERE lower(id) = lower(?) AND deleted_at IS NULL AND id != ?').get(newSlug, params.id)) return error(409, 'That custom link is already taken');
 		}
 
 		// Collect scalar field updates (all validated before the single UPDATE runs).

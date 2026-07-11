@@ -92,13 +92,21 @@ jobs:
           PORT="$(docker compose port roeshare 3300 | awk -F: '{print $NF}' | tr -d '[:space:]')"
           PORT="${PORT:-3300}"
           echo "Waiting for RoeShare to report healthy on 127.0.0.1:${PORT} ..."
-          for _ in $(seq 1 30); do
+          # A boot that needs to run a pending src/db.js migration backs up the
+          # whole database (VACUUM INTO) before serving anything - including
+          # this health check - and that runs synchronously before the server
+          # even binds, so a large database can mean several minutes of a
+          # genuinely-still-booting (not broken) container. 150x2s = 5 minutes,
+          # well past worst-case VACUUM time for any database size this project
+          # expects to see; a container that is actually crash-looping still
+          # fails this the same way, just later.
+          for _ in $(seq 1 150); do
             if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
               echo "Healthy:"; curl -fsS "http://127.0.0.1:${PORT}/health"; echo
               exit 0
             fi
             sleep 2
           done
-          echo "::error::RoeShare did not become healthy within ~60s. Recent logs:"
+          echo "::error::RoeShare did not become healthy within ~5 minutes. Recent logs:"
           docker compose logs --tail=80 roeshare || true
           exit 1
