@@ -335,6 +335,12 @@ export default function apiV1(router) {
 	// filename as the `X-Filename` header (or `?filename=`). On success a finished,
 	// finalized single-file share is returned. Larger or resumable uploads should
 	// use POST /api/v1/shares + the standard chunked endpoints instead.
+	//
+	// `password` is the one option that should NOT be passed as a query param
+	// (URLs end up in proxy logs, browser history, Referer headers): send it via
+	// the `X-Upload-Password` header instead. `?password=` still works for
+	// backwards compatibility for one release but is deprecated - remove it in a
+	// future release once clients have migrated.
 	router.post('/api/v1/upload', async ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
@@ -351,10 +357,15 @@ export default function apiV1(router) {
 		const name = sanitizeName(rawName);
 		const mime = q.get('mime') || 'application/octet-stream';
 
+		// Prefer the password from the X-Upload-Password header: URLs (and thus
+		// query params) end up in proxy access logs, browser history, and the
+		// Referer header, none of which apply to headers. The `?password=` query
+		// form is kept for one release for backwards compatibility and should be
+		// removed once callers have migrated to the header.
 		const parsed = parseOptions({
 			title: q.get('title'),
 			slug: q.get('slug'),
-			password: q.get('password'),
+			password: ctx.req.headers.get('x-upload-password') || q.get('password'),
 			expiresIn: q.get('expiresIn'),
 			maxDownloads: q.get('maxDownloads'),
 			oneTime: q.get('oneTime'),

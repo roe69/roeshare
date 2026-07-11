@@ -1517,7 +1517,8 @@ function renderApiDocs() {
 					el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' },
 						paramList([
 							['X-Filename', 'header (or ?filename=) - required, the file name'],
-							['?title ?slug ?password', 'optional share options (query params)'],
+							['X-Upload-Password', 'header - optional share password (preferred over ?password=, which is deprecated)'],
+							['?title ?slug', 'optional share options (query params)'],
 							['?expiresIn ?maxDownloads ?oneTime ?mime', 'optional share options (query params)'],
 						]),
 						el('p', { class: 'rl-help' }, 'Returns { id, url, fileId, name, size }.'),

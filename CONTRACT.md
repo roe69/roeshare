@@ -170,9 +170,12 @@ slug/password scope, is `403`; the key's `maxExpiry` clamps the share's expiry.
   resumable endpoints (`POST /api/shares/:id/files`, PATCH chunks, `POST .../finalize`) with `X-Edit-Token`. Use for large files.
 - `POST /api/v1/upload` one-shot: request body IS the file bytes; filename via the
   `X-Filename` header (or `?filename=`); options as query params (`title`, `slug`,
-  `password`, `expiresIn`, `maxDownloads`, `oneTime`, `mime`). Creates + finalizes a
-  single-file share. -> `201 { id, url, fileId, name, size }`. Bounded by the server's
-  max request body size (so for files beyond that, use the resumable flow above).
+  `expiresIn`, `maxDownloads`, `oneTime`, `mime`). Password via the `X-Upload-Password`
+  header (preferred - keeps it out of proxy logs/history/Referer); `?password=` still
+  works for one release for backwards compatibility but is deprecated. Creates +
+  finalizes a single-file share. -> `201 { id, url, fileId, name, size }`. Bounded by
+  the server's max request body size (so for files beyond that, use the resumable flow
+  above).
 
 Manage / restore (for backup clients). A key can only see and act on the shares it
 created (others 404):
