@@ -175,6 +175,18 @@ const schema = {
 		created_at: 'INTEGER NOT NULL',
 		expires_at: 'INTEGER NOT NULL',
 	},
+	// Write-through persistence for the credential-brute-force rate-limit
+	// buckets (see lib/ratelimit.js's PERSIST_PREFIXES) - lets those counters
+	// survive a process restart/redeploy and eviction from the in-memory Map
+	// under a flood of unrelated keys. key is the exact "<bucket>:<id>" string
+	// the in-memory limiter uses; reset_at is epoch MILLISECONDS (matches the
+	// in-memory resetAt exactly, NOT the epoch-seconds convention `now()` uses
+	// elsewhere in this file).
+	rate_limits: {
+		key:      'TEXT PRIMARY KEY',
+		count:    'INTEGER NOT NULL',
+		reset_at: 'INTEGER NOT NULL',
+	},
 };
 
 for (const [table, columns] of Object.entries(schema)) {
@@ -189,6 +201,7 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_events_share ON download_events(share_id);
 	CREATE INDEX IF NOT EXISTS idx_reservations_share ON storage_reservations(share_id);
 	CREATE INDEX IF NOT EXISTS idx_reservations_expires ON storage_reservations(expires_at);
+	CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at);
 `);
 
 const getMeta = db.query('SELECT value FROM meta WHERE key = ?');
