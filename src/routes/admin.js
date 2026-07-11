@@ -8,6 +8,7 @@ import { json, error, cookie, clearCookie, requestScheme, requestOrigin } from '
 import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken } from '../lib/auth.js';
 import { deleteShareFiles, deleteBlob, totalUsage, renameShareDir } from '../lib/storage.js';
 import { enforce, reset } from '../lib/ratelimit.js';
+import { acquire, overloaded } from '../lib/semaphore.js';
 import { hashPassword } from '../lib/crypto.js';
 import { slugError } from '../lib/slug.js';
 import { getLogs } from '../lib/logbuffer.js';
@@ -274,8 +275,16 @@ export default router => {
 			args.push(null);
 		} else if (typeof body.password === 'string' && body.password.length > 0) {
 			if (body.password.length > config.maxPasswordLength) return error(400, 'Password is too long');
+			const release = acquire('argon2', null, 4);
+			if (!release) return overloaded(2);
+			let hash;
+			try {
+				hash = await hashPassword(body.password);
+			} finally {
+				release();
+			}
 			sets.push('password_hash = ?');
-			args.push(await hashPassword(body.password));
+			args.push(hash);
 		}
 
 		if (sets.length) db.query(`UPDATE shares SET ${sets.join(', ')} WHERE id = ?`).run(...args, params.id);

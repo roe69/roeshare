@@ -14,6 +14,7 @@ import { blobPath, blobRangeStream, deleteShareFiles, fileEnc, plainSize } from 
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
+import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import * as quota from '../lib/quota.js';
 
 // Whether a resolved Range (or the absence of one) covers the ENTIRE file in
@@ -274,47 +275,72 @@ export default function download(router) {
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
-		// A password-protected share's bytes must never linger in a shared/browser
-		// cache keyed only by URL - a subsequent visitor (or the same browser after
-		// the password changes) could read cached content past the point where they
-		// should still be authorized. one_time/max_downloads-capped shares are
-		// already blocked above for non-owners, but the owner's own preview of such
-		// a share should not be cached long-term either. Only a fully public,
-		// uncontrolled share gets the long immutable cache.
-		const cacheControl = share.password_hash || share.one_time || share.max_downloads !== null
-			? 'no-store'
-			: 'private, max-age=31536000, immutable';
-		const offload = offloadHeaders(share, file);
-		if (offload) {
+
+		// Admission control: shares the same per-IP 'dl' semaphore as the download
+		// endpoint (both stream response bytes to the client). Acquired after the
+		// access/limit checks, before any response is built.
+		const release = acquire('dl', ip, 16);
+		if (!release) return overloaded(3);
+
+		try {
+			// A password-protected share's bytes must never linger in a shared/browser
+			// cache keyed only by URL - a subsequent visitor (or the same browser after
+			// the password changes) could read cached content past the point where they
+			// should still be authorized. one_time/max_downloads-capped shares are
+			// already blocked above for non-owners, but the owner's own preview of such
+			// a share should not be cached long-term either. Only a fully public,
+			// uncontrolled share gets the long immutable cache.
+			const cacheControl = share.password_hash || share.one_time || share.max_downloads !== null
+				? 'no-store'
+				: 'private, max-age=31536000, immutable';
+			const offload = offloadHeaders(share, file);
+			if (offload) {
+				// Offload hands the bytes to the reverse proxy (or serves headers-only
+				// for a HEAD probe) - no stream is ever opened by this process.
+				release();
+				const serving = previewServing(file.mime);
+				return new Response(null, {
+					headers: {
+						...offload,
+						'Content-Type': serving.type,
+						'Content-Disposition': contentDisposition(file.name.split('/').pop(), serving.inline),
+						'Content-Security-Policy': PREVIEW_CSP,
+						'Cache-Control': cacheControl,
+						ETag: '"' + file.id + '"',
+						'Accept-Ranges': 'bytes',
+						...SECURITY_HEADERS,
+					},
+				});
+			}
+			if (req.method === 'HEAD') {
+				// HEAD never opens a stream (see rangeResponse's head handling).
+				release();
+				return rangeResponse(share, file, req, {
+					inline: previewServing(file.mime).inline,
+					contentType: previewServing(file.mime).type,
+					head: true,
+					extraHeaders: { 'Content-Security-Policy': PREVIEW_CSP, 'Cache-Control': cacheControl, ETag: '"' + file.id + '"' },
+				});
+			}
 			const serving = previewServing(file.mime);
-			return new Response(null, {
-				headers: {
-					...offload,
-					'Content-Type': serving.type,
-					'Content-Disposition': contentDisposition(file.name.split('/').pop(), serving.inline),
+			return rangeResponse(share, file, req, {
+				inline: serving.inline,
+				contentType: serving.type,
+				makeBody: src => trackedStream(src, { onEnd: release }),
+				extraHeaders: {
 					'Content-Security-Policy': PREVIEW_CSP,
+					// Previewed bytes are immutable content addressed by file id, so a
+					// scrub-back in the player can be served from the browser cache
+					// instead of re-requesting already-fetched ranges - but only for a
+					// fully public, uncontrolled share (see cacheControl above).
 					'Cache-Control': cacheControl,
 					ETag: '"' + file.id + '"',
-					'Accept-Ranges': 'bytes',
-					...SECURITY_HEADERS,
 				},
 			});
+		} catch (e) {
+			release();
+			throw e;
 		}
-		const serving = previewServing(file.mime);
-		return rangeResponse(share, file, req, {
-			inline: serving.inline,
-			contentType: serving.type,
-			head: req.method === 'HEAD',
-			extraHeaders: {
-				'Content-Security-Policy': PREVIEW_CSP,
-				// Previewed bytes are immutable content addressed by file id, so a
-				// scrub-back in the player can be served from the browser cache
-				// instead of re-requesting already-fetched ranges - but only for a
-				// fully public, uncontrolled share (see cacheControl above).
-				'Cache-Control': cacheControl,
-				ETag: '"' + file.id + '"',
-			},
-		});
 	});
 
 	// Attachment download: counts as one download - and, for a one-time share,
@@ -347,92 +373,110 @@ export default function download(router) {
 		// The owner's own reads (edit token or owning API key) never hit the cap.
 		if (!owner && limitReached(share)) return error(410, 'Download limit reached');
 
-		const size = plainSize(file, share.id);
-		const range = parseRange(req.headers.get('range'), size);
-		// A controlled share (one-time, or under a download cap) can only ever
-		// be delivered whole to a non-owner: an ordinary pair of non-overlapping
-		// Range requests could otherwise reconstruct the entire file across two
-		// requests without either one individually looking like a "full"
-		// delivery below, defeating the claim/burn/cap machinery entirely. Force
-		// such a Range to be ignored (served as a normal full 200) instead of
-		// honored as a 206 partial, so "stream drained" and "visitor got the
-		// whole file" stay the same event. An exact bytes=0-(size-1) range is
-		// left alone since it is already a full delivery per reachesEnd, and a
-		// genuinely malformed range still falls through to rangeResponse's 416.
-		const effRange =
-			!owner &&
-			(share.one_time || share.max_downloads !== null) &&
-			range && !range.invalid && !(range.start === 0 && range.end === size - 1)
-				? null
-				: range;
-		// HEAD is a pure probe (the E2E view page pre-flights one before
-		// committing a navigation download): answer from metadata alone, before
-		// the one-time read tracking below. Reaching that machinery with a body
-		// Bun never drains would bump activeReads without a matching readEnd,
-		// stalling a later burn forever.
-		if (req.method === 'HEAD') {
-			return rangeResponse(share, file, req, { inline: false, size, range: effRange, head: true });
-		}
-		// A "full" delivery is a non-owner GET whose range (or the absence of
-		// one) covers the entire file in one shot - i.e. draining the stream
-		// delivers every byte. Anything else (a partial range probe, a tail
-		// probe, a HEAD, or the owner's own restore) never counts, claims, or
-		// burns.
-		const full = req.method === 'GET' && !owner && reachesEnd(effRange, size);
-		const ua = req.headers.get('user-agent');
+		// Admission control: bound concurrent streaming download/preview responses
+		// per client IP (bandwidth/fd exhaustion). Acquired after the access/limit
+		// checks and before any response (including HEAD) is built; released
+		// exactly once on every path below - either immediately (HEAD, or an
+		// early error before a stream exists) or via trackedStream's onEnd once
+		// the response body actually finishes draining/cancelling/erroring.
+		const release = acquire('dl', ip, 16);
+		if (!release) return overloaded(3);
 
-		// One-time shares carry the full claim/burn machinery: track every read so
-		// a burn waits for in-flight reads, claim the share on a full delivery,
-		// count and burn only once that delivery drains, and restore it if the
-		// delivery is cancelled so the recipient can retry.
-		if (share.one_time) {
-			if (full) {
-				const claimed = claimOneTime.run(now(), share.id).changes > 0;
-				if (!claimed) return error(410, 'This one-time share has already been taken');
+		try {
+			const size = plainSize(file, share.id);
+			const range = parseRange(req.headers.get('range'), size);
+			// A controlled share (one-time, or under a download cap) can only ever
+			// be delivered whole to a non-owner: an ordinary pair of non-overlapping
+			// Range requests could otherwise reconstruct the entire file across two
+			// requests without either one individually looking like a "full"
+			// delivery below, defeating the claim/burn/cap machinery entirely. Force
+			// such a Range to be ignored (served as a normal full 200) instead of
+			// honored as a 206 partial, so "stream drained" and "visitor got the
+			// whole file" stay the same event. An exact bytes=0-(size-1) range is
+			// left alone since it is already a full delivery per reachesEnd, and a
+			// genuinely malformed range still falls through to rangeResponse's 416.
+			const effRange =
+				!owner &&
+				(share.one_time || share.max_downloads !== null) &&
+				range && !range.invalid && !(range.start === 0 && range.end === size - 1)
+					? null
+					: range;
+			// HEAD is a pure probe (the E2E view page pre-flights one before
+			// committing a navigation download): answer from metadata alone, before
+			// the one-time read tracking below. Reaching that machinery with a body
+			// Bun never drains would bump activeReads without a matching readEnd,
+			// stalling a later burn forever. No stream is ever opened, so the slot
+			// is released immediately rather than handed to a trackedStream.
+			if (req.method === 'HEAD') {
+				release();
+				return rangeResponse(share, file, req, { inline: false, size, range: effRange, head: true });
 			}
-			readStart(share.id);
-			let completed = false;
-			const makeBody = src =>
-				trackedStream(src, {
-					onComplete: full
-						? () => {
-								completed = true;
-								recordDownload(share.id, file.id, ip, ua, share.creator_ip);
-								burnPending.add(share.id);
-							}
-						: undefined,
-					onEnd: () => {
-						if (full && !completed) restoreShare.run(share.id);
-						readEnd(share.id);
-					},
-				});
-			return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
-		}
+			// A "full" delivery is a non-owner GET whose range (or the absence of
+			// one) covers the entire file in one shot - i.e. draining the stream
+			// delivers every byte. Anything else (a partial range probe, a tail
+			// probe, a HEAD, or the owner's own restore) never counts, claims, or
+			// burns.
+			const full = req.method === 'GET' && !owner && reachesEnd(effRange, size);
+			const ua = req.headers.get('user-agent');
 
-		// A download-capped share must count only a COMPLETED full delivery, so a
-		// cancelled/paused transfer never consumes the cap - wrap just that stream.
-		// The slot is claimed atomically up front (not check-then-increment) so N
-		// concurrent requests against a maxDownloads=1 share cannot all pass; a lost
-		// claim race means the cap was reached by a racing request.
-		if (full && share.max_downloads !== null) {
-			const claimed = claimDownload.run(share.id).changes > 0;
-			if (!claimed) return error(410, 'Download limit reached');
-			let completed = false;
-			const makeBody = src =>
-				trackedStream(src, {
-					onComplete: () => {
-						completed = true;
-						recordDownload(share.id, file.id, ip, ua, share.creator_ip, { countShare: false });
-					},
-					onEnd: () => { if (!completed) releaseDownload.run(share.id); },
-				});
-			return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
-		}
+			// One-time shares carry the full claim/burn machinery: track every read so
+			// a burn waits for in-flight reads, claim the share on a full delivery,
+			// count and burn only once that delivery drains, and restore it if the
+			// delivery is cancelled so the recipient can retry.
+			if (share.one_time) {
+				if (full) {
+					const claimed = claimOneTime.run(now(), share.id).changes > 0;
+					if (!claimed) { release(); return error(410, 'This one-time share has already been taken'); }
+				}
+				readStart(share.id);
+				let completed = false;
+				const makeBody = src =>
+					trackedStream(src, {
+						onComplete: full
+							? () => {
+									completed = true;
+									recordDownload(share.id, file.id, ip, ua, share.creator_ip);
+									burnPending.add(share.id);
+								}
+							: undefined,
+						onEnd: () => {
+							if (full && !completed) restoreShare.run(share.id);
+							readEnd(share.id);
+							release();
+						},
+					});
+				return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
+			}
 
-		// Uncontrolled share (the common, hot path): tally a full delivery up front
-		// and stream with no wrapper and no per-share read tracking.
-		if (full) recordDownload(share.id, file.id, ip, ua, share.creator_ip);
-		return rangeResponse(share, file, req, { inline: false, size, range: effRange });
+			// A download-capped share must count only a COMPLETED full delivery, so a
+			// cancelled/paused transfer never consumes the cap - wrap just that stream.
+			// The slot is claimed atomically up front (not check-then-increment) so N
+			// concurrent requests against a maxDownloads=1 share cannot all pass; a lost
+			// claim race means the cap was reached by a racing request.
+			if (full && share.max_downloads !== null) {
+				const claimed = claimDownload.run(share.id).changes > 0;
+				if (!claimed) { release(); return error(410, 'Download limit reached'); }
+				let completed = false;
+				const makeBody = src =>
+					trackedStream(src, {
+						onComplete: () => {
+							completed = true;
+							recordDownload(share.id, file.id, ip, ua, share.creator_ip, { countShare: false });
+						},
+						onEnd: () => { if (!completed) releaseDownload.run(share.id); release(); },
+					});
+				return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
+			}
+
+			// Uncontrolled share (the common, hot path): tally a full delivery up front
+			// and stream with the semaphore slot released once the body ends.
+			if (full) recordDownload(share.id, file.id, ip, ua, share.creator_ip);
+			const makeBody = src => trackedStream(src, { onEnd: release });
+			return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
+		} catch (e) {
+			release();
+			throw e;
+		}
 	});
 
 	// Whole-share zip: one chunked archive of every complete file. A zip is
@@ -474,7 +518,8 @@ export default function download(router) {
 		}
 
 		// Same probe rule as the single-file download: HEAD answers headers-only
-		// and never constructs the archive stream.
+		// and never constructs the archive stream - so it stays exempt from the
+		// admission-control acquire below entirely.
 		if (req.method === 'HEAD') {
 			return new Response(null, {
 				headers: {
@@ -486,60 +531,81 @@ export default function download(router) {
 			});
 		}
 
-		const usedZipNames = new Set();
-		const entries = files.map(f => ({
-			name: uniqueZipName(f.name, usedZipNames),
-			file: { stream: () => blobRangeStream(share.id, f.id, 0, f.size - 1, fileEnc(f)) },
-			size: f.size,
-		}));
+		// Admission control: a zip build is the heaviest stream type (reads every
+		// blob, CRC32s every byte), so it gets its own tighter per-IP and global
+		// caps on top of the shared 'dl' semaphore used by single-file
+		// download/preview.
+		const release = acquireAll([
+			['zip', ip, 2],
+			['zip-global', null, 6],
+		]);
+		if (!release) return overloaded(5);
 
-		// HEAD probes (auto-routed to this GET handler) must not count, claim, or
-		// burn, and the owner is exempt entirely (their own restore never counts
-		// or burns).
-		const full = !owner && req.method === 'GET';
-		if (full && share.one_time) {
-			const claimed = claimOneTime.run(now(), share.id).changes > 0;
-			if (!claimed) return error(410, 'This one-time share has already been taken');
-		}
-		// A download-capped (non-one-time) share must count only a COMPLETED full
-		// zip delivery, so a cancelled/failed archive never consumes the cap. The
-		// slot is claimed atomically up front here (not via the plain
-		// check-then-act limitReached() check above, which only short-circuits the
-		// common case) so N concurrent zip requests against a maxDownloads=1 share
-		// cannot all pass - the same guarantee the single-file download path
-		// already gets from claimDownload/releaseDownload.
-		const capped = full && !share.one_time && share.max_downloads !== null;
-		if (capped) {
-			const claimed = claimDownload.run(share.id).changes > 0;
-			if (!claimed) return error(410, 'Download limit reached');
-		}
+		try {
+			const usedZipNames = new Set();
+			const entries = files.map(f => ({
+				name: uniqueZipName(f.name, usedZipNames),
+				file: { stream: () => blobRangeStream(share.id, f.id, 0, f.size - 1, fileEnc(f)) },
+				size: f.size,
+			}));
 
-		let body = createZipStream(entries);
-		if (full) {
-			readStart(share.id);
-			let completed = false;
-			body = trackedStream(body, {
-				onComplete: () => {
-					completed = true;
-					recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip, { countShare: !capped });
-					if (share.one_time) burnPending.add(share.id);
-				},
-				onEnd: () => {
-					if (share.one_time && !completed) restoreShare.run(share.id);
-					if (capped && !completed) releaseDownload.run(share.id);
-					readEnd(share.id);
+			// HEAD probes (auto-routed to this GET handler) must not count, claim, or
+			// burn, and the owner is exempt entirely (their own restore never counts
+			// or burns).
+			const full = !owner && req.method === 'GET';
+			if (full && share.one_time) {
+				const claimed = claimOneTime.run(now(), share.id).changes > 0;
+				if (!claimed) { release(); return error(410, 'This one-time share has already been taken'); }
+			}
+			// A download-capped (non-one-time) share must count only a COMPLETED full
+			// zip delivery, so a cancelled/failed archive never consumes the cap. The
+			// slot is claimed atomically up front here (not via the plain
+			// check-then-act limitReached() check above, which only short-circuits the
+			// common case) so N concurrent zip requests against a maxDownloads=1 share
+			// cannot all pass - the same guarantee the single-file download path
+			// already gets from claimDownload/releaseDownload.
+			const capped = full && !share.one_time && share.max_downloads !== null;
+			if (capped) {
+				const claimed = claimDownload.run(share.id).changes > 0;
+				if (!claimed) { release(); return error(410, 'Download limit reached'); }
+			}
+
+			let body = createZipStream(entries);
+			if (full) {
+				readStart(share.id);
+				let completed = false;
+				body = trackedStream(body, {
+					onComplete: () => {
+						completed = true;
+						recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip, { countShare: !capped });
+						if (share.one_time) burnPending.add(share.id);
+					},
+					onEnd: () => {
+						if (share.one_time && !completed) restoreShare.run(share.id);
+						if (capped && !completed) releaseDownload.run(share.id);
+						readEnd(share.id);
+						release();
+					},
+				});
+			} else {
+				// Non-full (the owner's own restore): still wrap so the semaphore
+				// slot is released once the archive stream finishes draining/
+				// cancelling/erroring, rather than only on the tracked full path.
+				body = trackedStream(body, { onEnd: release });
+			}
+
+			const zipName = (share.title || share.id) + '.zip';
+			return new Response(body, {
+				headers: {
+					'Content-Type': 'application/zip',
+					'Content-Disposition': contentDisposition(zipName, false),
+					'Cache-Control': 'no-store',
+					...SECURITY_HEADERS,
 				},
 			});
+		} catch (e) {
+			release();
+			throw e;
 		}
-
-		const zipName = (share.title || share.id) + '.zip';
-		return new Response(body, {
-			headers: {
-				'Content-Type': 'application/zip',
-				'Content-Disposition': contentDisposition(zipName, false),
-				'Cache-Control': 'no-store',
-				...SECURITY_HEADERS,
-			},
-		});
 	});
 }

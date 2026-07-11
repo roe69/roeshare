@@ -11,6 +11,7 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { newShareId, newToken } from '../lib/ids.js';
 import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
+import { acquire, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
 import { keyValidForShare } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
@@ -143,7 +144,13 @@ export default function shares(router) {
 		let passwordHash = null;
 		if (typeof body.password === 'string' && body.password.length > 0) {
 			if (body.password.length > config.maxPasswordLength) return error(400, 'Password is too long');
-			passwordHash = await hashPassword(body.password);
+			const release = acquire('argon2', null, 4);
+			if (!release) return overloaded(2);
+			try {
+				passwordHash = await hashPassword(body.password);
+			} finally {
+				release();
+			}
 		}
 
 		const oneTime = body.oneTime ? 1 : 0;
@@ -213,7 +220,14 @@ export default function shares(router) {
 		const body = (await readJson(ctx.req)) || {};
 		const password = body.password ?? '';
 		if (typeof password === 'string' && password.length > config.maxPasswordLength) return error(400, 'Password is too long');
-		const ok = await verifyPassword(password, share.password_hash);
+		const release = acquire('argon2', null, 4);
+		if (!release) return overloaded(2);
+		let ok;
+		try {
+			ok = await verifyPassword(password, share.password_hash);
+		} finally {
+			release();
+		}
 		if (!ok) return error(403, 'Incorrect password');
 
 		return json({ accessToken: issueAccessToken(share.id, share.password_hash) });

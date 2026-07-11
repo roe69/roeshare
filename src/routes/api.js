@@ -25,6 +25,7 @@ import { newFileSalt } from '../lib/filecrypt.js';
 import { CURRENT_AT_REST_KEY_ID } from '../lib/keys.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce, enforceKey } from '../lib/ratelimit.js';
+import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
 import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow } from '../lib/apikeys.js';
 
@@ -160,8 +161,9 @@ function scopeError(key, opts) {
 }
 
 // Insert a share row attributed to `key`. Returns { id, editToken }, { conflict }
-// when a requested slug is already taken, or { limited } when the key has hit
-// its share cap. Applies the key's max share lifetime to the expiry.
+// when a requested slug is already taken, { limited } when the key has hit its
+// share cap, or { overloaded } when the argon2 semaphore is full (password
+// shares only). Applies the key's max share lifetime to the expiry.
 //
 // All async work (password hashing) happens BEFORE the transaction below.
 // The slug-conflict recheck, the fresh max_shares check, the share insert, and
@@ -173,7 +175,16 @@ function scopeError(key, opts) {
 // back automatically (bun:sqlite semantics) instead of leaving a partial row.
 async function createShare(ctx, key, opts) {
 	const expiresAt = clampExpiry(key, opts.expiresAt);
-	const passwordHash = opts.passwordPlain ? await hashPassword(opts.passwordPlain) : null;
+	let passwordHash = null;
+	if (opts.passwordPlain) {
+		const release = acquire('argon2', null, 4);
+		if (!release) return { overloaded: true };
+		try {
+			passwordHash = await hashPassword(opts.passwordPlain);
+		} finally {
+			release();
+		}
+	}
 	const editToken = newToken();
 	const ua = (ctx.req.headers.get('user-agent') || `API key: ${key.name}`).slice(0, 512);
 
@@ -297,6 +308,7 @@ export default function apiV1(router) {
 		if (denied) return error(403, denied);
 
 		const made = await createShare(ctx, key, parsed.values);
+		if (made.overloaded) return overloaded(2);
 		if (made.conflict) return error(409, made.conflict);
 		if (made.limited) return error(403, made.limited);
 
@@ -363,64 +375,82 @@ export default function apiV1(router) {
 			if (declaredLen > caps.maxShareSize) return error(413, 'File exceeds this key\'s per-share size limit');
 		}
 
-		const buf = new Uint8Array(await ctx.req.arrayBuffer());
-		const size = buf.length;
-		if (size === 0) return error(400, 'Empty request body');
-		if (size > caps.maxFileSize) return error(413, 'File exceeds this key\'s per-file size limit');
-		if (size > caps.maxShareSize) return error(413, 'File exceeds this key\'s per-share size limit');
+		// Admission control: bound the number of one-shot bodies being buffered
+		// whole into memory, both per-key (a backup script uploads sequentially)
+		// and globally (worst-case in-flight buffer memory = 4 x maxFileSize).
+		// Acquired BEFORE the body is read into memory.
+		const release = acquireAll([
+			['oneshot', key.id, 2],
+			['oneshot-global', null, 4],
+		]);
+		if (!release) return overloaded(3);
 
-		// Reserve the global quota atomically (replacing the old cached-disk-walk
-		// check-then-act) BEFORE any row exists - shareId is null here since no
-		// share has been created yet for a one-shot upload.
-		const fileId = newFileId();
-		if (!quota.reserve(fileId, null, size)) {
-			return error(413, 'Server storage limit reached');
-		}
-		const sha256 = createHash('sha256').update(buf).digest('hex');
-
-		const made = await createShare(ctx, key, parsed.values);
-		if (made.conflict) {
-			quota.releaseFile(fileId);
-			return error(409, made.conflict);
-		}
-		if (made.limited) {
-			quota.releaseFile(fileId);
-			return error(403, made.limited);
-		}
-
-		const iv = newFileSalt();
-		// Write the bytes BEFORE recording the file as complete, so a write failure
-		// never leaves a phantom "complete" row pointing at a missing/partial blob.
 		try {
-			await writeChunk(made.id, fileId, 0, buf, { version: 2, keyId: CURRENT_AT_REST_KEY_ID, fileSalt: iv, fileId });
-		} catch (e) {
-			console.error('one-shot upload write failed for', made.id, e);
-			quota.releaseFile(fileId);
-			softDeleteShare.run(now(), made.id);
-			await deleteShareFiles(made.id).catch(() => {});
-			return error(500, 'Could not store the file');
+			const buf = new Uint8Array(await ctx.req.arrayBuffer());
+			const size = buf.length;
+			if (size === 0) return error(400, 'Empty request body');
+			if (size > caps.maxFileSize) return error(413, 'File exceeds this key\'s per-file size limit');
+			if (size > caps.maxShareSize) return error(413, 'File exceeds this key\'s per-share size limit');
+
+			// Reserve the global quota atomically (replacing the old cached-disk-walk
+			// check-then-act) BEFORE any row exists - shareId is null here since no
+			// share has been created yet for a one-shot upload.
+			const fileId = newFileId();
+			if (!quota.reserve(fileId, null, size)) {
+				return error(413, 'Server storage limit reached');
+			}
+			const sha256 = createHash('sha256').update(buf).digest('hex');
+
+			const made = await createShare(ctx, key, parsed.values);
+			if (made.overloaded) {
+				quota.releaseFile(fileId);
+				return overloaded(2);
+			}
+			if (made.conflict) {
+				quota.releaseFile(fileId);
+				return error(409, made.conflict);
+			}
+			if (made.limited) {
+				quota.releaseFile(fileId);
+				return error(403, made.limited);
+			}
+
+			const iv = newFileSalt();
+			// Write the bytes BEFORE recording the file as complete, so a write failure
+			// never leaves a phantom "complete" row pointing at a missing/partial blob.
+			try {
+				await writeChunk(made.id, fileId, 0, buf, { version: 2, keyId: CURRENT_AT_REST_KEY_ID, fileSalt: iv, fileId });
+			} catch (e) {
+				console.error('one-shot upload write failed for', made.id, e);
+				quota.releaseFile(fileId);
+				softDeleteShare.run(now(), made.id);
+				await deleteShareFiles(made.id).catch(() => {});
+				return error(500, 'Could not store the file');
+			}
+			insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv, sha256, 2, CURRENT_AT_REST_KEY_ID);
+			setFinalized.run(made.id);
+			quota.commit(fileId, size);
+
+			// File-completion stats (the chunked flow records these in uploads.js; the
+			// one-shot path writes the bytes directly, so it records them here).
+			bumpMetric('files_uploaded');
+			bumpMetric('bytes_uploaded', size);
+			bumpUploader(ctx.ip, { bytes: size });
+			recordKeyUsage(key.id, { bytes: size });
+
+			return json(
+				{
+					id: made.id,
+					url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${made.id}`,
+					fileId,
+					name,
+					size,
+				},
+				201,
+			);
+		} finally {
+			release();
 		}
-		insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv, sha256, 2, CURRENT_AT_REST_KEY_ID);
-		setFinalized.run(made.id);
-		quota.commit(fileId, size);
-
-		// File-completion stats (the chunked flow records these in uploads.js; the
-		// one-shot path writes the bytes directly, so it records them here).
-		bumpMetric('files_uploaded');
-		bumpMetric('bytes_uploaded', size);
-		bumpUploader(ctx.ip, { bytes: size });
-		recordKeyUsage(key.id, { bytes: size });
-
-		return json(
-			{
-				id: made.id,
-				url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${made.id}`,
-				fileId,
-				name,
-				size,
-			},
-			201,
-		);
 	});
 
 	// ---- List this key's shares (enumerate a backup) -----------------------

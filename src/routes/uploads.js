@@ -17,6 +17,7 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare } from '../lib/apikeys.js';
 import { enforceKey } from '../lib/ratelimit.js';
 import { reserveInTx, commitInTx, touchInTx } from '../lib/quota.js';
+import { acquireAll, overloaded } from '../lib/semaphore.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
@@ -191,68 +192,84 @@ export default function uploads(router) {
 		const limited = enforceKey('chunk-patch', share.id, 1200, 60_000);
 		if (limited) return limited;
 
-		// Everything below is serialized per file id: concurrent PATCHes for the
-		// same file would otherwise all read the same `received` and race past the
-		// offset check, each buffering a body before either one has written.
-		return withFileLock(params.fileId, async () => {
-			const file = getFile.get(params.fileId, share.id);
-			if (!file) return error(404, 'File not found');
+		// Admission control: bound the number of concurrent chunk bodies being
+		// buffered into memory, both per-share (a client uploads a few chunks in
+		// parallel) and globally (worst-case chunk-buffer memory). This is
+		// separate from withFileLock below, which serializes writes for the SAME
+		// file id - the semaphore instead limits how many DIFFERENT chunk
+		// requests (any file, any share) may be in flight at once.
+		const release = acquireAll([
+			['chunk', share.id, 6],
+			['chunk-global', null, 32],
+		]);
+		if (!release) return overloaded(2);
 
-			const offset = Number(query.get('offset'));
-			if (!Number.isFinite(offset) || offset < 0) return error(400, 'Invalid offset');
-			if (offset !== file.received) return error(409, 'Offset mismatch', { received: file.received });
+		try {
+			// Everything below is serialized per file id: concurrent PATCHes for the
+			// same file would otherwise all read the same `received` and race past the
+			// offset check, each buffering a body before either one has written.
+			return await withFileLock(params.fileId, async () => {
+				const file = getFile.get(params.fileId, share.id);
+				if (!file) return error(404, 'File not found');
 
-			// Reject oversized chunks BEFORE buffering the body into memory. A single
-			// chunk may never exceed chunkSize, and offset+len may never exceed the
-			// declared file size. This caps per-request memory and stops a flood of
-			// max-body PATCHes (each ~64 MiB) from being read in just to 413 them.
-			// E2E chunks carry a small per-record overhead (12-byte IV + 16-byte GCM
-			// tag); allow a 64-byte margin over chunkSize so they are not rejected.
-			const declaredLen = Number(req.headers.get('content-length'));
-			if (Number.isFinite(declaredLen) && declaredLen >= 0) {
-				if (declaredLen > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
-				if (offset + declaredLen > file.size) return error(413, 'Chunk exceeds declared file size');
-			}
+				const offset = Number(query.get('offset'));
+				if (!Number.isFinite(offset) || offset < 0) return error(400, 'Invalid offset');
+				if (offset !== file.received) return error(409, 'Offset mismatch', { received: file.received });
 
-			const buf = await req.arrayBuffer();
-			const chunk = new Uint8Array(buf);
-			// The Content-Length guard above is skipped entirely when the client
-			// omits it (e.g. chunked transfer encoding, where Number(null) === 0
-			// would otherwise pass as "0 <= 0"). Cap the actual bytes read too, so
-			// that path cannot smuggle an oversized chunk past the header check.
-			if (chunk.length > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
-			if (file.received + chunk.length > file.size) return error(413, 'Chunk exceeds declared file size');
+				// Reject oversized chunks BEFORE buffering the body into memory. A single
+				// chunk may never exceed chunkSize, and offset+len may never exceed the
+				// declared file size. This caps per-request memory and stops a flood of
+				// max-body PATCHes (each ~64 MiB) from being read in just to 413 them.
+				// E2E chunks carry a small per-record overhead (12-byte IV + 16-byte GCM
+				// tag); allow a 64-byte margin over chunkSize so they are not rejected.
+				const declaredLen = Number(req.headers.get('content-length'));
+				if (Number.isFinite(declaredLen) && declaredLen >= 0) {
+					if (declaredLen > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
+					if (offset + declaredLen > file.size) return error(413, 'Chunk exceeds declared file size');
+				}
 
-			const received = await writeChunk(share.id, file.id, offset, chunk, fileEnc(file));
-			const complete = received === file.size ? 1 : 0;
-			// Commit the file's bytes from "reserved" to "used" the moment it
-			// finishes, or touch the reservation's TTL forward otherwise - a live
-			// multi-day upload's quota hold must never be reaped out from under it
-			// just because a single chunk PATCH took a while. Same transaction as
-			// the received/complete write so a crash between them cannot desync
-			// the ledger from what the row says.
-			db.transaction(() => {
-				updateReceived.run(received, complete, file.id);
-				if (complete && !file.complete) commitInTx(file.id, file.size);
-				else touchInTx(file.id);
-			})();
-			// Lifetime stats when a file first finishes (persist past deletion).
-			if (complete && !file.complete) {
-				bumpMetric('files_uploaded');
-				bumpMetric('bytes_uploaded', file.size);
-				bumpUploader(share.creator_ip, { bytes: file.size });
-				// Attribute the bytes to the API key when this share was created via one.
-				if (share.api_key_id) recordKeyUsage(share.api_key_id, { bytes: file.size });
+				const buf = await req.arrayBuffer();
+				const chunk = new Uint8Array(buf);
+				// The Content-Length guard above is skipped entirely when the client
+				// omits it (e.g. chunked transfer encoding, where Number(null) === 0
+				// would otherwise pass as "0 <= 0"). Cap the actual bytes read too, so
+				// that path cannot smuggle an oversized chunk past the header check.
+				if (chunk.length > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
+				if (file.received + chunk.length > file.size) return error(413, 'Chunk exceeds declared file size');
 
-				// Content digest, computed once here (not per chunk) over the plaintext -
-				// the same decrypt path download.js uses - so it is correct for at-rest
-				// encrypted files too.
-				const hash = createHash('sha256');
-				const plaintext = blobRangeStream(share.id, file.id, 0, file.size - 1, fileEnc(file));
-				for await (const part of plaintext) hash.update(part);
-				updateSha256.run(hash.digest('hex'), file.id);
-			}
-			return json({ received, complete: !!complete });
-		});
+				const received = await writeChunk(share.id, file.id, offset, chunk, fileEnc(file));
+				const complete = received === file.size ? 1 : 0;
+				// Commit the file's bytes from "reserved" to "used" the moment it
+				// finishes, or touch the reservation's TTL forward otherwise - a live
+				// multi-day upload's quota hold must never be reaped out from under it
+				// just because a single chunk PATCH took a while. Same transaction as
+				// the received/complete write so a crash between them cannot desync
+				// the ledger from what the row says.
+				db.transaction(() => {
+					updateReceived.run(received, complete, file.id);
+					if (complete && !file.complete) commitInTx(file.id, file.size);
+					else touchInTx(file.id);
+				})();
+				// Lifetime stats when a file first finishes (persist past deletion).
+				if (complete && !file.complete) {
+					bumpMetric('files_uploaded');
+					bumpMetric('bytes_uploaded', file.size);
+					bumpUploader(share.creator_ip, { bytes: file.size });
+					// Attribute the bytes to the API key when this share was created via one.
+					if (share.api_key_id) recordKeyUsage(share.api_key_id, { bytes: file.size });
+
+					// Content digest, computed once here (not per chunk) over the plaintext -
+					// the same decrypt path download.js uses - so it is correct for at-rest
+					// encrypted files too.
+					const hash = createHash('sha256');
+					const plaintext = blobRangeStream(share.id, file.id, 0, file.size - 1, fileEnc(file));
+					for await (const part of plaintext) hash.update(part);
+					updateSha256.run(hash.digest('hex'), file.id);
+				}
+				return json({ received, complete: !!complete });
+			});
+		} finally {
+			release();
+		}
 	});
 }
