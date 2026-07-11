@@ -4,16 +4,17 @@
 // from the server-reported `received` count. Caps are enforced server-side:
 // per-file, per-share, and (optionally) total on-disk usage.
 
+import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { json, error } from '../lib/http.js';
-import { safeEqual } from '../lib/crypto.js';
-import { writeChunk, totalUsage } from '../lib/storage.js';
+import { verifySecretToken } from '../lib/crypto.js';
+import { writeChunk, totalUsage, blobRangeStream } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps } from '../lib/apikeys.js';
-import { enforce } from '../lib/ratelimit.js';
+import { enforceKey } from '../lib/ratelimit.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
@@ -22,6 +23,7 @@ const insertFile = db.query(
 );
 const getFile = db.query('SELECT id, size, received, complete, iv FROM files WHERE id = ? AND share_id = ?');
 const updateReceived = db.query('UPDATE files SET received = ?, complete = ? WHERE id = ?');
+const updateSha256 = db.query('UPDATE files SET sha256 = ? WHERE id = ?');
 
 // Keep a SAFE relative path so dragged folders preserve their structure (used as
 // the display name and the zip entry path). Drops any "." / ".." / empty / drive
@@ -47,8 +49,29 @@ function authShare(req, id) {
 	// still in progress.
 	if (!share || (share.finalized && share.expires_at !== null && share.expires_at < now())) return { res: error(404, 'Share not found') };
 	const token = req.headers.get('x-edit-token');
-	if (!token || !safeEqual(token, share.edit_token)) return { res: error(403, 'Forbidden') };
+	if (!token || !verifySecretToken(token, share.edit_token)) return { res: error(403, 'Forbidden') };
 	return { share };
+}
+
+// A finalized share is checked at the top of both write routes (registration and
+// chunk upload), right after authShare(): once finalized its file set is closed,
+// so neither new registrations nor further chunk bytes may land.
+function checkFinalized(share) {
+	if (share.finalized) return error(409, 'Share is finalized and no longer accepts new files');
+	return null;
+}
+
+// When the share was created via an API key, a key that has since been revoked
+// or expired must lose write access through the edit-token path too - otherwise
+// revoking/expiring a key only blocks its own bearer-token API calls while the
+// share it already created keeps accepting uploads via the edit token forever.
+function checkKeyValid(share) {
+	if (!share.api_key_id) return null;
+	const row = apiKeyRow(share.api_key_id);
+	if (!row || row.revoked_at != null || (row.expires_at != null && row.expires_at < now())) {
+		return error(403, 'API key is no longer valid');
+	}
+	return null;
 }
 
 // Serialize chunk writes per file id: concurrent PATCHes for the same file
@@ -72,13 +95,19 @@ function withFileLock(fileId, fn) {
 
 export default function uploads(router) {
 	// Register a file against a share before streaming its bytes.
-	router.post('/api/shares/:id/files', async ({ req, params, ip }) => {
+	router.post('/api/shares/:id/files', async ({ req, params }) => {
 		const { share, res } = authShare(req, params.id);
 		if (res) return res;
+		const finalizedErr = checkFinalized(share);
+		if (finalizedErr) return finalizedErr;
+		const keyErr = checkKeyValid(share);
+		if (keyErr) return keyErr;
 
 		// Bounds the 10000-file-flood metadata-bloat vector (each registration is
-		// cheap on its own, but a flood of them still grows the files table).
-		const limited = enforce('file-reg', ip, 300, 60_000);
+		// cheap on its own, but a flood of them still grows the files table). Keyed
+		// by share id (not ip) so unrelated concurrent uploaders sharing a NAT or
+		// host do not throttle each other, while a single share is still bounded.
+		const limited = enforceKey('file-reg', share.id, 300, 60_000);
 		if (limited) return limited;
 
 		let body;
@@ -117,7 +146,20 @@ export default function uploads(router) {
 		// affects new writes - existing files keep decrypting via their own iv
 		// regardless of this setting (see storage.js).
 		const iv = share.e2e || !config.encryptAtRest ? null : newIv();
-		insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv);
+
+		// Re-check the per-share aggregate and insert inside one synchronous
+		// transaction: the `agg` snapshot above can go stale under concurrent
+		// registrations against the same share, each passing the same stale check
+		// and together exceeding maxShareSize. Re-reading fresh right before the
+		// insert (with no await in between) closes that race.
+		const registered = db.transaction(() => {
+			const fresh = shareTotal.get(share.id);
+			if (fresh.total + size > caps.maxShareSize) return false;
+			insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv);
+			return true;
+		})();
+		if (!registered) return error(413, 'Share exceeds the per-share size limit');
+
 		return json({ fileId, received: 0 });
 	});
 
@@ -134,6 +176,15 @@ export default function uploads(router) {
 	router.patch('/api/shares/:id/files/:fileId', async ({ req, params, query }) => {
 		const { share, res } = authShare(req, params.id);
 		if (res) return res;
+		const finalizedErr = checkFinalized(share);
+		if (finalizedErr) return finalizedErr;
+		const keyErr = checkKeyValid(share);
+		if (keyErr) return keyErr;
+
+		// This is the highest-request-volume endpoint in the app (one PATCH per
+		// chunk), so it gets a generous per-share ceiling rather than none.
+		const limited = enforceKey('chunk-patch', share.id, 1200, 60_000);
+		if (limited) return limited;
 
 		// Everything below is serialized per file id: concurrent PATCHes for the
 		// same file would otherwise all read the same `received` and race past the
@@ -177,6 +228,14 @@ export default function uploads(router) {
 				bumpUploader(share.creator_ip, { bytes: file.size });
 				// Attribute the bytes to the API key when this share was created via one.
 				if (share.api_key_id) recordKeyUsage(share.api_key_id, { bytes: file.size });
+
+				// Content digest, computed once here (not per chunk) over the plaintext -
+				// the same decrypt path download.js uses - so it is correct for at-rest
+				// encrypted files too.
+				const hash = createHash('sha256');
+				const plaintext = blobRangeStream(share.id, file.id, 0, file.size - 1, file.iv);
+				for await (const part of plaintext) hash.update(part);
+				updateSha256.run(hash.digest('hex'), file.id);
 			}
 			return json({ received, complete: !!complete });
 		});

@@ -61,9 +61,6 @@ export const ALLOWLIST = {
 	BASE_URL: { rule: baseUrlRule, type: 'text', label: 'Public base URL(s)', help: 'Comma-separate to serve multiple domains; the first is canonical.' },
 	TRUST_PROXY: { rule: boolRule, type: 'bool', label: 'Trust reverse proxy', help: 'Honour X-Forwarded-* headers. Only enable behind a trusted proxy.' },
 	APP_NAME: { rule: strRule(200), type: 'text', label: 'Brand name', help: 'Colour with <col=RRGGBB> and bold with <b>..</b>, e.g. <col=e4e4ce>Roe<b><col=ff6b35>Share</b>.' },
-	ADMIN_PASSWORD: { rule: strRule(1024), type: 'secret', secret: true, label: 'Admin password', help: 'Leave blank to keep the current one. Cannot be cleared from here. Changing it signs out all admin sessions on the next restart.' },
-	UPLOAD_PASSWORD: { rule: strRule(1024), type: 'secret', secret: true, clearable: true, label: 'Upload password', help: 'Leave blank to keep; tick Clear to allow open uploads. Changing or clearing it signs out upload sessions and revokes quick-access links on the next restart.' },
-	SECRET: { rule: strRule(1024), type: 'secret', secret: true, label: 'Secret (signing + encryption key)', danger: 'Changing SECRET logs everyone out, invalidates every quick-access link, and PERMANENTLY breaks decryption of all existing uploads.' },
 	MAX_FILE_SIZE: { rule: intRule(0), type: 'int', label: 'Max file size (bytes)' },
 	MAX_SHARE_SIZE: { rule: intRule(0), type: 'int', label: 'Max share size (bytes)' },
 	MAX_TOTAL_SIZE: { rule: intRule(0), type: 'int', label: 'Max total storage (bytes, 0 = unlimited)' },
@@ -164,16 +161,14 @@ export function readSettings(dataDir) {
 	}
 }
 
-// Validate a PUT body { values:{KEY:val}, clear:[keys], confirmSecretChange:bool }
-// into { set, clear, secretChanged } or { error }. Blank secret = leave unchanged;
-// ADMIN_PASSWORD can never be cleared; SECRET needs explicit confirmation;
-// env-managed keys are rejected outright (the environment wins).
+// Validate a PUT body { values:{KEY:val}, clear:[keys] } into { set, clear } or
+// { error }. Blank secret = leave unchanged; env-managed keys are rejected
+// outright (the environment wins).
 export function validatePatch(body) {
 	if (!body || typeof body !== 'object') return { error: 'Body must be an object' };
 	const values = body.values && typeof body.values === 'object' ? body.values : {};
 	const clearReq = Array.isArray(body.clear) ? body.clear : [];
 	const set = {};
-	let secretChanged = false;
 	for (const [key, val] of Object.entries(values)) {
 		const spec = ALLOWLIST[key];
 		if (!spec) continue; // drop non-allowlisted
@@ -181,10 +176,6 @@ export function validatePatch(body) {
 		if (typeof val !== 'string') return { error: `${spec.label} must be text` };
 		if (spec.secret && val === '') continue; // blank secret = leave unchanged
 		if (envManagedKeys.has(key)) return { error: `${spec.label} is set by the server environment and cannot be changed here` };
-		if (key === 'SECRET') {
-			if (body.confirmSecretChange !== true) return { error: 'Changing SECRET requires explicit confirmation' };
-			secretChanged = true;
-		}
 		const r = spec.rule(val);
 		if (r.error) return { error: `${spec.label}: ${r.error}` };
 		set[key] = r.value;
@@ -197,7 +188,7 @@ export function validatePatch(body) {
 		if (!spec.clearable) return { error: `${spec.label} cannot be cleared` };
 		clear.push(key);
 	}
-	return { set, clear, secretChanged };
+	return { set, clear };
 }
 
 // Read-modify-write merge of allowlisted keys, written atomically (temp file +

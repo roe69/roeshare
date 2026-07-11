@@ -83,3 +83,19 @@ export function safeEqual(a, b) {
 	const bb = createHash('sha256').update(String(b)).digest();
 	return timingSafeEqual(ab, bb);
 }
+
+// SHA-256 hex digest of a token, for storing high-entropy secrets (share edit
+// tokens) at rest without keeping the plaintext around - same approach as the
+// API key secret hashing in apikeys.js.
+export function hashSecretToken(token) {
+	return createHash('sha256').update(String(token)).digest('hex');
+}
+
+// Constant-time check that `token` hashes to `storedHash` (hex-encoded
+// SHA-256). Used to verify a presented edit token against its stored hash.
+export function verifySecretToken(token, storedHash) {
+	if (typeof token !== 'string' || typeof storedHash !== 'string') return false;
+	const a = createHash('sha256').update(token).digest();
+	const b = Buffer.from(storedHash, 'hex');
+	return a.length === b.length && timingSafeEqual(a, b);
+}

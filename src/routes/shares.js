@@ -5,7 +5,7 @@
 import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { json, error, cookie, requestOrigin, requestScheme } from '../lib/http.js';
-import { hashPassword, verifyPassword, safeEqual } from '../lib/crypto.js';
+import { hashPassword, verifyPassword, hashSecretToken, verifySecretToken } from '../lib/crypto.js';
 import { uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, uploadLinkToken, UPLOAD_COOKIE } from '../lib/auth.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { newShareId, newToken } from '../lib/ids.js';
@@ -14,11 +14,15 @@ import { enforce } from '../lib/ratelimit.js';
 import { slugError } from '../lib/slug.js';
 
 const getShare = db.query('SELECT * FROM shares WHERE id = ?');
+// Case-insensitive slug-conflict check: a soft-deleted share no longer holds
+// its slug, so it is excluded here (unlike getShare/liveShare, which still
+// resolve deleted rows by exact id for existing links).
+const getShareBySlugCI = db.query('SELECT id FROM shares WHERE lower(id) = lower(?) AND deleted_at IS NULL');
 const insertShare = db.query(
 	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e)
 	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
-const getFiles = db.query('SELECT id, name, size, received, mime, complete, download_count FROM files WHERE share_id = ? ORDER BY created_at ASC');
+const getFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, sha256 FROM files WHERE share_id = ? ORDER BY created_at ASC');
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
 // Shifts a share's expiry forward by the time spent uploading, so the
 // published-link expiry clock effectively starts at finalize rather than at
@@ -39,7 +43,7 @@ function liveShare(id) {
 
 function isOwner(req, share) {
 	const token = req.headers.get('x-edit-token');
-	return !!token && safeEqual(token, share.edit_token);
+	return !!token && verifySecretToken(token, share.edit_token);
 }
 
 async function readJson(req) {
@@ -144,14 +148,14 @@ export default function shares(router) {
 
 		// Optional custom URL slug. Charset excludes dots/slashes (traversal-safe)
 		// and the slug is namespaced under /s/ so it cannot collide with a route.
-		// Any existing row with that id - including soft-deleted ones, which keep
-		// the primary key - counts as taken.
+		// Matched case-insensitively against any other live (non-soft-deleted)
+		// share id; a soft-deleted share frees its slug for reuse.
 		let id;
 		if (body.slug !== undefined && body.slug !== null && body.slug !== '') {
 			const slug = String(body.slug).trim();
 			const err = slugError(slug);
 			if (err) return error(400, err);
-			if (getShare.get(slug)) return error(409, 'That custom link is already taken');
+			if (getShareBySlugCI.get(slug)) return error(409, 'That custom link is already taken');
 			id = slug;
 		} else {
 			id = newShareId();
@@ -160,7 +164,16 @@ export default function shares(router) {
 		const editToken = newToken();
 		const ua = (ctx.req.headers.get('user-agent') || '').slice(0, 512) || null;
 
-		insertShare.run(id, title, now(), expiresAt, passwordHash, maxDownloads, oneTime, editToken, ctx.ip ?? null, ua, e2e);
+		try {
+			insertShare.run(id, title, now(), expiresAt, passwordHash, maxDownloads, oneTime, hashSecretToken(editToken), ctx.ip ?? null, ua, e2e);
+		} catch (e) {
+			// A soft-deleted share keeps its row (and its id, the primary key) around,
+			// so getShareBySlugCI's "taken" check above cannot see it and reusing that
+			// slug hits a PK collision here. Report it the same way as an upfront
+			// conflict rather than letting it surface as a 500.
+			if (String(e?.message).includes('UNIQUE constraint failed')) return error(409, 'That custom link is already taken');
+			throw e;
+		}
 		// Lifetime stats (persist past deletion).
 		bumpMetric('shares_created');
 		bumpUploader(ctx.ip, { shares: 1 });
@@ -196,7 +209,7 @@ export default function shares(router) {
 		const ok = await verifyPassword(password, share.password_hash);
 		if (!ok) return error(403, 'Incorrect password');
 
-		return json({ accessToken: issueAccessToken(share.id) });
+		return json({ accessToken: issueAccessToken(share.id, share.password_hash) });
 	});
 
 	// ---- Visitor metadata --------------------------------------------------
@@ -211,7 +224,7 @@ export default function shares(router) {
 
 		if (share.password_hash && !owner) {
 			const token = readAccessToken(ctx.req, ctx.url);
-			if (!token || !hasAccessToken(token, share.id)) {
+			if (!token || !hasAccessToken(token, share.id, share.password_hash)) {
 				return json({ protected: true, title: share.title }, 401);
 			}
 		}
@@ -243,7 +256,7 @@ export default function shares(router) {
 			// Owners (validated via X-Edit-Token) get a read access token so their
 			// element-src previews and download links work without unlocking - the
 			// edit token itself is too sensitive to place in URLs.
-			...(owner ? { accessToken: issueAccessToken(share.id) } : {}),
+			...(owner ? { accessToken: issueAccessToken(share.id, share.password_hash) } : {}),
 			files: files.map(f => ({
 				id: f.id,
 				name: f.name,
@@ -251,6 +264,7 @@ export default function shares(router) {
 				mime: f.mime,
 				complete: !!f.complete,
 				downloadCount: f.download_count,
+				sha256: f.sha256,
 				// Owners get the resume offset (bytes received so far) so a refreshed
 				// upload page can continue an in-flight file. Not exposed to visitors.
 				...(owner ? { received: f.received } : {}),
@@ -261,6 +275,8 @@ export default function shares(router) {
 	// ---- Finalize ----------------------------------------------------------
 
 	router.post('/api/shares/:id/finalize', ctx => {
+		const limited = enforce(`finalize:${ctx.params.id}`, ctx.ip, 60, 60_000);
+		if (limited) return limited;
 		const share = liveShare(ctx.params.id);
 		if (!share) return error(404, 'Not found');
 		if (!isOwner(ctx.req, share)) return error(403, 'Forbidden');
@@ -278,6 +294,8 @@ export default function shares(router) {
 	// ---- Delete (owner or admin) -------------------------------------------
 
 	router.delete('/api/shares/:id', async ctx => {
+		const limited = enforce(`delete:${ctx.params.id}`, ctx.ip, 60, 60_000);
+		if (limited) return limited;
 		const share = liveShare(ctx.params.id);
 		if (!share) return error(404, 'Not found');
 		if (!isOwner(ctx.req, share) && !isAdmin(ctx.req)) return error(403, 'Forbidden');

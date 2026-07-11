@@ -13,25 +13,33 @@
 // Everything is validated server-side and the same per-file/per-share/total
 // storage caps apply as the web portal.
 
+import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { json, error, requestOrigin, cookie, clearCookie, requestScheme } from '../lib/http.js';
-import { hashPassword } from '../lib/crypto.js';
+import { hashPassword, hashSecretToken } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
 import { writeChunk, totalUsage, deleteShareFiles } from '../lib/storage.js';
 import { newIv } from '../lib/filecrypt.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
-import { enforce } from '../lib/ratelimit.js';
+import { enforce, enforceKey } from '../lib/ratelimit.js';
 import { slugError } from '../lib/slug.js';
-import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE } from '../lib/apikeys.js';
+import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow } from '../lib/apikeys.js';
 
-const getShareById = db.query('SELECT id FROM shares WHERE id = ?');
+// lower(id) so a slug can never collide-by-case with an existing one (the
+// on-disk share directory is effectively case-insensitive on some
+// filesystems). Includes soft-deleted rows too - a key can reuse a slug it
+// just deleted (the delete-then-recreate backup rotation flow), but the old
+// row still holds the id's PRIMARY KEY slot, so createShare below must clear
+// it before inserting rather than just checking deleted_at IS NULL here.
+const getShareById = db.query('SELECT id, deleted_at FROM shares WHERE lower(id) = lower(?)');
+const hardDeleteShare = db.query('DELETE FROM shares WHERE id = ?');
 const insertShare = db.query(
 	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e, api_key_id)
 	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
 );
 const insertFile = db.query(
-	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)',
+	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',
 );
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
 const softDeleteShare = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
@@ -40,7 +48,7 @@ const softDeleteShare = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?'
 // expiry is NOT applied here so a key can still inspect/delete an expired-but-not-
 // yet-swept share it created.
 const getOwnedShare = db.query('SELECT * FROM shares WHERE id = ? AND api_key_id = ? AND deleted_at IS NULL');
-const getShareFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, created_at FROM files WHERE share_id = ? ORDER BY created_at ASC, id ASC');
+const getShareFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, created_at, sha256 FROM files WHERE share_id = ? ORDER BY created_at ASC, id ASC');
 
 // Map a share row to the API shape, with a built download/share URL.
 function shareView(s, origin, files) {
@@ -69,6 +77,7 @@ function shareView(s, origin, files) {
 						mime: f.mime,
 						complete: !!f.complete,
 						downloadCount: f.download_count,
+						sha256: f.sha256,
 						// Ready-to-use retrieval URL (authorize with this same API key).
 						download: `${origin}/api/shares/${s.id}/files/${f.id}/download`,
 					})),
@@ -146,28 +155,63 @@ function scopeError(key, opts) {
 	return null;
 }
 
-// Insert a share row attributed to `key`. Returns { id, editToken } or
-// { conflict } when a requested slug is already taken. Applies the key's max
-// share lifetime to the expiry.
+// Insert a share row attributed to `key`. Returns { id, editToken }, { conflict }
+// when a requested slug is already taken, or { limited } when the key has hit
+// its share cap. Applies the key's max share lifetime to the expiry.
+//
+// All async work (password hashing) happens BEFORE the transaction below.
+// The slug-conflict recheck, the fresh max_shares check, the share insert, and
+// the key's usage-tally bump then run inside one synchronous db.transaction():
+// since nothing in that block awaits, no other request's continuation can
+// interleave with it, which is what closes the race where concurrent requests
+// on the same key all pass a stale upload_count snapshot and all succeed past
+// max_shares. CONFLICT/LIMITED are thrown as sentinels so the transaction rolls
+// back automatically (bun:sqlite semantics) instead of leaving a partial row.
 async function createShare(ctx, key, opts) {
-	let id;
-	if (opts.slug) {
-		if (getShareById.get(opts.slug)) return { conflict: 'That custom link is already taken' };
-		id = opts.slug;
-	} else {
-		id = newShareId();
-	}
-
 	const expiresAt = clampExpiry(key, opts.expiresAt);
 	const passwordHash = opts.passwordPlain ? await hashPassword(opts.passwordPlain) : null;
 	const editToken = newToken();
 	const ua = (ctx.req.headers.get('user-agent') || `API key: ${key.name}`).slice(0, 512);
 
-	insertShare.run(id, opts.title, now(), expiresAt, passwordHash, opts.maxDownloads, opts.oneTime, editToken, ctx.ip ?? null, ua, key.id);
-	// Lifetime stats (persist past deletion), plus the per-key tally.
+	const CONFLICT = { conflict: 'That custom link is already taken' };
+	const LIMITED = { limited: 'This key has reached its share limit' };
+
+	const attempt = db.transaction(() => {
+		let id;
+		if (opts.slug) {
+			const existing = getShareById.get(opts.slug);
+			if (existing) {
+				if (existing.deleted_at == null) throw CONFLICT;
+				// Soft-deleted row squatting on this id: its files were already
+				// removed from disk when it was deleted, so hard-delete the stale
+				// row (cascades to any leftover file rows) to free the slug up
+				// for the insert below instead of hitting a PRIMARY KEY collision.
+				hardDeleteShare.run(existing.id);
+			}
+			id = opts.slug;
+		} else {
+			id = newShareId();
+		}
+
+		const fresh = apiKeyRow(key.id);
+		if (fresh && fresh.max_shares != null && fresh.upload_count >= fresh.max_shares) throw LIMITED;
+
+		insertShare.run(id, opts.title, now(), expiresAt, passwordHash, opts.maxDownloads, opts.oneTime, hashSecretToken(editToken), ctx.ip ?? null, ua, key.id);
+		recordKeyUsage(key.id, { shares: 1 });
+		return id;
+	});
+
+	let id;
+	try {
+		id = attempt();
+	} catch (e) {
+		if (e === CONFLICT || e === LIMITED) return e;
+		throw e;
+	}
+
+	// Lifetime stats (persist past deletion); not part of the atomic check.
 	bumpMetric('shares_created');
 	bumpUploader(ctx.ip, { shares: 1 });
-	recordKeyUsage(key.id, { shares: 1 });
 
 	return { id, editToken };
 }
@@ -205,6 +249,8 @@ export default function apiV1(router) {
 	router.get('/api/v1/me', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const limited = enforceKey('api-me', key.id, 60, 60000);
+		if (limited) return limited;
 		return json({
 			id: key.id,
 			name: key.name,
@@ -220,7 +266,7 @@ export default function apiV1(router) {
 	router.post('/api/v1/shares', async ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
-		const limited = enforce(`api-create:${key.id}`, ctx.ip, 120, 10 * 60 * 1000);
+		const limited = enforceKey('api-create', key.id, 120, 10 * 60 * 1000);
 		if (limited) return limited;
 
 		const body = (await readJson(ctx.req)) || {};
@@ -232,6 +278,7 @@ export default function apiV1(router) {
 
 		const made = await createShare(ctx, key, parsed.values);
 		if (made.conflict) return error(409, made.conflict);
+		if (made.limited) return error(403, made.limited);
 
 		// Advertise the caps this key actually operates under, so the client sizes
 		// its chunks/files correctly.
@@ -257,7 +304,7 @@ export default function apiV1(router) {
 	router.post('/api/v1/upload', async ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
-		const limited = enforce(`api-upload:${key.id}`, ctx.ip, 120, 10 * 60 * 1000);
+		const limited = enforceKey('api-upload', key.id, 120, 10 * 60 * 1000);
 		if (limited) return limited;
 
 		const q = ctx.query;
@@ -283,6 +330,19 @@ export default function apiV1(router) {
 		// caps BEFORE creating any rows, so a rejected upload leaves nothing behind.
 		// The key's own per-file/per-share caps apply on top of the server limits.
 		const caps = effectiveCaps(key);
+
+		// Reject an oversized body from the declared Content-Length BEFORE
+		// buffering it into memory, so a key scoped to a tiny size cap cannot
+		// still force the server to read up to the server-wide request-body
+		// limit on every call (same idiom as the PATCH chunk-upload precheck in
+		// uploads.js). Clients that omit/misreport Content-Length still get
+		// caught by the actual-size checks below.
+		const declaredLen = Number(ctx.req.headers.get('content-length'));
+		if (Number.isFinite(declaredLen)) {
+			if (declaredLen > caps.maxFileSize) return error(413, 'File exceeds this key\'s per-file size limit');
+			if (declaredLen > caps.maxShareSize) return error(413, 'File exceeds this key\'s per-share size limit');
+		}
+
 		const buf = new Uint8Array(await ctx.req.arrayBuffer());
 		const size = buf.length;
 		if (size === 0) return error(400, 'Empty request body');
@@ -291,9 +351,11 @@ export default function apiV1(router) {
 		if (config.maxTotalSize > 0 && (await totalUsage()) + size > config.maxTotalSize) {
 			return error(413, 'Server storage limit reached');
 		}
+		const sha256 = createHash('sha256').update(buf).digest('hex');
 
 		const made = await createShare(ctx, key, parsed.values);
 		if (made.conflict) return error(409, made.conflict);
+		if (made.limited) return error(403, made.limited);
 
 		const fileId = newFileId();
 		const iv = newIv();
@@ -307,7 +369,7 @@ export default function apiV1(router) {
 			await deleteShareFiles(made.id).catch(() => {});
 			return error(500, 'Could not store the file');
 		}
-		insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv);
+		insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv, sha256);
 		setFinalized.run(made.id);
 
 		// File-completion stats (the chunked flow records these in uploads.js; the
@@ -333,6 +395,8 @@ export default function apiV1(router) {
 	router.get('/api/v1/shares', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const limited = enforceKey('api-list', key.id, 300, 60000);
+		if (limited) return limited;
 
 		const search = (ctx.query.get('search') || '').trim();
 		let limit = Number(ctx.query.get('limit'));
@@ -367,6 +431,8 @@ export default function apiV1(router) {
 	router.get('/api/v1/shares/:id', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const limited = enforceKey('api-get', key.id, 300, 60000);
+		if (limited) return limited;
 		const share = getOwnedShare.get(ctx.params.id, key.id);
 		if (!share) return error(404, 'Not found');
 		const files = getShareFiles.all(share.id);
@@ -377,6 +443,8 @@ export default function apiV1(router) {
 	router.delete('/api/v1/shares/:id', async ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const limited = enforceKey('api-delete', key.id, 60, 60000);
+		if (limited) return limited;
 		const share = getOwnedShare.get(ctx.params.id, key.id);
 		if (!share) return error(404, 'Not found');
 		softDeleteShare.run(now(), share.id);

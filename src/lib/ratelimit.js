@@ -11,7 +11,7 @@ const buckets = new Map(); // key -> { count, resetAt(ms) }
 
 // Hard ceiling on distinct buckets so a flood of unique keys (e.g. spoofed ids)
 // cannot grow the Map without bound and exhaust the heap.
-const MAX_BUCKETS = 50000;
+const MAX_BUCKETS = 200000;
 
 // Drop expired buckets, then if still over the ceiling evict the oldest entries
 // (Map preserves insertion order) to keep memory bounded.
@@ -44,6 +44,17 @@ export function hit(key, max, windowMs) {
 // ready-to-return 429 Response when the limit is exceeded.
 export function enforce(bucket, ip, max, windowMs) {
 	const r = hit(`${bucket}:${ip || 'unknown'}`, max, windowMs);
+	if (r.allowed) return null;
+	return new Response(JSON.stringify({ error: 'Too many requests. Please slow down.', retryAfter: r.retryAfter }), {
+		status: 429,
+		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': String(r.retryAfter), ...SECURITY_HEADERS },
+	});
+}
+
+// Same as enforce(), but for buckets keyed by a trusted, server-verified
+// identity (an API key id, a share id) rather than an attacker-controlled IP.
+export function enforceKey(bucket, id, max, windowMs) {
+	const r = hit(`${bucket}:${id || 'unknown'}`, max, windowMs);
 	if (r.allowed) return null;
 	return new Response(JSON.stringify({ error: 'Too many requests. Please slow down.', retryAfter: r.retryAfter }), {
 		status: 429,

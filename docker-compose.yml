@@ -16,7 +16,9 @@ services:
     ports:
       - "3300:3300"
     environment:
-      ADMIN_PASSWORD: change-me # admin panel login - change this
+      # Admin panel login. Must be set to a real password or the admin panel
+      # is locked out entirely (the app fails closed when this is empty).
+      ADMIN_PASSWORD: ""
       # Signs cookies/tokens and derives the at-rest encryption key. Generate
       # one with `openssl rand -hex 32`. Back it up - losing it makes
       # encrypted uploads unrecoverable. If left empty, an ephemeral one is

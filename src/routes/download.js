@@ -7,7 +7,7 @@
 import { db, now } from '../db.js';
 import { config } from '../config.js';
 import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/http.js';
-import { safeEqual } from '../lib/crypto.js';
+import { verifySecretToken } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
 import { verifyApiKey, readApiKey, readApiKeySession } from '../lib/apikeys.js';
 import { blobFile, blobPath, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
@@ -76,14 +76,14 @@ function liveShare(id) {
 // otherwise a password-gated share requires a valid per-share access token.
 function accessCheck(share, req, url) {
 	const editToken = req.headers.get('x-edit-token');
-	let owner = !!editToken && safeEqual(editToken, share.edit_token);
+	let owner = !!editToken && verifySecretToken(editToken, share.edit_token);
 	if (!owner && share.api_key_id) {
 		const key = verifyApiKey(readApiKey(req)) || readApiKeySession(req);
 		if (key && key.id === share.api_key_id) owner = true;
 	}
 	if (owner || !share.password_hash) return { ok: true, owner };
 	const token = readAccessToken(req, url);
-	if (token && hasAccessToken(token, share.id)) return { ok: true, owner };
+	if (token && hasAccessToken(token, share.id, share.password_hash)) return { ok: true, owner };
 	return { ok: false, owner };
 }
 
@@ -99,6 +99,28 @@ function recordDownload(shareId, fileId, ip, ua, creatorIp) {
 
 function limitReached(share) {
 	return share.max_downloads !== null && share.download_count >= share.max_downloads;
+}
+
+// Disambiguate a zip entry name against ones already used in the same archive
+// (two files can share a sanitized name), inserting " (2)", " (3)", ... before
+// the extension - most zip extractors silently keep only one of two identically
+// named entries, so a collision must never reach createZipStream.
+function uniqueZipName(name, used) {
+	if (!used.has(name)) {
+		used.add(name);
+		return name;
+	}
+	const dot = name.lastIndexOf('.');
+	const base = dot > 0 ? name.slice(0, dot) : name;
+	const ext = dot > 0 ? name.slice(dot) : '';
+	let candidate;
+	let i = 2;
+	do {
+		candidate = `${base} (${i})${ext}`;
+		i++;
+	} while (used.has(candidate));
+	used.add(candidate);
+	return candidate;
 }
 
 // Remove a one-time share's blobs once the in-flight response has finished. The
@@ -383,8 +405,9 @@ export default function download(router) {
 			});
 		}
 
+		const usedZipNames = new Set();
 		const entries = files.map(f => ({
-			name: f.name,
+			name: uniqueZipName(f.name, usedZipNames),
 			file: { stream: () => blobRangeStream(share.id, f.id, 0, f.size - 1, f.iv) },
 			size: f.size,
 		}));

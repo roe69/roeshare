@@ -35,7 +35,7 @@ export function isAdmin(req) {
 	const token = parseCookies(req)[ADMIN_COOKIE];
 	if (!token) return false;
 	const payload = verifyToken(token);
-	return !!payload && payload.role === 'admin' && payload.k === adminTag();
+	return !!payload && payload.role === 'admin' && safeEqual(payload.k, adminTag());
 }
 
 // ---- Upload gate -----------------------------------------------------------
@@ -59,7 +59,7 @@ export function hasUploadAccess(req) {
 	const token = parseCookies(req)[UPLOAD_COOKIE];
 	if (!token) return false;
 	const payload = verifyToken(token);
-	return !!payload && payload.scope === 'upload' && payload.k === uploadTag();
+	return !!payload && payload.scope === 'upload' && safeEqual(payload.k, uploadTag());
 }
 
 // A stable, shareable "quick access" token for instant upload login via a link
@@ -81,7 +81,7 @@ export function uploadLinkToken() {
 export function checkUploadLink(token) {
 	if (!config.uploadPassword || !token) return false;
 	const payload = verifyToken(token);
-	return !!payload && payload.scope === 'upload-link' && payload.k === uploadTag();
+	return !!payload && payload.scope === 'upload-link' && safeEqual(payload.k, uploadTag());
 }
 
 // ---- Per-share access ------------------------------------------------------
@@ -89,13 +89,15 @@ export function checkUploadLink(token) {
 // signed token scoped to that share id. The edit token (returned to the
 // uploader at creation) also grants access for management.
 
-export function issueAccessToken(shareId) {
-	return signToken({ scope: 'access', sid: shareId }, config.accessTokenTtl);
+export function issueAccessToken(shareId, passwordHash) {
+	const k = credentialTag(`access:${shareId}`, passwordHash || '');
+	return signToken({ scope: 'access', sid: shareId, k }, config.accessTokenTtl);
 }
 
-export function hasAccessToken(token, shareId) {
+export function hasAccessToken(token, shareId, passwordHash) {
 	const p = verifyToken(token);
-	return !!p && p.scope === 'access' && p.sid === shareId;
+	if (!p || p.scope !== 'access' || p.sid !== shareId) return false;
+	return safeEqual(p.k, credentialTag(`access:${shareId}`, passwordHash || ''));
 }
 
 // The access token may arrive via the Authorization: Bearer header or an

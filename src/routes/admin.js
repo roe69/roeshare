@@ -206,8 +206,10 @@ export default router => {
 
 	// ---- Edit (full field control) ----------------------------------------
 
-	router.patch('/api/admin/shares/:id', async ({ req, params }) => {
+	router.patch('/api/admin/shares/:id', async ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-share-edit', ip, 120, 60 * 1000);
+		if (limited) return limited;
 		const share = db.query('SELECT id FROM shares WHERE id = ?').get(params.id);
 		if (!share) return error(404, 'Not found');
 
@@ -289,8 +291,10 @@ export default router => {
 
 	// ---- Hard deletes -----------------------------------------------------
 
-	router.delete('/api/admin/shares/:id', async ({ req, params }) => {
+	router.delete('/api/admin/shares/:id', async ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-share-delete', ip, 120, 60 * 1000);
+		if (limited) return limited;
 
 		const share = db.query('SELECT id FROM shares WHERE id = ?').get(params.id);
 		if (!share) return error(404, 'Not found');
@@ -303,8 +307,10 @@ export default router => {
 		return json({ ok: true });
 	});
 
-	router.delete('/api/admin/shares/:id/files/:fileId', async ({ req, params }) => {
+	router.delete('/api/admin/shares/:id/files/:fileId', async ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-share-file-delete', ip, 120, 60 * 1000);
+		if (limited) return limited;
 
 		const file = db.query('SELECT id FROM files WHERE id = ? AND share_id = ?').get(params.fileId, params.id);
 		if (!file) return error(404, 'Not found');
@@ -418,8 +424,10 @@ export default router => {
 	});
 
 	// Edit a key's name and limits/scopes (does not touch the secret or expiry).
-	router.patch('/api/admin/api-keys/:id', async ({ req, params }) => {
+	router.patch('/api/admin/api-keys/:id', async ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-apikey-edit', ip, 120, 60 * 1000);
+		if (limited) return limited;
 		const body = await readBody(req);
 		const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
 		if (!name) return error(400, 'A name is required');
@@ -445,14 +453,18 @@ export default router => {
 		return json({ ...key, shares });
 	});
 
-	router.post('/api/admin/api-keys/:id/revoke', ({ req, params }) => {
+	router.post('/api/admin/api-keys/:id/revoke', ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-apikey-revoke', ip, 120, 60 * 1000);
+		if (limited) return limited;
 		if (!revokeApiKey(params.id)) return error(404, 'Not found');
 		return json({ ok: true });
 	});
 
-	router.post('/api/admin/api-keys/:id/reinstate', ({ req, params }) => {
+	router.post('/api/admin/api-keys/:id/reinstate', ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-apikey-reinstate', ip, 120, 60 * 1000);
+		if (limited) return limited;
 		if (!reinstateApiKey(params.id)) return error(404, 'Not found');
 		return json({ ok: true });
 	});
@@ -460,15 +472,19 @@ export default router => {
 	// Rotate a key's secret: the old token stops working at once and portal
 	// sessions bound to it are signed out. The new token is returned exactly once,
 	// like creation; afterwards only its hash exists.
-	router.post('/api/admin/api-keys/:id/rotate', ({ req, params }) => {
+	router.post('/api/admin/api-keys/:id/rotate', ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-apikey-rotate', ip, 120, 60 * 1000);
+		if (limited) return limited;
 		const made = rotateApiKey(params.id);
 		if (!made) return error(404, 'Not found');
 		return json({ id: made.id, name: made.name, token: made.token, prefix: made.prefix });
 	});
 
-	router.delete('/api/admin/api-keys/:id', ({ req, params }) => {
+	router.delete('/api/admin/api-keys/:id', ({ req, params, ip }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-apikey-delete', ip, 120, 60 * 1000);
+		if (limited) return limited;
 		if (!deleteApiKey(params.id)) return error(404, 'Not found');
 		return json({ ok: true });
 	});
@@ -529,9 +545,7 @@ export default router => {
 			console.error('settings write failed:', e);
 			return error(500, 'Could not save settings');
 		}
-		const warnings = [];
-		if (r.secretChanged) warnings.push('SECRET changed: after restart, all sessions and quick-access links are invalidated and existing encrypted uploads become permanently unreadable.');
-		return json({ ok: true, restartRequired: true, warnings });
+		return json({ ok: true, restartRequired: true, warnings: [] });
 	});
 
 	// Restart by exiting; a supervisor (Docker restart: unless-stopped, systemd)

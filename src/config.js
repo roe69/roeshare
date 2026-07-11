@@ -2,7 +2,8 @@
 // frozen config object. Bun auto-loads .env, so no dotenv dependency is needed.
 
 import { randomBytes } from 'node:crypto';
-import { resolve } from 'node:path';
+import { resolve, join } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { applyManagedSettings } from './lib/settings.js';
 import { addSecret } from './lib/logbuffer.js';
 
@@ -109,13 +110,33 @@ function buildBrandStyle() {
 }
 const brandStyle = buildBrandStyle();
 
-// A SECRET is mandatory for signing. If none is provided we generate an
-// ephemeral one and warn - sessions/tokens will not survive a restart.
+// A SECRET is mandatory for signing. If none is provided we generate one and
+// persist it to the data volume (.secret) so it survives restarts - sessions
+// and at-rest AES-256-CTR ciphertext would otherwise break on every reboot.
 let secret = str('SECRET');
 let ephemeralSecret = false;
 if (!secret) {
-	secret = randomBytes(32).toString('hex');
 	ephemeralSecret = true;
+	const secretPath = join(dataDir, '.secret');
+	try {
+		const existing = readFileSync(secretPath, 'utf8').trim();
+		if (existing) secret = existing;
+	} catch {}
+	if (!secret) {
+		secret = randomBytes(32).toString('hex');
+		mkdirSync(dataDir, { recursive: true });
+		writeFileSync(secretPath, secret, { mode: 0o600 });
+	}
+}
+
+// Refuse to boot with a well-known placeholder admin password - a real value
+// must be set via env or the data-volume admin-managed settings before the
+// panel is reachable. Checked after applyManagedSettings() so a placeholder
+// set through the admin panel is caught too.
+const adminPassword = str('ADMIN_PASSWORD');
+const PLACEHOLDER_PASSWORDS = new Set(['change-me', 'changeme', 'change_me', 'admin', 'password', 'admin123', 'root', 'default', '123456']);
+if (adminPassword && PLACEHOLDER_PASSWORDS.has(adminPassword.trim().toLowerCase())) {
+	throw new Error('ADMIN_PASSWORD is set to a well-known placeholder value, set a real one via env or the data volume settings before starting RoeShare.');
 }
 
 export const config = Object.freeze({
@@ -130,7 +151,7 @@ export const config = Object.freeze({
 	baseUrls,
 	allowedHosts,
 
-	adminPassword: str('ADMIN_PASSWORD'),
+	adminPassword,
 	uploadPassword: str('UPLOAD_PASSWORD'),
 	secret,
 	ephemeralSecret,
@@ -146,7 +167,11 @@ export const config = Object.freeze({
 	// Only honor X-Forwarded-For / X-Real-IP when behind a trusted reverse proxy.
 	// When false (the default for a directly-exposed server), rate-limit and audit
 	// keys use the real socket peer so a client cannot spoof its identity.
-	trustProxy: bool('TRUST_PROXY', false),
+	trustProxy: (() => {
+		const v = bool('TRUST_PROXY', false);
+		if (v) console.log('  NOTE: TRUST_PROXY=1 - only set this when the app is unreachable except via a trusted reverse proxy.');
+		return v;
+	})(),
 
 	// Reverse-proxy byte-serving offload. When set, the preview endpoint hands
 	// blobs that need no server-side decryption (E2E shares, or any file when
@@ -182,6 +207,10 @@ export const config = Object.freeze({
 	// Caps that bound per-share metadata growth and abusive inputs.
 	maxFilesPerShare: int('MAX_FILES_PER_SHARE', 10000),
 	maxPasswordLength: int('MAX_PASSWORD_LENGTH', 1024),
+
+	// Default lifetime share cap applied to a new API key when it isn't given
+	// an explicit max_shares.
+	defaultKeyMaxShares: int('DEFAULT_KEY_MAX_SHARES', 1000),
 
 	defaultExpiry: int('DEFAULT_EXPIRY', 7 * 24 * 3600),
 	sweepInterval: int('SWEEP_INTERVAL', 3600),

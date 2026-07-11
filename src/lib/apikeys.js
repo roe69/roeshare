@@ -15,7 +15,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { randomId } from './ids.js';
-import { signToken, verifyToken, credentialTag } from './crypto.js';
+import { signToken, verifyToken, credentialTag, safeEqual } from './crypto.js';
 import { parseCookies } from './http.js';
 
 const KEY_PREFIX = 'rsk';
@@ -108,7 +108,7 @@ export function sanitizeLimits(src = {}) {
 	if (v && v.error) return v;
 	out.max_share_size = v;
 
-	out.max_shares = null;
+	out.max_shares = config.defaultKeyMaxShares;
 	if (src.maxShares !== undefined && src.maxShares !== null && src.maxShares !== '') {
 		const n = Number(src.maxShares);
 		if (!Number.isFinite(n) || n < 0 || !Number.isInteger(n)) return { error: 'Invalid max shares' };
@@ -192,7 +192,7 @@ export function readApiKeySession(req) {
 	const row = getKey.get(p.kid);
 	if (!row || row.revoked_at != null) return null;
 	if (row.expires_at != null && row.expires_at < now()) return null;
-	if (p.k !== keyTag(row.key_hash)) return null; // secret rotated -> session invalidated
+	if (!safeEqual(p.k, keyTag(row.key_hash))) return null; // secret rotated -> session invalidated
 	return row;
 }
 

@@ -52,7 +52,8 @@ db.exec(`
 		download_count INTEGER NOT NULL DEFAULT 0,
 		created_at    INTEGER NOT NULL,
 		stored_name   TEXT NOT NULL,           -- on-disk blob name (== id), never the original
-		iv            TEXT                     -- at-rest AES-CTR IV; null = stored as plaintext / E2E
+		iv            TEXT,                    -- at-rest AES-CTR IV; null = stored as plaintext / E2E
+		sha256        TEXT                     -- content digest of the plaintext; null until upload completes
 	);
 
 	CREATE TABLE IF NOT EXISTS download_events (

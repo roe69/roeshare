@@ -17,8 +17,8 @@ export function randomId(length = 12) {
 			if (bi >= bytes.length) {
 				// Extremely unlikely top-up.
 				const more = randomBytes(length);
-				for (let j = 0; j < more.length; j++) bytes[bi % bytes.length] = more[j];
 				bi = 0;
+				for (let j = 0; j < more.length; j++) bytes[j] = more[j];
 			}
 			b = bytes[bi++];
 		} while (b >= 256 - (256 % ALPHABET.length));

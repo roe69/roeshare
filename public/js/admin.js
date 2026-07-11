@@ -1562,8 +1562,6 @@ const SETTING_HINTS = {
 	CHUNK_SIZE: 'Advanced. Leave the default.',
 	DEFAULT_EXPIRY: '0 means never.',
 	SWEEP_INTERVAL: 'Disk cleanup cadence. Expired shares stop being served immediately either way.',
-	ADMIN_PASSWORD: 'Blank keeps the current one.',
-	UPLOAD_PASSWORD: 'Blank keeps it; tick Clear for open uploads.',
 };
 const SETTING_LABELS = {
 	MAX_FILE_SIZE: 'Max file size',
@@ -1688,10 +1686,34 @@ function envRow(f) {
 	);
 }
 
+// SECRET, ADMIN_PASSWORD, and UPLOAD_PASSWORD are environment/data-volume-only
+// (a panel-managed SECRET living next to the encrypted blobs it protects would
+// defeat the point of encrypting them) - the backend no longer allowlists them
+// for editing and no longer returns them in `fields`, so this list is static
+// rather than driven by the settings response. Rendered as a locked row
+// regardless, so the field never just silently disappears from the page.
+const LOCKED_SECURITY_FIELDS = [
+	{ key: 'ADMIN_PASSWORD', label: 'Admin password' },
+	{ key: 'UPLOAD_PASSWORD', label: 'Upload password' },
+	{ key: 'SECRET', label: 'Secret (signing + encryption key)' },
+];
+
+function lockedSecurityRow(key, label, data) {
+	let note = 'Set via environment - not editable here';
+	if (key === 'SECRET' && data.ephemeralSecret) note = 'Not set (ephemeral) - not editable here';
+	if (key === 'UPLOAD_PASSWORD' && !data.uploadPasswordSet) note = 'Not set (open uploads) - not editable here';
+	return el('div', { class: 'rl-kv-row', dataset: { settingKey: key } },
+		el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:flex-start;gap:var(--rl-space-3)' },
+			el('span', { class: 'rl-label', style: 'margin:0' }, label),
+			el('span', { class: 'rl-mono rl-dim', style: 'text-align:right' }, '********'),
+		),
+		el('p', { class: 'rl-help rl-dim', style: 'margin:0' }, note),
+	);
+}
+
 async function saveSettings(inputs, saveBtn, banner) {
 	const values = {};
 	const clear = [];
-	let secretChange = false;
 	for (const [key, meta] of inputs) {
 		if (meta.type === 'bool') {
 			values[key] = meta.input.checked ? '1' : '0';
@@ -1699,48 +1721,22 @@ async function saveSettings(inputs, saveBtn, banner) {
 			values[key] = String(meta.getBytes());
 		} else if (meta.type === 'secret') {
 			if (meta.clearBox && meta.clearBox.checked) clear.push(key);
-			else if (meta.input.value) {
-				values[key] = meta.input.value;
-				if (key === 'SECRET') secretChange = true;
-			}
+			else if (meta.input.value) values[key] = meta.input.value;
 		} else if (meta.input.value !== '') {
 			values[key] = meta.input.value;
 		}
 	}
 
-	const send = async confirmSecretChange => {
-		saveBtn.disabled = true;
-		try {
-			const res = await api.put('/api/admin/settings', { values, clear, confirmSecretChange });
-			toastOk('Saved - restart to apply');
-			banner.classList.remove('rl-hidden');
-			(res.warnings || []).forEach(w => toast(w, 'error', 8000));
-		} catch (err) {
-			toastErr(err);
-		} finally {
-			saveBtn.disabled = false;
-		}
-	};
-
-	if (secretChange) {
-		openModal({
-			title: 'Change SECRET?',
-			body: el('div', { class: 'rl-stack' },
-				el('p', {}, 'Changing SECRET will:'),
-				el('ul', { style: 'margin:0;padding-left:var(--rl-space-5)' },
-					el('li', {}, 'log out every admin session'),
-					el('li', {}, 'invalidate every quick-access link'),
-					el('li', {}, 'permanently break decryption of ALL existing uploads'),
-				),
-				el('p', { class: 'rl-text-danger' }, 'This cannot be undone.'),
-			),
-			actions: [
-				{ label: 'Cancel', variant: 'ghost' },
-				{ label: 'Change SECRET', variant: 'danger', onClick: () => send(true) },
-			],
-		});
-	} else {
-		await send(false);
+	saveBtn.disabled = true;
+	try {
+		const res = await api.put('/api/admin/settings', { values, clear });
+		toastOk('Saved - restart to apply');
+		banner.classList.remove('rl-hidden');
+		(res.warnings || []).forEach(w => toast(w, 'error', 8000));
+	} catch (err) {
+		toastErr(err);
+	} finally {
+		saveBtn.disabled = false;
 	}
 }
 
@@ -1829,9 +1825,8 @@ function renderServer() {
 	const GROUPS = [
 		{ title: 'General', keys: ['BASE_URL', 'APP_NAME', 'TRUST_PROXY'] },
 		{ title: 'Limits', keys: ['MAX_FILE_SIZE', 'MAX_SHARE_SIZE', 'MAX_TOTAL_SIZE', 'CHUNK_SIZE', 'MAX_FILES_PER_SHARE', 'MAX_PASSWORD_LENGTH', 'DEFAULT_EXPIRY', 'SWEEP_INTERVAL'] },
-		{ title: 'Security', keys: ['ADMIN_PASSWORD', 'UPLOAD_PASSWORD', 'SECRET'] },
 	];
-	const COLSPAN = new Set(['BASE_URL', 'SECRET']);
+	const COLSPAN = new Set(['BASE_URL']);
 
 	// One card per group: env-managed fields first as a quiet read-only list,
 	// then the editable fields in the usual two-column grid. Env-managed fields
@@ -1872,6 +1867,13 @@ function renderServer() {
 			// Anything not in a known group still shows, so a field can never vanish.
 			const extra = data.fields.filter(f => !used.has(f.key));
 			if (extra.length) cards.push(card('Other', extra));
+
+			// Security fields are environment/data-volume-only - never part of
+			// `data.fields` - so this card is built from the static list, not GROUPS.
+			cards.push(el('div', { class: 'rl-card rl-stack' },
+				el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Security'),
+				el('div', { class: 'rl-kv' }, ...LOCKED_SECURITY_FIELDS.map(f => lockedSecurityRow(f.key, f.label, data))),
+			));
 			cardsHost.replaceChildren(...cards);
 
 			// The quick-access upload link sits with the upload password it depends
