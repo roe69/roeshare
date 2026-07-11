@@ -214,6 +214,31 @@ const schema = {
 		created_at: 'INTEGER NOT NULL',
 		updated_at: 'INTEGER NOT NULL',
 	},
+	// F-13: admin TOTP MFA. Single-operator -> single row, CHECK(id=1) mirrors
+	// storage_ledger. `secret` is set ONLY once enrollment is confirmed - its
+	// presence is what "MFA enabled" means (row absent, or secret NULL, means
+	// disabled); pending_secret is an in-progress enrollment never consulted by
+	// login. last_used_step is the replay guard: the highest TOTP step accepted
+	// so far, persisted across requests/restarts. See lib/mfa.js.
+	admin_mfa: {
+		id:                 'INTEGER PRIMARY KEY CHECK (id = 1)',
+		secret:             'TEXT',
+		pending_secret:     'TEXT',
+		pending_created_at: 'INTEGER',
+		enabled_at:         'INTEGER', // also feeds auth.js's adminTag() - toggling MFA invalidates outstanding admin sessions
+		last_used_step:     'INTEGER NOT NULL DEFAULT 0',
+	},
+	// One row per still-valid (unused) TOTP recovery code. Only a hash is ever
+	// stored (hashSecretToken, same as edit tokens / API-key secrets) - the
+	// plaintext exists only in the one-time response when a set is minted. A
+	// used code is kept (used_at set) rather than deleted, so "N remaining" can
+	// be reported without a separate counter.
+	admin_backup_codes: {
+		id:         'INTEGER PRIMARY KEY AUTOINCREMENT',
+		code_hash:  'TEXT NOT NULL',
+		created_at: 'INTEGER NOT NULL',
+		used_at:    'INTEGER',
+	},
 };
 
 for (const [table, columns] of Object.entries(schema)) {

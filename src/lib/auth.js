@@ -9,17 +9,25 @@
 // ADMIN_PASSWORD / UPLOAD_PASSWORD (which takes effect on the next restart)
 // invalidates all outstanding sessions - a leaked or stale cookie stops working
 // without needing a full SECRET rotation.
+//
+// F-13: the admin fingerprint also folds in mfa.js's mfaEnabledAt(), so
+// enabling or disabling TOTP MFA changes the fingerprint too - every
+// outstanding admin cookie (and any intermediate MFA cookie, which carries the
+// same fingerprint) is invalidated the moment MFA is toggled, with no new
+// invalidation machinery needed.
 
 import { config } from '../config.js';
 import { signToken, verifyToken, safeEqual, credentialTag } from './crypto.js';
 import { parseCookies } from './http.js';
+import { mfaEnabledAt } from './mfa.js';
 
 export const ADMIN_COOKIE = 'roeshare_admin';
+export const ADMIN_MFA_COOKIE = 'roeshare_admin_mfa';
 export const UPLOAD_COOKIE = 'roeshare_upload';
 
 // ---- Admin -----------------------------------------------------------------
 
-const adminTag = () => credentialTag('admin', config.adminPassword);
+const adminTag = () => credentialTag('admin', `${config.adminPassword}\0mfa:${mfaEnabledAt() ?? 0}`);
 
 export function checkAdminPassword(password) {
 	if (!config.adminPassword) return false; // admin disabled when unset
@@ -36,6 +44,25 @@ export function isAdmin(req) {
 	if (!token) return false;
 	const payload = verifyToken(token);
 	return !!payload && payload.role === 'admin' && safeEqual(payload.k, adminTag());
+}
+
+// ---- Admin MFA step-up (intermediate cookie) --------------------------------
+// Issued after the password check passes when MFA is enabled, in place of the
+// real admin cookie, so a correct password alone never grants a session. Short
+// (5 minute) TTL; carries the same adminTag() fingerprint as the real admin
+// cookie, so it is invalidated the instant MFA is toggled too.
+
+const ADMIN_MFA_TTL = 5 * 60;
+
+export function issueAdminMfaToken() {
+	return signToken({ role: 'admin-mfa', k: adminTag() }, ADMIN_MFA_TTL);
+}
+
+export function checkAdminMfaToken(req) {
+	const token = parseCookies(req)[ADMIN_MFA_COOKIE];
+	if (!token) return false;
+	const payload = verifyToken(token);
+	return !!payload && payload.role === 'admin-mfa' && safeEqual(payload.k, adminTag());
 }
 
 // ---- Upload gate -----------------------------------------------------------

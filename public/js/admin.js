@@ -1836,6 +1836,228 @@ function uploadLinkControl() {
 	return host;
 }
 
+// ===========================================================================
+// Two-factor authentication (F-13)
+// ===========================================================================
+
+// A grid of backup codes plus copy-all / download actions, shared by the
+// enrollment-confirm and regenerate flows (the only two moments the plaintext
+// codes ever exist).
+function backupCodesBody(codes, note) {
+	const grid = el('div', {
+		class: 'rl-mono',
+		style: 'display:grid;grid-template-columns:1fr 1fr;gap:var(--rl-space-1) var(--rl-space-4);padding:var(--rl-space-3);background:var(--rl-bg-tertiary);border-radius:var(--rl-radius-md)',
+	}, ...codes.map(c => el('span', {}, c)));
+
+	const copyAllBtn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', type: 'button' }, 'Copy all');
+	copyAllBtn.addEventListener('click', () => copyText(codes.join('\n')));
+
+	const downloadBtn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', type: 'button' }, 'Download .txt');
+	downloadBtn.addEventListener('click', () => {
+		const url = URL.createObjectURL(new Blob([codes.join('\n') + '\n'], { type: 'text/plain' }));
+		const a = el('a', { href: url, download: 'roeshare-backup-codes.txt' });
+		document.body.append(a);
+		a.click();
+		a.remove();
+		setTimeout(() => URL.revokeObjectURL(url), 1000);
+	});
+
+	return el('div', { class: 'rl-stack' },
+		note ? el('div', { class: 'rl-alert rl-alert-warning' }, note) : false,
+		grid,
+		el('div', { class: 'rl-row' }, copyAllBtn, downloadBtn),
+	);
+}
+
+// Step 1 of enabling MFA: fetch a pending secret, show its QR/manual-entry
+// form, and confirm with a current code. On success the session this ran in
+// is invalidated by the server (adminTag() folds in mfaEnabledAt(), which
+// just changed) - so the confirmation modal sends the operator to /login to
+// sign back in with the new password+code flow, rather than pretending the
+// panel is still usable.
+async function openMfaEnrollModal() {
+	let setup;
+	try {
+		setup = await api.post('/api/admin/mfa/setup', {});
+	} catch (err) {
+		toastErr(err);
+		return;
+	}
+
+	const qrFrame = el('div', { class: 'rl-qr-frame' });
+	import('/js/qrcode.js').then(({ makeQrSvg }) => {
+		try {
+			qrFrame.innerHTML = makeQrSvg(setup.otpauth, { border: 1 });
+		} catch {
+			/* no QR - the manual-entry secret below still works */
+		}
+	});
+
+	const copySecretBtn = el('button', { class: 'rl-btn rl-btn-secondary', type: 'button' }, 'Copy');
+	copySecretBtn.addEventListener('click', () => copyText(setup.secret));
+	const secretField = el('div', { class: 'rl-copyfield' },
+		el('div', { class: 'rl-copyfield-url', title: setup.secret }, setup.secret),
+		copySecretBtn,
+	);
+
+	const codeInput = el('input', { class: 'rl-input', type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '000000', maxlength: '6' });
+
+	openModal({
+		title: 'Enable two-factor authentication',
+		body: el('div', { class: 'rl-stack' },
+			el('p', { class: 'rl-muted' }, 'Scan this with an authenticator app (Google Authenticator, 1Password, Authy, ...), or enter the secret manually.'),
+			qrFrame,
+			editField('Secret (manual entry)', secretField),
+			editField('6-digit code', codeInput, 'Enter the current code from your authenticator app to confirm.'),
+		),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Enable', variant: 'primary', onClick: async () => {
+					const code = codeInput.value.trim();
+					if (!/^\d{6}$/.test(code)) {
+						toastErr('Enter the 6-digit code');
+						return true; // keep this modal open
+					}
+					let res;
+					try {
+						res = await api.post('/api/admin/mfa/confirm', { code });
+					} catch (err) {
+						toastErr(err);
+						return true;
+					}
+					openModal({
+						title: 'Two-factor authentication enabled',
+						body: backupCodesBody(res.backupCodes, 'Save these backup codes now - each works once if you lose access to your authenticator, and they will not be shown again. You will be signed out to confirm the new sign-in flow.'),
+						actions: [{ label: 'Continue to sign in', variant: 'primary' }],
+						onClose: () => { location.href = '/login'; },
+					});
+				},
+			},
+		],
+	});
+	codeInput.focus();
+}
+
+function openMfaRegenerateModal() {
+	const codeInput = el('input', { class: 'rl-input', type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '000000', maxlength: '6' });
+	openModal({
+		title: 'Regenerate backup codes',
+		body: el('div', { class: 'rl-stack' },
+			el('p', { class: 'rl-muted' }, 'This replaces every existing backup code - the old ones stop working immediately. Enter a current authenticator code to confirm.'),
+			editField('6-digit code', codeInput),
+		),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Regenerate', variant: 'primary', onClick: async () => {
+					const code = codeInput.value.trim();
+					if (!/^\d{6}$/.test(code)) {
+						toastErr('Enter the 6-digit code');
+						return true;
+					}
+					let res;
+					try {
+						res = await api.post('/api/admin/mfa/backup-codes', { code });
+					} catch (err) {
+						toastErr(err);
+						return true;
+					}
+					openModal({
+						title: 'New backup codes',
+						body: backupCodesBody(res.backupCodes, 'Save these now - the old codes no longer work and these will not be shown again.'),
+						actions: [{ label: 'Done', variant: 'primary' }],
+					});
+				},
+			},
+		],
+	});
+	codeInput.focus();
+}
+
+// Requires the password AND a current code/backup code, same as the server -
+// a stolen admin cookie alone can never get here. Also ends the session (see
+// openMfaEnrollModal's comment), so this redirects to /login on success too.
+function openMfaDisableModal() {
+	const passwordInput = el('input', { class: 'rl-input', type: 'password', autocomplete: 'current-password', placeholder: 'Admin password' });
+	const codeInput = el('input', { class: 'rl-input', type: 'text', autocomplete: 'one-time-code', placeholder: '6-digit code, or a backup code' });
+	openModal({
+		title: 'Disable two-factor authentication',
+		body: el('div', { class: 'rl-stack' },
+			el('p', { class: 'rl-muted' }, 'Confirm your password and a current authenticator code (or an unused backup code).'),
+			editField('Password', passwordInput),
+			editField('Code', codeInput),
+		),
+		actions: [
+			{ label: 'Cancel', variant: 'ghost' },
+			{
+				label: 'Disable', variant: 'danger', onClick: async () => {
+					const password = passwordInput.value;
+					const code = codeInput.value.trim();
+					if (!password || !code) {
+						toastErr('Enter your password and a code');
+						return true;
+					}
+					try {
+						await api.post('/api/admin/mfa/disable', { password, code });
+					} catch (err) {
+						toastErr(err);
+						return true;
+					}
+					toastOk('Two-factor authentication disabled - sign in again');
+					location.href = '/login';
+				},
+			},
+		],
+	});
+	passwordInput.focus();
+}
+
+function mfaCard() {
+	const body = el('div', { class: 'rl-stack' }, panelSpinner());
+	const card = el('div', { class: 'rl-card rl-stack' },
+		el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Two-factor authentication'),
+		body,
+	);
+
+	const load = async () => {
+		let data;
+		try {
+			data = await api.get('/api/admin/mfa');
+		} catch {
+			body.replaceChildren(el('p', { class: 'rl-dim' }, 'Could not load two-factor status.'));
+			return;
+		}
+
+		const statusBadge = el('span', { class: `rl-badge ${data.enabled ? 'rl-badge-success' : 'rl-badge-neutral'}` }, data.enabled ? 'Enabled' : 'Not enabled');
+		const statusRow = el('div', { class: 'rl-row', style: 'justify-content:space-between;align-items:center' }, statusBadge);
+
+		if (!data.enabled) {
+			const enableBtn = el('button', { class: 'rl-btn rl-btn-primary' }, 'Enable two-factor authentication');
+			enableBtn.addEventListener('click', () => openMfaEnrollModal());
+			body.replaceChildren(
+				el('p', { class: 'rl-help' }, 'Require a 6-digit authenticator code, in addition to the password, to sign in to this panel.'),
+				statusRow,
+				enableBtn,
+			);
+		} else {
+			const n = data.backupCodesRemaining;
+			const regenBtn = el('button', { class: 'rl-btn rl-btn-secondary' }, 'Regenerate backup codes');
+			regenBtn.addEventListener('click', () => openMfaRegenerateModal());
+			const disableBtn = el('button', { class: 'rl-btn rl-btn-danger' }, 'Disable');
+			disableBtn.addEventListener('click', () => openMfaDisableModal());
+			body.replaceChildren(
+				statusRow,
+				el('p', { class: 'rl-help' }, `${n} backup code${n === 1 ? '' : 's'} remaining.`),
+				el('div', { class: 'rl-row rl-row-wrap' }, regenBtn, disableBtn),
+			);
+		}
+	};
+	load();
+
+	return card;
+}
+
 function renderServer() {
 	const banner = el('div', { class: 'rl-alert rl-alert-warning rl-hidden' }, 'Saved. Restart to apply.');
 	const cardsHost = el('div', { class: 'rl-stack' }, panelSpinner());
@@ -1904,6 +2126,10 @@ function renderServer() {
 				el('h2', { class: 'rl-h2', style: 'font-size:var(--rl-text-lg)' }, 'Security'),
 				el('div', { class: 'rl-kv' }, ...LOCKED_SECURITY_FIELDS.map(f => lockedSecurityRow(f.key, f.label, data))),
 			));
+			// Two-factor auth (F-13) manages its own state via /api/admin/mfa - not
+			// part of the settings payload/save flow at all, so it is its own card
+			// with its own load, independent of loadSettings()'s success/failure.
+			cards.push(mfaCard());
 			cardsHost.replaceChildren(...cards);
 
 			// The quick-access upload link sits with the upload password it depends

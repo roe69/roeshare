@@ -8,10 +8,10 @@
 // F-08: the in-memory Map alone does not survive a restart (a redeploy wipes
 // every counter) and evicts oldest-first under a flood of unique keys (see
 // reclaim() below) - for most buckets that is an acceptable, deliberate
-// tradeoff (see MAX_BUCKETS' comment), but for the four credential
+// tradeoff (see MAX_BUCKETS' comment), but for the five credential
 // brute-force buckets it means a restart, or a flood of unrelated keys
 // crowding the Map, can silently reset an attacker's login/unlock counter.
-// Those four buckets get a synchronous SQLite write-through (see
+// Those five buckets get a synchronous SQLite write-through (see
 // PERSIST_PREFIXES) so their state survives both. Every other bucket is
 // unchanged: pure in-memory, zero disk I/O, zero behavior change.
 
@@ -19,10 +19,11 @@ import { SECURITY_HEADERS } from './http.js';
 import { db } from '../db.js';
 
 // Bucket-key prefixes (the exact strings enforce()/enforceKey() build - see
-// routes/admin.js login, routes/api.js /api/v1/login, routes/shares.js
-// /api/upload/verify and /api/shares/:id/unlock) that get persisted to
-// SQLite in addition to living in memory. Keep in sync with those call sites.
-const PERSIST_PREFIXES = ['admin-login:', 'apikey-login:', 'upload-verify:', 'unlock:'];
+// routes/admin.js login and login/mfa, routes/api.js /api/v1/login,
+// routes/shares.js /api/upload/verify and /api/shares/:id/unlock) that get
+// persisted to SQLite in addition to living in memory. Keep in sync with
+// those call sites.
+const PERSIST_PREFIXES = ['admin-login:', 'apikey-login:', 'upload-verify:', 'unlock:', 'admin-mfa:'];
 const isPersisted = key => PERSIST_PREFIXES.some(p => key.startsWith(p));
 
 // Persisted (credential brute-force) buckets vs everything else. Splitting

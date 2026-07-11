@@ -1,15 +1,20 @@
 // Admin API: session login/logout, share browsing, hard deletes, and dashboard
-// stats. Every endpoint except login/logout/me requires a valid admin cookie.
-// Every non-GET route (including login/logout) additionally requires
-// requireSameOrigin() to pass first (F-10 CSRF defense-in-depth: the admin
-// cookie is already SameSite=Lax, this rejects cross-site requests from old
-// browsers or same-site attackers too - see lib/http.js).
+// stats. Every endpoint except login/login-mfa/logout/me requires a valid
+// admin cookie. Every non-GET route (including login/logout) additionally
+// requires requireSameOrigin() to pass first (F-10 CSRF defense-in-depth: the
+// admin cookie is already SameSite=Lax, this rejects cross-site requests from
+// old browsers or same-site attackers too - see lib/http.js).
+//
+// F-13: when TOTP MFA is enabled (see lib/mfa.js), a correct password at
+// /login no longer issues the admin cookie - only a short-lived intermediate
+// cookie, exchanged for the real one at /login/mfa after a second factor
+// (TOTP or backup code) verifies. See lib/auth.js's adminTag()/ADMIN_MFA_COOKIE.
 
 import { existsSync } from 'node:fs';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, cookie, clearCookie, requestScheme, requestOrigin, requireSameOrigin } from '../lib/http.js';
-import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken } from '../lib/auth.js';
+import { json, error, cookie, clearCookie, requestScheme, requestOrigin, requireSameOrigin, SECURITY_HEADERS } from '../lib/http.js';
+import { ADMIN_COOKIE, ADMIN_MFA_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken, issueAdminMfaToken, checkAdminMfaToken } from '../lib/auth.js';
 import { deleteShareFiles, deleteBlob, totalUsage } from '../lib/storage.js';
 import { enforce, reset } from '../lib/ratelimit.js';
 import { acquire, overloaded } from '../lib/semaphore.js';
@@ -22,6 +27,10 @@ import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reins
 import * as quota from '../lib/quota.js';
 import { performShareRename, BUSY } from '../lib/renames.js';
 import { audit } from '../lib/audit.js';
+import {
+	mfaEnabled, pendingEnrollment, backupCodesRemaining, beginEnrollment, confirmEnrollment,
+	disableMfa, regenerateBackupCodes, verifyLoginCode, consumeBackupCode, verifyMfaCode,
+} from '../lib/mfa.js';
 
 // The editable settings keys mapped to their current effective (booted) values,
 // for pre-filling the editor. Secret keys are reported only as set/unset.
@@ -64,25 +73,149 @@ export default router => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
 		// Brute-force guard: 8 attempts per 5 minutes per IP. A successful login
-		// clears the counter so a legitimate admin is never locked out.
+		// clears the counter so a legitimate admin is never locked out. When MFA is
+		// enabled this bucket is only cleared once the SECOND factor also succeeds
+		// (see /api/admin/login/mfa below) - a correct password alone must not
+		// widen the password-guessing budget.
 		const limited = enforce('admin-login', ip, 8, 5 * 60 * 1000);
 		if (limited) return limited;
 
 		const { password } = await readBody(req);
 		if (!checkAdminPassword(password)) return error(403, 'Invalid password');
+
+		const secure = requestScheme(req, url, server) === 'https';
+
+		if (!mfaEnabled()) {
+			reset('admin-login', ip);
+			const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure });
+			return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
+		}
+
+		// MFA is enabled: the password alone is not enough. Issue a short-lived
+		// intermediate cookie (not the real admin session) and require a second
+		// step at /api/admin/login/mfa.
+		const setCookie = cookie(ADMIN_MFA_COOKIE, issueAdminMfaToken(), { maxAge: 5 * 60, httpOnly: true, sameSite: 'Lax', secure });
+		return json({ ok: true, mfaRequired: true }, { headers: { 'Set-Cookie': setCookie } });
+	});
+
+	// Second step of a login when MFA is enabled: a 6-digit TOTP code, or a
+	// backup code (any non-6-digit input is tried as one). Requires the
+	// intermediate cookie from a just-passed password check, not the real admin
+	// cookie - so it never grants anything on its own.
+	router.post('/api/admin/login/mfa', async ({ req, ip, url, server }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
+		const limited = enforce('admin-mfa', ip, 8, 5 * 60 * 1000);
+		if (limited) return limited;
+
+		if (!checkAdminMfaToken(req)) return error(403, 'Session expired, enter your password again');
+
+		const { code } = await readBody(req);
+		const isTotpShaped = /^\d{6}$/.test(String(code ?? ''));
+		const ok = isTotpShaped ? verifyLoginCode(code) : consumeBackupCode(code);
+		if (!ok) {
+			audit('admin.login.mfa_failure', { ip });
+			return error(403, 'Invalid code');
+		}
+
+		reset('admin-mfa', ip);
 		reset('admin-login', ip);
-		const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(req, url, server) === 'https' });
-		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
+		audit('admin.login.mfa_success', { ip });
+		if (!isTotpShaped) audit('admin.mfa.backup_code_used', { ip });
+
+		const secure = requestScheme(req, url, server) === 'https';
+		const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
+		headers.append('Set-Cookie', cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure }));
+		headers.append('Set-Cookie', clearCookie(ADMIN_MFA_COOKIE));
+		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
 	router.post('/api/admin/logout', async ({ req }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
-		return json({ ok: true }, { headers: { 'Set-Cookie': clearCookie(ADMIN_COOKIE) } });
+		const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
+		headers.append('Set-Cookie', clearCookie(ADMIN_COOKIE));
+		headers.append('Set-Cookie', clearCookie(ADMIN_MFA_COOKIE));
+		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
 	router.get('/api/admin/me', async ({ req }) => {
 		return json({ admin: isAdmin(req) });
+	});
+
+	// ---- MFA management (F-13) ---------------------------------------------
+
+	router.get('/api/admin/mfa', ({ req }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const enabled = mfaEnabled();
+		return json({ enabled, pendingSetup: pendingEnrollment(), backupCodesRemaining: enabled ? backupCodesRemaining() : 0 });
+	});
+
+	router.post('/api/admin/mfa/setup', ({ req, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-mfa-setup', ip, 20, 60 * 60 * 1000);
+		if (limited) return limited;
+		const { secret, otpauth } = beginEnrollment();
+		audit('admin.mfa.setup_started', { ip });
+		return json({ secret, otpauth });
+	});
+
+	router.post('/api/admin/mfa/confirm', async ({ req, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-mfa-confirm', ip, 10, 5 * 60 * 1000);
+		if (limited) return limited;
+		const { code } = await readBody(req);
+		const backupCodes = confirmEnrollment(code);
+		if (!backupCodes) {
+			audit('admin.mfa.confirm_failed', { ip });
+			return error(403, 'Invalid code');
+		}
+		audit('admin.mfa.enabled', { ip });
+		return json({ ok: true, backupCodes });
+	});
+
+	// Requires the admin PASSWORD (not just the ambient cookie) and a valid
+	// second factor (TOTP or backup code), so a hijacked admin cookie alone can
+	// never silently strip MFA off the account.
+	router.post('/api/admin/mfa/disable', async ({ req, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-mfa-disable', ip, 8, 5 * 60 * 1000);
+		if (limited) return limited;
+		const { password, code } = await readBody(req);
+		if (!checkAdminPassword(password)) {
+			audit('admin.mfa.disable_failed', { ip, reason: 'password' });
+			return error(403, 'Invalid password');
+		}
+		if (!verifyMfaCode(code)) {
+			audit('admin.mfa.disable_failed', { ip, reason: 'code' });
+			return error(403, 'Invalid code');
+		}
+		disableMfa();
+		audit('admin.mfa.disabled', { ip });
+		return json({ ok: true });
+	});
+
+	router.post('/api/admin/mfa/backup-codes', async ({ req, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-mfa-backup-codes', ip, 20, 60 * 60 * 1000);
+		if (limited) return limited;
+		if (!mfaEnabled()) return error(400, 'MFA is not enabled');
+		const { code } = await readBody(req);
+		if (!verifyLoginCode(code)) {
+			audit('admin.mfa.backup_codes_regen_failed', { ip });
+			return error(403, 'Invalid code');
+		}
+		const backupCodes = regenerateBackupCodes();
+		audit('admin.mfa.backup_codes_regenerated', { ip });
+		return json({ backupCodes });
 	});
 
 	// ---- Share browsing ---------------------------------------------------
