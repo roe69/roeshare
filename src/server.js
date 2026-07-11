@@ -15,6 +15,7 @@ import { hasUploadAccess, isAdmin } from './lib/auth.js';
 import { deleteShareFiles } from './lib/storage.js';
 import { pickEncoding, compressBytes, isCompressibleType, compressResponse } from './lib/compress.js';
 import * as quota from './lib/quota.js';
+import { reconcileShareRenames } from './lib/renames.js';
 
 // Authoritative recompute of the storage quota ledger (see lib/quota.js) -
 // self-initializing (creates the single ledger row) and self-healing (a crash
@@ -23,6 +24,12 @@ import * as quota from './lib/quota.js';
 // starts accepting requests, so every request from the first one onward sees
 // an accurate ledger.
 quota.reconcile();
+
+// Same self-healing idea, for an admin share rename (F-19): rolls any journal
+// row left behind by a crash between the DB-side rename and the filesystem
+// directory move forward to completion. Also runs once, before the server
+// starts accepting requests, so no request can race a half-finished rename.
+await reconcileShareRenames();
 
 const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 

@@ -198,6 +198,22 @@ const schema = {
 		count:    'INTEGER NOT NULL',
 		reset_at: 'INTEGER NOT NULL',
 	},
+	// Durable journal for an in-flight admin share rename (F-19), so a crash
+	// between the DB-side rename and the filesystem directory move is always
+	// recoverable at the next boot rather than leaving the two split. A new
+	// table, not a MIGRATIONS entry: the CREATE TABLE IF NOT EXISTS loop below
+	// creates it on every install (fresh or existing) with no backfill needed.
+	// See lib/renames.js for the state machine this backs.
+	share_renames: {
+		id:         'INTEGER PRIMARY KEY AUTOINCREMENT',
+		old_id:     'TEXT NOT NULL',
+		new_id:     'TEXT NOT NULL',
+		// 'requested' | 'db_committed'. A finished rename DELETEs its row, so no
+		// 'complete' state is ever stored.
+		state:      "TEXT NOT NULL DEFAULT 'requested'",
+		created_at: 'INTEGER NOT NULL',
+		updated_at: 'INTEGER NOT NULL',
+	},
 };
 
 for (const [table, columns] of Object.entries(schema)) {

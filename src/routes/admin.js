@@ -10,7 +10,7 @@ import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { json, error, cookie, clearCookie, requestScheme, requestOrigin, requireSameOrigin } from '../lib/http.js';
 import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken } from '../lib/auth.js';
-import { deleteShareFiles, deleteBlob, totalUsage, renameShareDir } from '../lib/storage.js';
+import { deleteShareFiles, deleteBlob, totalUsage } from '../lib/storage.js';
 import { enforce, reset } from '../lib/ratelimit.js';
 import { acquire, overloaded } from '../lib/semaphore.js';
 import { hashPassword } from '../lib/crypto.js';
@@ -20,6 +20,8 @@ import { ALLOWED_KEYS, ALLOWLIST, envManagedKeys, readSettings, validatePatch, w
 import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
 import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, rotateApiKey, deleteApiKey, sanitizeLimits } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
+import { performShareRename, BUSY } from '../lib/renames.js';
+import { audit } from '../lib/audit.js';
 
 // The editable settings keys mapped to their current effective (booted) values,
 // for pre-filling the editor. Secret keys are reported only as set/unset.
@@ -38,18 +40,6 @@ const effectiveSettings = () => ({
 });
 const secretIsSet = key =>
 	key === 'SECRET' ? !config.ephemeralSecret : key === 'ADMIN_PASSWORD' ? !!config.adminPassword : !!config.uploadPassword;
-
-// Move a share to a new id (slug): copy the row, repoint children, drop the old
-// row. Done as one transaction so FK constraints never see a dangling parent.
-const renameShare = db.transaction((oldId, newId) => {
-	db.query(
-		`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id, e2e, view_count)
-		 SELECT ?, title, created_at, expires_at, password_hash, max_downloads, download_count, one_time, edit_token, finalized, deleted_at, creator_ip, creator_ua, api_key_id, e2e, view_count FROM shares WHERE id = ?`,
-	).run(newId, oldId);
-	db.query('UPDATE files SET share_id = ? WHERE share_id = ?').run(newId, oldId);
-	db.query('UPDATE download_events SET share_id = ? WHERE share_id = ?').run(newId, oldId);
-	db.query('DELETE FROM shares WHERE id = ?').run(oldId);
-});
 
 // Allowlists keep the dynamic ORDER BY clause free of injected SQL.
 const SORT_COLUMNS = {
@@ -301,9 +291,17 @@ export default router => {
 
 		let newId = params.id;
 		if (newSlug) {
-			renameShare(params.id, newSlug);
-			await renameShareDir(params.id, newSlug);
+			try {
+				await performShareRename(params.id, newSlug);
+			} catch (e) {
+				if (e === BUSY) return error(409, 'Another rename is in progress');
+				// The DB side already committed (see lib/renames.js) - only the
+				// filesystem move failed. The DB is authoritative; a restart will
+				// finish moving the files via reconcileShareRenames().
+				return error(500, 'Rename recorded; a restart will finish moving files');
+			}
 			newId = newSlug;
+			audit('share.renamed', { ip, actor: 'admin', target: `${params.id}->${newSlug}` });
 		}
 
 		return json({ ok: true, id: newId });
