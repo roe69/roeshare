@@ -24,7 +24,26 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  test:
+    # Boots the app against a fresh, an already-current-shape, and a
+    # simulated pre-migration database and asserts none of them lose data or
+    # fail to start - the exact class of bug that took prod down once
+    # already (see test/migrations.test.js). A schema/data-format change
+    # that breaks upgrade compatibility fails here, before an image is ever
+    # published or a deploy is ever triggered.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Run tests
+        run: bun test
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - name: Checkout

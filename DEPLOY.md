@@ -68,21 +68,34 @@ the "HTTPS (reverse proxy)" section in [README.md](README.md) and
 [`deploy/nginx.example.conf`](deploy/nginx.example.conf) /
 [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
-## Resetting the database (schema changes)
+## Schema changes migrate automatically - you never need to reset
 
-RoeShare has no migration code - `src/db.js` declares the full schema and a
-fresh data directory gets it in one pass. There is no in-place upgrade, so a
-**schema change requires starting from an empty database**. Two ways to do it:
+`src/db.js` declares the full schema once and migrates an existing database
+forward to it on every boot: a new column is added in place automatically,
+and anything a plain column-add can't express (a rename, a backfill, a
+value-format change) ships as a small named migration that runs exactly
+once. Before either kind of migration changes anything, the live database is
+snapshotted to `DATA_DIR/backups` (the last few are kept), so a migration bug
+is always recoverable from disk. A normal push deploy just reuses the volume
+and boots the new image against it - **no manual reset step, no downtime for
+a schema change.**
+
+This path (a fresh install, an already-current database, and a simulated
+pre-migration one) is covered by `test/migrations.test.js`, which CI runs
+before every image is published - a change that would break upgrading an
+existing installation fails the build rather than reaching a deploy.
+
+### Resetting the database anyway (a genuine, intentional wipe)
+
+This is for throwing away all data on purpose - not something a schema change
+should ever require. Two ways to do it:
 
 - **From the Actions UI (no SSH):** run the **Deploy RoeShare** workflow manually
   (*Actions -> Deploy RoeShare -> Run workflow*) with **"Wipe the data volume"**
   checked. It runs `docker compose down -v` before `up`, so the container comes
-  back on an empty db with the current schema. This deletes all shares, uploads,
-  and stats.
+  back on an empty db. This deletes all shares, uploads, and stats.
 - **On the host:** `docker rm -f roeshare && docker volume rm roeshare_roeshare-data`,
   then re-run the deploy.
-
-A normal push deploy never resets - it reuses the volume (below).
 
 ## How redeploys stay safe and fast
 

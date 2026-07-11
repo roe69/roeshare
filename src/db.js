@@ -1,22 +1,40 @@
 // SQLite layer built on bun:sqlite (no native module to compile). Opens the db,
-// applies the full schema, sets pragmatic pragmas, and exposes the connection
-// plus a couple of helpers. All timestamps are unix epoch seconds.
+// applies the full schema, and migrates an existing installation forward. All
+// timestamps are unix epoch seconds.
 //
-// The schema below is declared once, as data, and used for two things: (1)
-// CREATE TABLE IF NOT EXISTS, which is a no-op against a table that already
-// exists on disk, and (2) migrateSchema() below, which diffs PRAGMA
-// table_info() for each table against this same declaration and issues
-// ALTER TABLE ADD COLUMN for anything an existing installation is missing.
-// That second step is what makes it safe to add a column here - relying on
-// the CREATE TABLE block alone only reaches a brand-new DATA_DIR, and
-// shipping a schema change with no matching migration for existing
-// installations is exactly what caused a production outage previously.
-// Every new column added below MUST be something SQLite can ADD COLUMN in
-// place (no PRIMARY KEY/UNIQUE, and a NOT NULL column needs a DEFAULT other
-// than NULL, since ALTER TABLE forbids NOT NULL with no default).
+// Schema changes never require an operator to wipe their data (the deploy
+// workflow's "reset data" option is for an intentional reset only, not for
+// applying a schema change - see .github/workflows/deploy.yml). There are two
+// kinds of migration:
+//
+//   1. A new column: just add it to the `schema` object below. migrateSchema()
+//      diffs PRAGMA table_info() against this declaration on every boot and
+//      issues ALTER TABLE ADD COLUMN for anything an existing installation is
+//      missing - no extra code needed. (SQLite's ALTER TABLE can only add
+//      columns - no PRIMARY KEY/UNIQUE, and a NOT NULL column needs a DEFAULT
+//      other than NULL, since ALTER TABLE forbids NOT NULL with no default.)
+//
+//   2. Anything else - a rename, a backfill, a value-format change (like the
+//      edit_token hashing below) - add a named entry to MIGRATIONS. Each one
+//      runs exactly once, tracked in the `meta` table, in the order listed.
+//      Never edit or reorder an entry that may already have run in
+//      production; add a new one instead.
+//
+// Before either kind of migration changes anything, the live database is
+// snapshotted to DATA_DIR/backups (pruned to the last few) via VACUUM INTO,
+// so a migration bug is always recoverable from disk without an operator
+// needing their own backup discipline.
+//
+// This whole path - a fresh install, an already-migrated database, and a
+// legacy pre-migration one - is exercised by test/migrations.test.js on every
+// push (see .github/workflows/publish.yml, which gates the published image on
+// it passing). That suite is what should have caught the outage that made
+// this migration system exist in the first place; run it (`bun test`) before
+// shipping any change to `schema` or `MIGRATIONS`.
 
 import { Database } from 'bun:sqlite';
-import { mkdirSync } from 'node:fs';
+import { mkdirSync, readdirSync, unlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { config } from './config.js';
 import { hashSecretToken } from './lib/crypto.js';
 
@@ -29,6 +47,9 @@ db.exec('PRAGMA journal_mode = WAL;');
 db.exec('PRAGMA foreign_keys = ON;');
 db.exec('PRAGMA busy_timeout = 5000;');
 db.exec('PRAGMA synchronous = NORMAL;');
+
+// Declared before the migration logic below, which needs it (markMigrationRan).
+export const now = () => Math.floor(Date.now() / 1000);
 
 const schema = {
 	shares: {
@@ -107,6 +128,12 @@ const schema = {
 		allow_slug:     'INTEGER NOT NULL DEFAULT 1',  // may set custom share links
 		allow_password: 'INTEGER NOT NULL DEFAULT 1',  // may set share passwords
 	},
+	// Small persistent key/value store, currently just for migration bookkeeping
+	// (see MIGRATIONS below).
+	meta: {
+		key:   'TEXT PRIMARY KEY',
+		value: 'TEXT',
+	},
 };
 
 for (const [table, columns] of Object.entries(schema)) {
@@ -121,33 +148,89 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_events_share ON download_events(share_id);
 `);
 
-// Diffs the declared schema above against what actually exists on disk for
-// each table and ALTER TABLE ADD COLUMNs anything missing. Idempotent and
-// cheap to run on every boot: a table whose columns already match (a brand
-// new DATA_DIR right after the CREATE TABLE block above, or any install
-// that's already been migrated) does nothing.
-function migrateSchema() {
+const getMeta = db.query('SELECT value FROM meta WHERE key = ?');
+const setMeta = db.query('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
+const migrationRan = id => !!getMeta.get(`migration:${id}`);
+const markMigrationRan = id => setMeta.run(`migration:${id}`, String(now()));
+
+// ---- Column migrations (automatic - add columns to `schema` above) --------
+
+function pendingColumns() {
+	const pending = [];
 	for (const [table, columns] of Object.entries(schema)) {
 		const existing = new Set(db.query(`PRAGMA table_info(${table})`).all().map(c => c.name));
 		for (const [name, def] of Object.entries(columns)) {
-			if (!existing.has(name)) {
-				db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
-			}
+			if (!existing.has(name)) pending.push({ table, name, def });
 		}
 	}
-}
-migrateSchema();
-
-// Rehashes shares created before edit_token started being stored as a
-// SHA-256 hash rather than the raw token. Idempotent and safe on every boot:
-// hashSecretToken's output is always a 64-char hex digest, so length alone
-// tells the two formats apart, and once a row is rehashed it's excluded on
-// the next run. The client still holds the original raw token from when
-// their share was created, so this is transparent to them.
-const legacyEditTokens = db.query('SELECT id, edit_token FROM shares WHERE length(edit_token) != 64').all();
-if (legacyEditTokens.length) {
-	const rehashEditToken = db.query('UPDATE shares SET edit_token = ? WHERE id = ?');
-	for (const row of legacyEditTokens) rehashEditToken.run(hashSecretToken(row.edit_token), row.id);
+	return pending;
 }
 
-export const now = () => Math.floor(Date.now() / 1000);
+function applyColumns(pending) {
+	for (const { table, name, def } of pending) {
+		db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
+		console.log(`  [migrate] added column ${table}.${name}`);
+	}
+}
+
+// ---- Named migrations (manual - anything ADD COLUMN can't express) --------
+
+const MIGRATIONS = [
+	{
+		id: 'rehash-legacy-edit-tokens',
+		// Rehashes shares created before edit_token started being stored as a
+		// SHA-256 hash rather than the raw token. hashSecretToken's output is
+		// always a 64-char hex digest, so length alone tells the two formats
+		// apart. The client still holds the original raw token from when their
+		// share was created, so this is transparent to them.
+		run() {
+			const rows = db.query('SELECT id, edit_token FROM shares WHERE length(edit_token) != 64').all();
+			const rehash = db.query('UPDATE shares SET edit_token = ? WHERE id = ?');
+			for (const row of rows) rehash.run(hashSecretToken(row.edit_token), row.id);
+			return rows.length;
+		},
+	},
+];
+
+function pendingMigrations() {
+	return MIGRATIONS.filter(m => !migrationRan(m.id));
+}
+
+function applyMigrations(pending) {
+	for (const m of pending) {
+		const n = m.run();
+		markMigrationRan(m.id);
+		console.log(`  [migrate] ran '${m.id}'${typeof n === 'number' ? ` (${n} row${n === 1 ? '' : 's'})` : ''}`);
+	}
+}
+
+// ---- Backup before migrating ------------------------------------------------
+
+const BACKUP_DIR = join(config.dataDir, 'backups');
+const KEEP_BACKUPS = 5;
+
+// One consistent, compacted snapshot of the database as it was immediately
+// before a migration touches it. VACUUM INTO (rather than copying the .db
+// file directly) is safe regardless of the live WAL state - a plain file copy
+// can miss committed-but-not-checkpointed WAL data or copy a torn file
+// mid-write.
+function backupBeforeMigrating() {
+	mkdirSync(BACKUP_DIR, { recursive: true });
+	const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+	const path = join(BACKUP_DIR, `pre-migration-${stamp}.db`);
+	db.exec(`VACUUM INTO '${path.replace(/'/g, "''")}'`);
+	console.log(`  [migrate] backed up database to ${path} before migrating`);
+
+	const backups = readdirSync(BACKUP_DIR).filter(f => f.startsWith('pre-migration-')).sort();
+	for (const f of backups.slice(0, Math.max(0, backups.length - KEEP_BACKUPS))) {
+		unlinkSync(join(BACKUP_DIR, f));
+	}
+}
+
+const pendingCols = pendingColumns();
+const pendingMigs = pendingMigrations();
+if (pendingCols.length || pendingMigs.length) {
+	backupBeforeMigrating();
+	applyColumns(pendingCols);
+	applyMigrations(pendingMigs);
+}

@@ -14,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       reset_data:
-        description: "Wipe the data volume before deploying (DELETES all shares, uploads, and stats - needed after a schema change)"
+        description: "Wipe the data volume before deploying (DELETES all shares, uploads, and stats). Schema changes migrate automatically on boot (src/db.js) and do NOT need this - only use it for a genuine, intentional reset."
         type: boolean
         default: false
 
@@ -73,8 +73,10 @@ jobs:
           set -euo pipefail
           # Opt-in reset: only when this workflow is run manually with reset_data
           # checked. Removes the container AND the named data volume, so the next
-          # `up` starts from an empty database with the current schema. This is the
-          # deliberate way to apply a schema change (there is no migration code).
+          # `up` starts from an empty database. This is for an intentional wipe
+          # ONLY - schema/data-format changes migrate themselves automatically at
+          # boot (src/db.js, covered by test/migrations.test.js) and must never
+          # need this to deploy safely.
           if [ "${{ inputs.reset_data }}" = "true" ]; then
             echo "reset_data=true: wiping the data volume (all shares, uploads, and stats)."
             docker compose down -v --remove-orphans || true
