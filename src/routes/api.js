@@ -251,7 +251,7 @@ export default function apiV1(router) {
 			return error(403, 'That name and token do not match an active key');
 		}
 		const setCookie = cookie(APIKEY_COOKIE, issueApiKeySession(key), {
-			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url) === 'https',
+			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url, ctx.server) === 'https',
 		});
 		return json({ id: key.id, name: key.name }, { headers: { 'Set-Cookie': setCookie } });
 	});
@@ -306,7 +306,7 @@ export default function apiV1(router) {
 			{
 				id: made.id,
 				editToken: made.editToken,
-				url: `${requestOrigin(ctx.req, ctx.url)}/${made.id}`,
+				url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${made.id}`,
 				chunkSize: config.chunkSize,
 				maxFileSize: caps.maxFileSize,
 				maxShareSize: caps.maxShareSize,
@@ -401,7 +401,7 @@ export default function apiV1(router) {
 		return json(
 			{
 				id: made.id,
-				url: `${requestOrigin(ctx.req, ctx.url)}/${made.id}`,
+				url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${made.id}`,
 				fileId,
 				name,
 				size,
@@ -441,7 +441,7 @@ export default function apiV1(router) {
 				FROM shares ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`,
 			)
 			.all(...filterArgs, limit, offset);
-		const origin = requestOrigin(ctx.req, ctx.url);
+		const origin = requestOrigin(ctx.req, ctx.url, ctx.server);
 		const shares = rows.map(s => ({ ...shareView(s, origin), fileCount: s.fileCount, totalSize: s.totalSize }));
 		return json({ shares, total, limit, offset });
 	});
@@ -455,7 +455,7 @@ export default function apiV1(router) {
 		const share = getOwnedShare.get(ctx.params.id, key.id);
 		if (!share) return error(404, 'Not found');
 		const files = getShareFiles.all(share.id);
-		return json(shareView(share, requestOrigin(ctx.req, ctx.url), files));
+		return json(shareView(share, requestOrigin(ctx.req, ctx.url, ctx.server), files));
 	});
 
 	// ---- Delete one of this key's shares (backup rotation) -----------------

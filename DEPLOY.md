@@ -53,9 +53,11 @@ The first push publishes the image and starts it on the server
 
 ## Reverse proxy
 
-`TRUST_PROXY=1` requires a proxy in front that forwards the real host. One server
-block per domain (or both in one), each forwarding `Host` and `X-Forwarded-Proto`
-to the host port published in `deploy/production.yml`. Caddy example:
+`TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128` (or the back-compat `TRUST_PROXY=1`,
+equivalent when unset) requires a proxy in front that forwards the real host.
+One server block per domain (or both in one), each forwarding `Host` and
+`X-Forwarded-Proto` to the host port published in `deploy/production.yml`.
+Caddy example:
 
 ```
 share.example.com, files.example.com {

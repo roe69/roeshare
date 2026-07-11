@@ -28,6 +28,11 @@ services:
 
       # Uncomment to set; see the README's Configuration table for the full list.
       # UPLOAD_PASSWORD: ""
+      # Trust a reverse proxy's X-Forwarded-* headers ONLY from these peer
+      # addresses (CIDRs); TRUST_PROXY=1 alone is a back-compat alias for
+      # loopback-only. See the README's "HTTPS (reverse proxy)" section.
+      # TRUSTED_PROXY_CIDRS: "127.0.0.1/32,::1/128"
+      # TRUSTED_PROXY_HOPS: "1"
       # TRUST_PROXY: "1"
       # APP_NAME: "<col=e4e4ce>Roe<b><col=ff6b35>Share</b>"
       # DEFAULT_EXPIRY: "604800"

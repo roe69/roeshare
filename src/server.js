@@ -168,9 +168,9 @@ const server = Bun.serve({
 		const url = new URL(req.url);
 		const method = req.method;
 		try {
-			if (!config.trustProxy && !warnedProxy && (req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip'))) {
+			if (!config.trustedProxyCidrs.length && !warnedProxy && (req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip'))) {
 				warnedProxy = true;
-				console.warn('  WARNING: received X-Forwarded-For/X-Real-IP but TRUST_PROXY is off - all clients share one rate-limit bucket and real IPs are not seen. Set TRUST_PROXY=1 only if behind a trusted reverse proxy.');
+				console.warn('  WARNING: received X-Forwarded-For/X-Real-IP but no trusted proxy is configured - all clients share one rate-limit bucket and real IPs are not seen. Set TRUSTED_PROXY_CIDRS (or TRUST_PROXY=1 for loopback-only) only if behind a trusted reverse proxy.');
 			}
 			let res = null;
 			if (url.pathname === '/health') {

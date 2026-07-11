@@ -91,7 +91,9 @@ defaults except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `BASE_URL`       | `http://localhost:3300`  | Public base URL for share links and QR codes. No trailing slash. Comma-separate multiple domains for multi-domain serving (e.g. `https://share.example.com,https://files.example.com`); links are built from the visitor's domain, first entry is the canonical fallback. |
 | `ADMIN_PASSWORD` | (empty)                  | Admin panel password. Required for admin access; if unset, admin is locked. |
 | `SECRET`         | (ephemeral)              | Signs cookies/tokens and derives the at-rest encryption key. Required in production; if unset, an ephemeral one is generated and everything resets on restart. |
-| `TRUST_PROXY`    | `0`                      | Honor X-Forwarded-For/X-Real-IP for client IP. On ONLY behind a trusted proxy; off when exposed directly (else IPs are spoofable). |
+| `TRUSTED_PROXY_CIDRS` | (empty)             | Comma-separated CIDRs (e.g. `127.0.0.1/32,::1/128,10.20.0.0/24`) allowed to set X-Forwarded-For/X-Real-IP/X-Forwarded-Proto/X-Forwarded-Host. Only honored when the DIRECT connection comes from one of these; anything else falls back to the real socket peer. |
+| `TRUSTED_PROXY_HOPS` | `1`                  | Number of trusted-proxy hops to skip from the right of X-Forwarded-For before taking the client address. Raise it if more than one trusted proxy is chained in front of RoeShare. |
+| `TRUST_PROXY`    | `0`                      | Back-compat alias: `1` with `TRUSTED_PROXY_CIDRS` unset trusts loopback only (`127.0.0.1/32,::1/128`). Prefer setting `TRUSTED_PROXY_CIDRS` explicitly. |
 | `DATA_DIR`       | `./data`                 | Directory holding the SQLite db and uploaded blobs.                         |
 | `MAX_FILE_SIZE`  | `5368709120` (5 GiB)     | Max size of a single file, in bytes.                                        |
 | `MAX_SHARE_SIZE` | `10737418240` (10 GiB)   | Max total size of one share, in bytes.                                      |
@@ -139,9 +141,13 @@ when something proxies for it:
 
 - `BASE_URL` - set it to the public https URL so share links and QR codes
   point at the right place.
-- `TRUST_PROXY=1` - makes rate limiting and logs use the forwarded client IP.
-  Only behind a proxy you trust; when the app is exposed directly, leave it
-  `0` or clients can spoof their IP.
+- `TRUSTED_PROXY_CIDRS` - makes rate limiting and logs use the forwarded
+  client IP, but ONLY for connections arriving directly from one of these
+  CIDRs (e.g. `127.0.0.1/32,::1/128` for a proxy on the same host). A
+  connection from anywhere else always uses the real socket peer, so the
+  header can't be spoofed by the client. `TRUST_PROXY=1` remains as a
+  shorthand for loopback-only trust if `TRUSTED_PROXY_CIDRS` is unset; when
+  the app is exposed directly, leave both unset or clients can spoof their IP.
 
 Ready-to-adapt configs, including the optional `X_ACCEL_REDIRECT` sendfile
 offload for high-concurrency streaming, live in

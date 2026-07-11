@@ -54,7 +54,7 @@ export default function pages(router) {
 	// When an upload password is set, an unauthorized visitor gets only the lock
 	// page - the upload portal's markup is never served without the cookie.
 	router.get('/', ctx => {
-		const { req, url, ip } = ctx;
+		const { req, url, ip, server } = ctx;
 
 		// Magic-link login: ?token=<upload password | quick-access token> grants
 		// the upload cookie and redirects to a clean URL (so the token does not
@@ -68,7 +68,7 @@ export default function pages(router) {
 				if (!limited && checkUploadLink(token)) {
 					const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), {
 						maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax',
-						secure: requestScheme(req, url) === 'https',
+						secure: requestScheme(req, url, server) === 'https',
 					});
 					return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': setCookie, 'Cache-Control': 'no-store' } });
 				}

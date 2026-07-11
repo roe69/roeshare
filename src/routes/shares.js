@@ -72,7 +72,7 @@ export default function shares(router) {
 			defaultE2e: config.defaultE2e,
 			uploadPasswordRequired: !!config.uploadPassword,
 			// Resolved from the visitor's host so links match the domain in use.
-			baseUrl: requestOrigin(ctx.req, ctx.url),
+			baseUrl: requestOrigin(ctx.req, ctx.url, ctx.server),
 		})
 	);
 
@@ -86,7 +86,7 @@ export default function shares(router) {
 		if (!config.uploadPassword) return json({ ok: true });
 		const body = (await readJson(ctx.req)) || {};
 		if (!uploadAllowed(body.password)) return error(403, 'Incorrect upload password');
-		const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url) === 'https' });
+		const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url, ctx.server) === 'https' });
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
@@ -99,7 +99,7 @@ export default function shares(router) {
 	router.get('/api/upload/link', ctx => {
 		if (!config.uploadPassword) return json({ enabled: false });
 		if (!hasUploadAccess(ctx.req)) return error(403, 'Forbidden');
-		return json({ enabled: true, url: `${requestOrigin(ctx.req, ctx.url)}/?token=${encodeURIComponent(uploadLinkToken())}` });
+		return json({ enabled: true, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/?token=${encodeURIComponent(uploadLinkToken())}` });
 	});
 
 	// ---- Create draft ------------------------------------------------------
@@ -299,7 +299,7 @@ export default function shares(router) {
 		const firstFinalize = !share.finalized;
 		setFinalized.run(share.id);
 		if (firstFinalize && share.expires_at != null) shiftExpiry.run(now(), share.id);
-		return json({ id: share.id, url: `${requestOrigin(ctx.req, ctx.url)}/${share.id}` });
+		return json({ id: share.id, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${share.id}` });
 	});
 
 	// ---- Delete (owner or admin) -------------------------------------------

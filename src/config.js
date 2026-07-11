@@ -6,6 +6,7 @@ import { resolve, join } from 'node:path';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { applyManagedSettings } from './lib/settings.js';
 import { addSecret } from './lib/logbuffer.js';
+import { parseCidrList } from './lib/net.js';
 
 function int(name, fallback) {
 	const raw = process.env[name];
@@ -139,6 +140,35 @@ if (adminPassword && PLACEHOLDER_PASSWORDS.has(adminPassword.trim().toLowerCase(
 	throw new Error('ADMIN_PASSWORD is set to a well-known placeholder value, set a real one via env or the data volume settings before starting RoeShare.');
 }
 
+// Only honor X-Forwarded-For / X-Real-IP / X-Forwarded-Proto / X-Forwarded-Host
+// when the DIRECT socket peer is inside this allowlist - otherwise those
+// headers are fully attacker-controlled on a directly-exposed server and are
+// ignored outright. TRUSTED_PROXY_CIDRS is the explicit policy (comma-separated
+// CIDRs, e.g. "127.0.0.1/32,::1/128,10.20.0.0/24"). TRUST_PROXY=1 is kept as a
+// back-compat alias for existing single-reverse-proxy-on-localhost deployments
+// (the documented Caddy/nginx examples proxy from 127.0.0.1): if it's set and
+// TRUSTED_PROXY_CIDRS is not, it trusts loopback only, with a one-time warning
+// to set TRUSTED_PROXY_CIDRS explicitly.
+const trustProxyLegacy = (() => {
+	const v = bool('TRUST_PROXY', false);
+	if (v) console.log('  NOTE: TRUST_PROXY=1 - only set this when the app is unreachable except via a trusted reverse proxy.');
+	return v;
+})();
+const trustedProxyCidrsRaw = str('TRUSTED_PROXY_CIDRS');
+const trustedProxyCidrs = trustedProxyCidrsRaw
+	? parseCidrList(trustedProxyCidrsRaw, entry => console.warn(`  WARNING: ignoring invalid TRUSTED_PROXY_CIDRS entry: ${entry}`))
+	: trustProxyLegacy
+		? (() => {
+				console.warn('  WARNING: TRUST_PROXY=1 without TRUSTED_PROXY_CIDRS - defaulting to trusting only the loopback interface (127.0.0.1/32, ::1/128). Set TRUSTED_PROXY_CIDRS explicitly to the real proxy address(es) instead.');
+				return parseCidrList('127.0.0.1/32,::1/128');
+			})()
+		: [];
+// Number of trusted-proxy hops to skip from the RIGHT of X-Forwarded-For
+// before taking the client address (the standard "walk from the right"
+// algorithm - each hop appends its own entry, so the real client is exactly
+// this many entries in from the end). Clamped to at least 1.
+const trustedProxyHops = Math.max(1, int('TRUSTED_PROXY_HOPS', 1));
+
 export const config = Object.freeze({
 	host: str('HOST', '0.0.0.0'),
 	port: int('PORT', 3300),
@@ -164,14 +194,16 @@ export const config = Object.freeze({
 	appTitle,
 	brandStyle,
 
-	// Only honor X-Forwarded-For / X-Real-IP when behind a trusted reverse proxy.
-	// When false (the default for a directly-exposed server), rate-limit and audit
-	// keys use the real socket peer so a client cannot spoof its identity.
-	trustProxy: (() => {
-		const v = bool('TRUST_PROXY', false);
-		if (v) console.log('  NOTE: TRUST_PROXY=1 - only set this when the app is unreachable except via a trusted reverse proxy.');
-		return v;
-	})(),
+	// Back-compat flag, still surfaced in the admin panel's effective-settings
+	// display (see routes/admin.js). The actual trust decision is
+	// trustedProxyCidrs below - a socket peer outside that allowlist never gets
+	// its forwarding headers honored regardless of this flag.
+	trustProxy: trustProxyLegacy,
+	// Parsed CIDR allowlist (see lib/net.js) of proxies allowed to set
+	// X-Forwarded-For / X-Real-IP / X-Forwarded-Proto / X-Forwarded-Host.
+	// Empty = trust nothing, always use the real socket peer/scheme/host.
+	trustedProxyCidrs,
+	trustedProxyHops,
 
 	// Reverse-proxy byte-serving offload. When set, the preview endpoint hands
 	// blobs that need no server-side decryption (E2E shares, or any file when

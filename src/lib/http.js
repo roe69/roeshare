@@ -2,6 +2,7 @@
 // client IP extraction, and security headers.
 
 import { config } from '../config.js';
+import { parseIp, ipInCidrs } from './net.js';
 
 const SECURITY_HEADERS = {
 	'X-Content-Type-Options': 'nosniff',
@@ -71,23 +72,59 @@ export function cookie(name, value, { maxAge, httpOnly = true, sameSite = 'Lax',
 
 export const clearCookie = name => cookie(name, '', { maxAge: 0 });
 
+// Direct socket peer address for this request, or null if unavailable.
+// This is the one value a client cannot spoof (unlike any header), so it is
+// the trust boundary every forwarding header is gated on below.
+function socketPeer(req, server) {
+	try {
+		return server?.requestIP?.(req)?.address ?? null;
+	} catch {
+		return null;
+	}
+}
+
+// Whether `peer` (a direct socket address) is inside config.trustedProxyCidrs
+// - i.e. whether THIS specific connection is allowed to set X-Forwarded-For /
+// X-Real-IP / X-Forwarded-Proto / X-Forwarded-Host at all. An empty allowlist
+// (the default for a directly-exposed server) trusts nothing.
+function isTrustedPeer(peer) {
+	return !!peer && config.trustedProxyCidrs.length > 0 && ipInCidrs(peer, config.trustedProxyCidrs);
+}
+
+const MAX_FORWARDED_ENTRIES = 20;
+
+// Walk an X-Forwarded-For chain from the right, skipping exactly `hops`
+// trusted-proxy-appended entries, and return the next one - the address the
+// nearest trusted proxy reported as the client. Returns null (caller falls
+// back to the socket peer) when the header has too few entries for that many
+// hops, is implausibly long, or the resulting entry isn't a parseable IP -
+// rather than trying to fully parse an attacker-sized/malformed header.
+function clientFromForwardedFor(header, hops) {
+	const parts = header.split(',').map(s => s.trim()).filter(Boolean);
+	if (parts.length === 0 || parts.length > MAX_FORWARDED_ENTRIES) return null;
+	if (parts.length <= hops) return null;
+	const candidate = parts[parts.length - 1 - hops];
+	return parseIp(candidate) ? candidate : null;
+}
+
 // Client IP used for rate-limit and audit keys. Client-supplied forwarding
 // headers (X-Forwarded-For / X-Real-IP) are fully attacker-controlled on a
-// directly-exposed server, so they are only honored when config.trustProxy is
-// set (i.e. the deployment really sits behind a trusted reverse proxy).
-// Otherwise we always use the real socket peer, which a client cannot spoof.
+// directly-exposed server, so they are only honored when the direct socket
+// peer is itself inside config.trustedProxyCidrs (i.e. the deployment really
+// sits behind a trusted reverse proxy at that address). Otherwise - or if the
+// header is missing/malformed - we always use the real socket peer, which a
+// client cannot spoof.
 export function clientIp(req, server) {
-	let socket = null;
-	try {
-		socket = server?.requestIP?.(req)?.address ?? null;
-	} catch {
-		socket = null;
-	}
-	if (config.trustProxy) {
+	const socket = socketPeer(req, server);
+	if (isTrustedPeer(socket)) {
 		const fwd = req.headers.get('x-forwarded-for');
-		if (fwd) return fwd.split(',')[0].trim();
-		const real = req.headers.get('x-real-ip');
-		if (real) return real.trim();
+		if (fwd) {
+			const client = clientFromForwardedFor(fwd, config.trustedProxyHops);
+			if (client) return client;
+		} else {
+			const real = req.headers.get('x-real-ip')?.trim();
+			if (real && parseIp(real)) return real;
+		}
 	}
 	return socket;
 }
@@ -99,11 +136,12 @@ function firstHeader(req, name) {
 }
 
 // The actual transport scheme of this request ('http' | 'https'). Honors
-// X-Forwarded-Proto only behind a trusted proxy (TRUST_PROXY=1), where TLS is
-// terminated upstream; otherwise uses the real connection scheme. Used to set
-// the Secure flag on cookies correctly per request.
-export function requestScheme(req, url) {
-	if (config.trustProxy) {
+// X-Forwarded-Proto only when the direct socket peer is a trusted proxy (see
+// isTrustedPeer above), where TLS is terminated upstream; otherwise uses the
+// real connection scheme. Used to set the Secure flag on cookies correctly
+// per request.
+export function requestScheme(req, url, server) {
+	if (isTrustedPeer(socketPeer(req, server))) {
 		const p = firstHeader(req, 'x-forwarded-proto').toLowerCase();
 		if (p === 'http' || p === 'https') return p;
 	}
@@ -115,14 +153,14 @@ export function requestScheme(req, url) {
 // The host comes from X-Forwarded-Host (trusted proxy) or the Host header. To
 // stop a spoofed Host from poisoning links, only hosts listed in BASE_URL are
 // honored; anything else falls back to the canonical BASE_URL. No trailing slash.
-export function requestOrigin(req, url) {
+export function requestOrigin(req, url, server) {
 	let host = url.host;
-	if (config.trustProxy) {
+	if (isTrustedPeer(socketPeer(req, server))) {
 		const xfh = firstHeader(req, 'x-forwarded-host');
 		if (xfh) host = xfh;
 	}
 	host = host.toLowerCase();
-	if (config.allowedHosts.has(host)) return `${requestScheme(req, url)}://${host}`;
+	if (config.allowedHosts.has(host)) return `${requestScheme(req, url, server)}://${host}`;
 	return config.baseUrl;
 }
 

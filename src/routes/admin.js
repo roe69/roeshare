@@ -64,7 +64,7 @@ async function readBody(req) {
 export default router => {
 	// ---- Session ----------------------------------------------------------
 
-	router.post('/api/admin/login', async ({ req, ip, url }) => {
+	router.post('/api/admin/login', async ({ req, ip, url, server }) => {
 		// Brute-force guard: 8 attempts per 5 minutes per IP. A successful login
 		// clears the counter so a legitimate admin is never locked out.
 		const limited = enforce('admin-login', ip, 8, 5 * 60 * 1000);
@@ -73,7 +73,7 @@ export default router => {
 		const { password } = await readBody(req);
 		if (!checkAdminPassword(password)) return error(403, 'Invalid password');
 		reset('admin-login', ip);
-		const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(req, url) === 'https' });
+		const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(req, url, server) === 'https' });
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
@@ -494,10 +494,10 @@ export default router => {
 	// Quick-access upload link (the HMAC-derived token, not the password). The
 	// admin needs no upload cookie, so this is a separate route from the
 	// upload-cookie-gated /api/upload/link.
-	router.get('/api/admin/upload-link', ({ req, url }) => {
+	router.get('/api/admin/upload-link', ({ req, url, server }) => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		if (!config.uploadPassword) return json({ enabled: false });
-		return json({ enabled: true, url: `${requestOrigin(req, url)}/?token=${encodeURIComponent(uploadLinkToken())}` });
+		return json({ enabled: true, url: `${requestOrigin(req, url, server)}/?token=${encodeURIComponent(uploadLinkToken())}` });
 	});
 
 	// Current editable settings. Secret values are NEVER returned - only a
