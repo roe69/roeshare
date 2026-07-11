@@ -21,8 +21,9 @@ SQLite, zero npm dependencies).
 - **End-to-end encryption by default.** New shares are encrypted in your browser;
   the key lives in the link's `#fragment` and never reaches the server, which
   only ever stores ciphertext. Toggle it off for server-managed shares.
-- **Encrypted at rest.** Server-managed (non-E2E) files are AES-256-CTR encrypted
-  on disk by default, keyed from `SECRET`.
+- **Encrypted at rest.** Server-managed (non-E2E) files are AES-256-GCM
+  encrypted on disk by default in independently-authenticated chunks (tamper
+  or corruption is detected, not silently decrypted), keyed from `SECRET`.
 - **Per-share controls.** Password, expiry, download-count cap, one-time
   burn-after-download, and a custom link slug.
 - **In-browser preview.** Images, video, audio, PDFs, and text/code render
@@ -104,7 +105,7 @@ defaults except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `UPLOAD_PASSWORD`| (empty)                  | Require a password to create shares. Empty = open uploads.                  |
 | `DEFAULT_EXPIRY` | `604800` (7 days)        | Default expiry for new shares, in seconds. 0 = never.                       |
 | `DEFAULT_E2E`    | `1` (true)               | Whether new shares default to end-to-end encryption in the upload UI. 0 = default to server-managed shares. |
-| `ENCRYPT_AT_REST`| `1` (true)               | Whether server-managed (non-E2E) blobs are AES-256-CTR encrypted at rest. 0 = store them as plaintext (no server crypto, lighter to serve). E2E shares are unaffected either way. |
+| `ENCRYPT_AT_REST`| `1` (true)               | Whether server-managed (non-E2E) blobs are AES-256-GCM encrypted at rest. 0 = store them as plaintext (no server crypto, lighter to serve). E2E shares are unaffected either way. |
 | `APP_NAME`       | (coloured "RoeShare")    | Brand name and colours shown in the UI, e.g. `<col=5b9dff>Acme<b><col=34d27b>Drop</b>`. See [CUSTOMIZING.md](CUSTOMIZING.md). |
 | `THEME_PRIMARY`  | (empty)                  | Hex colour (e.g. `#3b82f6`) for the primary/button accent. No CSS edit needed. |
 | `THEME_ACCENT`   | (empty)                  | Hex colour (e.g. `#22c55e`) for links/highlights. No CSS edit needed.       |
@@ -207,15 +208,21 @@ examples, and key holders can manage their shares in the browser at `/api`.
 
 ## Security notes
 
-- **At-rest encryption**: server-managed blobs are AES-256-CTR ciphertext
-  keyed from `SECRET`, decrypted only in memory per authorized request. CTR
-  gives confidentiality, not integrity - access control is the boundary.
+- **At-rest encryption**: server-managed blobs are AES-256-GCM ciphertext in
+  independently-authenticated chunks, decrypted (and verified) only in memory
+  per authorized request - tampering or corruption on disk is detected and
+  refused, not silently decrypted. Every subkey (at-rest encryption, token
+  signing, credential tagging) is derived from `SECRET` via HKDF with its own
+  label, so they're cryptographically independent even though they share one
+  root secret. Files encrypted before this format existed keep decrypting via
+  the older AES-256-CTR path (confidentiality only, no per-chunk integrity)
+  rather than being re-encrypted.
 - **End-to-end shares** are encrypted in the browser; the server stores
   ciphertext it cannot read. New shares default to E2E.
 - Random share/file ids and tokens are unguessable; custom slugs are
   user-chosen, so password-protect anything sensitive behind one.
 - Share passwords are argon2-hashed and verified in constant time; admin
-  cookies and access tokens are HMAC-signed with `SECRET`.
+  cookies and access tokens are HMAC-signed with a `SECRET`-derived subkey.
 - Per-IP rate limiting on admin login, password unlock, and share creation.
 - Uploaded names are sanitized and blobs stored under generated ids - no
   client-controlled paths; size caps are enforced against actual bytes.

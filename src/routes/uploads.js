@@ -9,9 +9,10 @@ import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { json, error } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
-import { writeChunk, totalUsage, blobRangeStream } from '../lib/storage.js';
+import { writeChunk, totalUsage, blobRangeStream, fileEnc } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
-import { newIv } from '../lib/filecrypt.js';
+import { newFileSalt } from '../lib/filecrypt.js';
+import { CURRENT_AT_REST_KEY_ID } from '../lib/keys.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare } from '../lib/apikeys.js';
 import { enforceKey } from '../lib/ratelimit.js';
@@ -19,9 +20,9 @@ import { enforceKey } from '../lib/ratelimit.js';
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
 const insertFile = db.query(
-	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv) VALUES (?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?)'
+	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, enc_version, key_id) VALUES (?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)'
 );
-const getFile = db.query('SELECT id, size, received, complete, iv FROM files WHERE id = ? AND share_id = ?');
+const getFile = db.query('SELECT id, size, received, complete, iv, enc_version, key_id FROM files WHERE id = ? AND share_id = ?');
 const updateReceived = db.query('UPDATE files SET received = ?, complete = ? WHERE id = ?');
 const updateSha256 = db.query('UPDATE files SET sha256 = ? WHERE id = ?');
 
@@ -172,8 +173,10 @@ export default function uploads(router) {
 		// non-E2E file only gets an iv (and thus server-side encryption) when
 		// at-rest encryption is enabled; this is the only place ENCRYPT_AT_REST
 		// affects new writes - existing files keep decrypting via their own iv
-		// regardless of this setting (see storage.js).
-		const iv = share.e2e || !config.encryptAtRest ? null : newIv();
+		// regardless of this setting (see storage.js). Every new row is stamped
+		// enc_version=2/key_id=CURRENT_AT_REST_KEY_ID unconditionally - both
+		// columns are inert whenever iv is null.
+		const iv = share.e2e || !config.encryptAtRest ? null : newFileSalt();
 
 		// Re-check the per-share aggregate and insert inside one synchronous
 		// transaction: the `agg` snapshot above can go stale under concurrent
@@ -183,7 +186,7 @@ export default function uploads(router) {
 		const registered = db.transaction(() => {
 			const fresh = shareTotal.get(share.id);
 			if (fresh.total + size > caps.maxShareSize) return false;
-			insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv);
+			insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv, 2, CURRENT_AT_REST_KEY_ID);
 			return true;
 		})();
 		if (!registered) return error(413, 'Share exceeds the per-share size limit');
@@ -248,7 +251,7 @@ export default function uploads(router) {
 			if (chunk.length > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
 			if (file.received + chunk.length > file.size) return error(413, 'Chunk exceeds declared file size');
 
-			const received = await writeChunk(share.id, file.id, offset, chunk, file.iv);
+			const received = await writeChunk(share.id, file.id, offset, chunk, fileEnc(file));
 			const complete = received === file.size ? 1 : 0;
 			updateReceived.run(received, complete, file.id);
 			// Lifetime stats when a file first finishes (persist past deletion).
@@ -263,7 +266,7 @@ export default function uploads(router) {
 				// the same decrypt path download.js uses - so it is correct for at-rest
 				// encrypted files too.
 				const hash = createHash('sha256');
-				const plaintext = blobRangeStream(share.id, file.id, 0, file.size - 1, file.iv);
+				const plaintext = blobRangeStream(share.id, file.id, 0, file.size - 1, fileEnc(file));
 				for await (const part of plaintext) hash.update(part);
 				updateSha256.run(hash.digest('hex'), file.id);
 			}

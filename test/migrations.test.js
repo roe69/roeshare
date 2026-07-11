@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readdirSync } from 'node
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Database } from 'bun:sqlite';
-import { createHash } from 'node:crypto';
+import { createHash, createCipheriv, scryptSync, randomBytes } from 'node:crypto';
 
 const ROOT = join(import.meta.dir, '..');
 const sha256Hex = s => createHash('sha256').update(s).digest('hex');
@@ -209,6 +209,83 @@ describe('database migrations', () => {
 				const backups = readdirSync(join(dir, 'backups'));
 				expect(backups.some(f => f.startsWith('pre-migration-'))).toBe(true);
 				after.close();
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
+	// F-03/F-18: files gained enc_version/key_id columns (a plain column
+	// migration, defaulting existing rows to enc_version=1 - the legacy
+	// unauthenticated AES-256-CTR format) and the at-rest HMAC/HKDF key
+	// separation. Neither change may disturb a file that was already
+	// encrypted under the OLD code path: this fixture writes a v1 CTR blob
+	// exactly as the pre-change filecrypt.js would have (same key derivation
+	// - scrypt(SECRET, 'roeshare-fs-key-v1') - and the same AES-256-CTR
+	// construction), against a database missing the new columns entirely, and
+	// asserts both that the column migration lands the correct default AND
+	// that the file still decrypts correctly through the real download path.
+	test('migrates a legacy database missing enc_version/key_id, and its existing v1 CTR-encrypted blob still decrypts correctly', async () => {
+		const dir = freshDataDir('v1-encrypted');
+		const port = 3620;
+		const secret = `migration-test-secret-${port}`;
+		const plaintext = Buffer.from('Legacy encrypted content, sealed by the OLD v1 AES-256-CTR path.');
+		const ivHex = randomBytes(16).toString('hex');
+		const v1Key = scryptSync(secret, 'roeshare-fs-key-v1', 32);
+		const cipher = createCipheriv('aes-256-ctr', v1Key, Buffer.from(ivHex, 'hex'));
+		const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+
+		mkdirSync(join(dir, 'storage', 'v1share1'), { recursive: true });
+		writeFileSync(join(dir, 'storage', 'v1share1', 'v1file1'), ciphertext);
+
+		const db = new Database(join(dir, 'roeshare.db'), { create: true });
+		db.exec(`
+			CREATE TABLE shares (${SHARES_COLUMNS_LEGACY});
+			CREATE TABLE files (${FILES_COLUMNS_LEGACY}, sha256 TEXT);
+			CREATE TABLE api_keys (${API_KEYS_COLUMNS});
+		`);
+		const rawToken = 'V1CTRtoken1234567890abcdefghijk'; // 32 chars, pre-hashing raw-token shape
+		db.query(
+			`INSERT INTO shares (id,title,created_at,expires_at,password_hash,max_downloads,one_time,edit_token,finalized,deleted_at,creator_ip,creator_ua,e2e,view_count,api_key_id)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		).run('v1share1', 'v1 encrypted', Math.floor(Date.now() / 1000), null, null, null, 0, sha256Hex(rawToken), 0, null, '127.0.0.1', 'test', 0, 0, null);
+		db.query(
+			'INSERT INTO files (id,share_id,name,size,received,mime,complete,download_count,created_at,stored_name,iv,sha256) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+		).run('v1file1', 'v1share1', 'secret.txt', plaintext.length, plaintext.length, 'text/plain', 1, 0, Math.floor(Date.now() / 1000), 'v1file1', ivHex, sha256Hex(plaintext));
+		db.close();
+
+		try {
+			const proc = await bootServer(dir, port);
+			try {
+				// The new columns must exist, defaulted for this pre-existing row to
+				// enc_version=1 (legacy CTR) / key_id=1 - never enc_version=2, which
+				// would make storage.js try to parse this CTR blob as chunked GCM.
+				const after = new Database(join(dir, 'roeshare.db'));
+				const cols = after.query('PRAGMA table_info(files)').all().map(c => c.name);
+				expect(cols).toContain('enc_version');
+				expect(cols).toContain('key_id');
+				const row = after.query('SELECT enc_version, key_id FROM files WHERE id = ?').get('v1file1');
+				expect(row.enc_version).toBe(1);
+				expect(row.key_id).toBe(1);
+				after.close();
+
+				// The pre-existing v1 CTR blob must still decrypt correctly end to end.
+				const dl = await fetch(`http://127.0.0.1:${port}/api/shares/v1share1/files/v1file1/download`, {
+					headers: { 'X-Edit-Token': rawToken },
+				});
+				expect(dl.status).toBe(200);
+				const got = Buffer.from(await dl.arrayBuffer());
+				expect(got.equals(plaintext)).toBe(true);
+
+				// And a Range read of it (v1's seekable CTR path) must also stay correct.
+				const rangeDl = await fetch(`http://127.0.0.1:${port}/api/shares/v1share1/files/v1file1/download`, {
+					headers: { 'X-Edit-Token': rawToken, Range: 'bytes=8-19' },
+				});
+				expect(rangeDl.status).toBe(206);
+				const gotRange = Buffer.from(await rangeDl.arrayBuffer());
+				expect(gotRange.equals(plaintext.subarray(8, 20))).toBe(true);
 			} finally {
 				await stopServer(proc);
 			}

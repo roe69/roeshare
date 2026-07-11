@@ -10,7 +10,7 @@ import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/
 import { verifySecretToken } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
 import { verifyApiKey, readApiKey, readApiKeySession, keyValidForShare } from '../lib/apikeys.js';
-import { blobFile, blobPath, blobRangeStream, deleteShareFiles } from '../lib/storage.js';
+import { blobPath, blobRangeStream, deleteShareFiles, fileEnc, plainSize } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
@@ -207,7 +207,7 @@ function offloadHeaders(share, file) {
 // second stat syscall and re-parse on the hot streaming path.
 function rangeResponse(share, file, req, opts = {}) {
 	const { inline = false, contentType, makeBody, extraHeaders, head = false } = opts;
-	const size = opts.size !== undefined ? opts.size : blobFile(share.id, file.id).size;
+	const size = opts.size !== undefined ? opts.size : plainSize(file, share.id);
 	const range = opts.range !== undefined ? opts.range : parseRange(req.headers.get('range'), size);
 	if (range?.invalid) {
 		return new Response(null, {
@@ -222,7 +222,7 @@ function rangeResponse(share, file, req, opts = {}) {
 	// createReadStream fd would leak on every probe.
 	let body = null;
 	if (!head) {
-		const decrypted = blobRangeStream(share.id, file.id, start, end, file.iv);
+		const decrypted = blobRangeStream(share.id, file.id, start, end, fileEnc(file));
 		body = makeBody ? makeBody(decrypted) : decrypted;
 	}
 	return new Response(body, {
@@ -339,7 +339,7 @@ export default function download(router) {
 		// The owner's own reads (edit token or owning API key) never hit the cap.
 		if (!owner && limitReached(share)) return error(410, 'Download limit reached');
 
-		const size = blobFile(share.id, file.id).size;
+		const size = plainSize(file, share.id);
 		const range = parseRange(req.headers.get('range'), size);
 		// A controlled share (one-time, or under a download cap) can only ever
 		// be delivered whole to a non-owner: an ordinary pair of non-overlapping
@@ -481,7 +481,7 @@ export default function download(router) {
 		const usedZipNames = new Set();
 		const entries = files.map(f => ({
 			name: uniqueZipName(f.name, usedZipNames),
-			file: { stream: () => blobRangeStream(share.id, f.id, 0, f.size - 1, f.iv) },
+			file: { stream: () => blobRangeStream(share.id, f.id, 0, f.size - 1, fileEnc(f)) },
 			size: f.size,
 		}));
 

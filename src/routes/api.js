@@ -21,7 +21,8 @@ import { hashPassword, hashSecretToken } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
 import { writeChunk, deleteShareFiles, isCleanupPending } from '../lib/storage.js';
 import { sharedTotalUsage } from './uploads.js';
-import { newIv } from '../lib/filecrypt.js';
+import { newFileSalt } from '../lib/filecrypt.js';
+import { CURRENT_AT_REST_KEY_ID } from '../lib/keys.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce, enforceKey } from '../lib/ratelimit.js';
 import { slugError } from '../lib/slug.js';
@@ -42,7 +43,7 @@ const insertShare = db.query(
 	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
 );
 const insertFile = db.query(
-	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, sha256) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)',
+	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, sha256, enc_version, key_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)',
 );
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
 const softDeleteShare = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
@@ -377,18 +378,18 @@ export default function apiV1(router) {
 		if (made.limited) return error(403, made.limited);
 
 		const fileId = newFileId();
-		const iv = newIv();
+		const iv = newFileSalt();
 		// Write the bytes BEFORE recording the file as complete, so a write failure
 		// never leaves a phantom "complete" row pointing at a missing/partial blob.
 		try {
-			await writeChunk(made.id, fileId, 0, buf, iv);
+			await writeChunk(made.id, fileId, 0, buf, { version: 2, keyId: CURRENT_AT_REST_KEY_ID, fileSalt: iv, fileId });
 		} catch (e) {
 			console.error('one-shot upload write failed for', made.id, e);
 			softDeleteShare.run(now(), made.id);
 			await deleteShareFiles(made.id).catch(() => {});
 			return error(500, 'Could not store the file');
 		}
-		insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv, sha256);
+		insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv, sha256, 2, CURRENT_AT_REST_KEY_ID);
 		setFinalized.run(made.id);
 
 		// File-completion stats (the chunked flow records these in uploads.js; the

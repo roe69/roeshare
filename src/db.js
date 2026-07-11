@@ -81,8 +81,20 @@ const schema = {
 		download_count: 'INTEGER NOT NULL DEFAULT 0',
 		created_at:     'INTEGER NOT NULL',
 		stored_name:    'TEXT NOT NULL',               // on-disk blob name (== id), never the original
-		iv:             'TEXT',                        // at-rest AES-CTR IV; null = stored as plaintext / E2E
+		// At-rest format marker. NULL iv = stored as plaintext / E2E (the sole
+		// "no server crypto" signal, regardless of enc_version). Otherwise iv's
+		// meaning depends on enc_version - v1: 16-byte AES-CTR IV (hex); v2:
+		// 16-byte per-file HKDF salt (hex) - both 32 hex chars, disambiguated
+		// only via enc_version, never by content. See lib/filecrypt.js.
+		iv:             'TEXT',
 		sha256:         'TEXT',                         // content digest of the plaintext; null until upload completes
+		// At-rest format version: 1 = legacy unauthenticated AES-CTR (kept
+		// forever, never migrated), 2 = authenticated per-chunk AES-GCM (every
+		// new file). Existing rows default to 1, which is correct for them.
+		enc_version:    'INTEGER NOT NULL DEFAULT 1',
+		// Which lib/keys.js AT_REST_KEYS entry the file's v2 per-file key was
+		// derived from (inert for v1/plaintext/E2E rows).
+		key_id:         'INTEGER NOT NULL DEFAULT 1',
 	},
 	download_events: {
 		id:       'INTEGER PRIMARY KEY AUTOINCREMENT',
