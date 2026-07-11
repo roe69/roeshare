@@ -10,6 +10,7 @@
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
 import { config } from './config.js';
+import { hashSecretToken } from './lib/crypto.js';
 
 mkdirSync(config.dataDir, { recursive: true });
 mkdirSync(config.storageDir, { recursive: true });
@@ -109,5 +110,25 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_shares_apikey ON shares(api_key_id);
 	CREATE INDEX IF NOT EXISTS idx_events_share ON download_events(share_id);
 `);
+
+// Two idempotent migrations for a data directory that predates a schema/format
+// change - CREATE TABLE IF NOT EXISTS above only covers a brand-new DATA_DIR, so
+// an existing files table needs the new column added in place, and existing
+// shares need their edit_token rehashed to the new stored format. Both are safe
+// to run on every boot: the sha256 check is a no-op once the column exists, and
+// the rehash only touches rows still holding the old 32-char raw token
+// (hashSecretToken's output is always a 64-char hex digest, so length alone
+// tells the two formats apart - the client still holds the original raw token
+// from when their share was created, so this is transparent to them).
+const filesColumns = db.query('PRAGMA table_info(files)').all().map(c => c.name);
+if (!filesColumns.includes('sha256')) {
+	db.exec('ALTER TABLE files ADD COLUMN sha256 TEXT');
+}
+
+const legacyEditTokens = db.query('SELECT id, edit_token FROM shares WHERE length(edit_token) != 64').all();
+if (legacyEditTokens.length) {
+	const rehashEditToken = db.query('UPDATE shares SET edit_token = ? WHERE id = ?');
+	for (const row of legacyEditTokens) rehashEditToken.run(hashSecretToken(row.edit_token), row.id);
+}
 
 export const now = () => Math.floor(Date.now() / 1000);
