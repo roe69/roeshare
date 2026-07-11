@@ -390,4 +390,77 @@ describe('database migrations', () => {
 			cleanupDir(dir);
 		}
 	});
+
+	// F-06: api_keys gained four scope_* columns (DEFAULT 0 - deny-by-default
+	// storage) plus a named 'grant-legacy-apikey-scopes' migration that
+	// grandfathers every PRE-EXISTING key to full access, since a key minted
+	// before scopes existed implicitly held every scope. Without that grant, the
+	// plain column migration alone would silently downgrade every key created
+	// before this batch shipped to a key that can do nothing.
+	test('grant-legacy-apikey-scopes migration grandfathers a pre-scopes API key to full access', async () => {
+		const dir = freshDataDir('legacy-apikey-scopes');
+		const db = new Database(join(dir, 'roeshare.db'), { create: true });
+		db.exec(`
+			CREATE TABLE shares (${SHARES_COLUMNS_LEGACY});
+			CREATE TABLE files (${FILES_COLUMNS_LEGACY}, sha256 TEXT);
+			CREATE TABLE api_keys (${API_KEYS_COLUMNS});
+		`);
+		const legacyKeyId = 'legacyapikey1';
+		const legacySecret = 'LegacyApiKeySecretRawValue1234567890AB';
+		// API_KEYS_COLUMNS has no scope_* columns at all (the pre-F-06 shape) -
+		// only name/key_hash/created_at are supplied; every other column (upload
+		// counters, allow_slug/allow_password) takes its legacy DDL default.
+		db.query('INSERT INTO api_keys (id, name, key_hash, created_at) VALUES (?, ?, ?, ?)')
+			.run(legacyKeyId, 'Legacy backup key', sha256Hex(legacySecret), Math.floor(Date.now() / 1000));
+		db.close();
+
+		const port = 3621;
+		try {
+			const proc = await bootServer(dir, port);
+			try {
+				const base = `http://127.0.0.1:${port}`;
+				const token = `rsk_${legacyKeyId}_${legacySecret}`;
+
+				// The column migration must have added all four scope columns, and the
+				// named migration must have granted this pre-existing row full access.
+				const after = new Database(join(dir, 'roeshare.db'));
+				const cols = after.query('PRAGMA table_info(api_keys)').all().map(c => c.name);
+				expect(cols).toEqual(expect.arrayContaining(['scope_create', 'scope_write', 'scope_read', 'scope_delete']));
+				const row = after.query('SELECT scope_create, scope_write, scope_read, scope_delete FROM api_keys WHERE id = ?').get(legacyKeyId);
+				expect(row).toEqual({ scope_create: 1, scope_write: 1, scope_read: 1, scope_delete: 1 });
+				after.close();
+
+				// End to end: the legacy key can still create, write, list, read, and
+				// delete a share through the real API - exactly as it could before this
+				// batch shipped scopes, with no admin action required to keep it working.
+				const createRes = await fetch(`${base}/api/v1/shares`, {
+					method: 'POST',
+					headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+					body: JSON.stringify({}),
+				});
+				expect(createRes.status).toBe(201);
+				const { id, editToken } = await createRes.json();
+
+				const regRes = await fetch(`${base}/api/shares/${id}/files`, {
+					method: 'POST',
+					headers: { 'X-Edit-Token': editToken, 'Content-Type': 'application/json' },
+					body: JSON.stringify({ name: 'f.bin', size: 5, mime: 'application/octet-stream' }),
+				});
+				expect(regRes.status).toBe(200);
+
+				const listRes = await fetch(`${base}/api/v1/shares`, { headers: { Authorization: `Bearer ${token}` } });
+				expect(listRes.status).toBe(200);
+
+				const getRes = await fetch(`${base}/api/v1/shares/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+				expect(getRes.status).toBe(200);
+
+				const delRes = await fetch(`${base}/api/v1/shares/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+				expect(delRes.status).toBe(200);
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
 });

@@ -142,6 +142,17 @@ const schema = {
 		max_expiry:     'INTEGER',                     // max share lifetime in seconds (null = no cap)
 		allow_slug:     'INTEGER NOT NULL DEFAULT 1',  // may set custom share links
 		allow_password: 'INTEGER NOT NULL DEFAULT 1',  // may set share passwords
+		// Operation-level scopes (F-06): a compromised key is limited to only the
+		// operations it actually needs (e.g. a backup-writer key that can never
+		// list/read/delete). DEFAULT 0 makes storage deny-by-default - a row that
+		// somehow appears without explicit scope values can do nothing. Existing
+		// (pre-scopes) keys are grandfathered to full access by the
+		// 'grant-legacy-apikey-scopes' migration below; every key created after
+		// scopes shipped gets explicit values from createApiKey/sanitizeLimits.
+		scope_create:   'INTEGER NOT NULL DEFAULT 0',  // may create shares (POST /api/v1/shares, /upload)
+		scope_write:    'INTEGER NOT NULL DEFAULT 0',  // may upload/register/finalize files
+		scope_read:     'INTEGER NOT NULL DEFAULT 0',  // may list/inspect its shares, and read-owns them
+		scope_delete:   'INTEGER NOT NULL DEFAULT 0',  // may delete its shares
 	},
 	// Small persistent key/value store, currently just for migration bookkeeping
 	// (see MIGRATIONS below).
@@ -244,6 +255,17 @@ const MIGRATIONS = [
 			const rehash = db.query('UPDATE shares SET edit_token = ? WHERE id = ?');
 			for (const row of rows) rehash.run(hashSecretToken(row.edit_token), row.id);
 			return rows.length;
+		},
+	},
+	{
+		id: 'grant-legacy-apikey-scopes',
+		// Keys minted before operation scopes existed implicitly held every scope;
+		// grandfather them to full access so no key that works today breaks. Keys
+		// created after this ships always get explicit scope values from
+		// createApiKey, so this once-only blanket grant can never widen a
+		// deliberately-restricted future key.
+		run() {
+			return db.query('UPDATE api_keys SET scope_create = 1, scope_write = 1, scope_read = 1, scope_delete = 1').run().changes;
 		},
 	},
 ];

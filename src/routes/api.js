@@ -27,7 +27,7 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce, enforceKey } from '../lib/ratelimit.js';
 import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
-import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow } from '../lib/apikeys.js';
+import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow, requireScope } from '../lib/apikeys.js';
 
 // lower(id) so a slug can never collide-by-case with an existing one (the
 // on-disk share directory is effectively case-insensitive on some
@@ -297,6 +297,8 @@ export default function apiV1(router) {
 	router.post('/api/v1/shares', async ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const scopeDenied = requireScope(key, 'create');
+		if (scopeDenied) return scopeDenied;
 		const limited = enforceKey('api-create', key.id, 120, 10 * 60 * 1000);
 		if (limited) return limited;
 
@@ -336,6 +338,10 @@ export default function apiV1(router) {
 	router.post('/api/v1/upload', async ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		let scopeDenied = requireScope(key, 'create');
+		if (scopeDenied) return scopeDenied;
+		scopeDenied = requireScope(key, 'write');
+		if (scopeDenied) return scopeDenied;
 		const limited = enforceKey('api-upload', key.id, 120, 10 * 60 * 1000);
 		if (limited) return limited;
 
@@ -457,6 +463,8 @@ export default function apiV1(router) {
 	router.get('/api/v1/shares', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const scopeDenied = requireScope(key, 'read');
+		if (scopeDenied) return scopeDenied;
 		const limited = enforceKey('api-list', key.id, 300, 60000);
 		if (limited) return limited;
 
@@ -493,6 +501,8 @@ export default function apiV1(router) {
 	router.get('/api/v1/shares/:id', ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const scopeDenied = requireScope(key, 'read');
+		if (scopeDenied) return scopeDenied;
 		const limited = enforceKey('api-get', key.id, 300, 60000);
 		if (limited) return limited;
 		const share = getOwnedShare.get(ctx.params.id, key.id);
@@ -505,6 +515,8 @@ export default function apiV1(router) {
 	router.delete('/api/v1/shares/:id', async ctx => {
 		const key = authenticate(ctx.req);
 		if (!key) return error(401, 'Invalid or missing API key');
+		const scopeDenied = requireScope(key, 'delete');
+		if (scopeDenied) return scopeDenied;
 		const limited = enforceKey('api-delete', key.id, 60, 60000);
 		if (limited) return limited;
 		const share = getOwnedShare.get(ctx.params.id, key.id);

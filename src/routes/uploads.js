@@ -14,7 +14,7 @@ import { newFileId } from '../lib/ids.js';
 import { newFileSalt } from '../lib/filecrypt.js';
 import { CURRENT_AT_REST_KEY_ID } from '../lib/keys.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
-import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare } from '../lib/apikeys.js';
+import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare, scopeErrorForShare } from '../lib/apikeys.js';
 import { enforceKey } from '../lib/ratelimit.js';
 import { reserveInTx, commitInTx, touchInTx } from '../lib/quota.js';
 import { acquireAll, overloaded } from '../lib/semaphore.js';
@@ -103,6 +103,8 @@ export default function uploads(router) {
 		if (finalizedErr) return finalizedErr;
 		const keyErr = checkKeyValid(share);
 		if (keyErr) return keyErr;
+		const scopeErr = scopeErrorForShare(share, 'write');
+		if (scopeErr) return scopeErr;
 
 		// Bounds the 10000-file-flood metadata-bloat vector (each registration is
 		// cheap on its own, but a flood of them still grows the files table). Keyed
@@ -173,6 +175,8 @@ export default function uploads(router) {
 		if (res) return res;
 		const keyErr = checkKeyValid(share);
 		if (keyErr) return keyErr;
+		const scopeErr = scopeErrorForShare(share, 'write');
+		if (scopeErr) return scopeErr;
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
 		return json({ received: file.received, size: file.size, complete: !!file.complete });
@@ -186,6 +190,8 @@ export default function uploads(router) {
 		if (finalizedErr) return finalizedErr;
 		const keyErr = checkKeyValid(share);
 		if (keyErr) return keyErr;
+		const scopeErr = scopeErrorForShare(share, 'write');
+		if (scopeErr) return scopeErr;
 
 		// This is the highest-request-volume endpoint in the app (one PATCH per
 		// chunk), so it gets a generous per-share ceiling rather than none.

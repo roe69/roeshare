@@ -13,7 +13,7 @@ import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
 import { acquire, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
-import { keyValidForShare } from '../lib/apikeys.js';
+import { keyValidForShare, scopeErrorForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
 
 const getShare = db.query('SELECT * FROM shares WHERE id = ?');
@@ -241,7 +241,13 @@ export default function shares(router) {
 		const share = liveShare(ctx.params.id);
 		if (!share) return error(404, 'Not found');
 
-		const owner = isOwner(ctx.req, share);
+		// A write/create-only key's edit token still authenticates as owner
+		// (isOwner), but read-elevation here degrades rather than errors: without
+		// the shares:read scope on the backing key, treat the caller as an
+		// ordinary visitor instead of a 403 - so a write-only drop-box key never
+		// breaks public visitors of its own shares (the password gate still
+		// applies normally below).
+		const owner = isOwner(ctx.req, share) && (share.api_key_id == null || hasScope(apiKeyRow(share.api_key_id), 'read'));
 
 		if (share.password_hash && !owner) {
 			const token = readAccessToken(ctx.req, ctx.url);
@@ -306,6 +312,8 @@ export default function shares(router) {
 		const limited = enforce(`finalize:${ctx.params.id}`, ctx.ip, 60, 60_000);
 		if (limited) return limited;
 		if (!isOwner(ctx.req, share)) return error(403, 'Forbidden');
+		const scopeErr = scopeErrorForShare(share, 'write');
+		if (scopeErr) return scopeErr;
 
 		// Start the published-link expiry clock at finalize, not at creation: shift
 		// expires_at forward by however long the upload took, so the link lives for
@@ -326,7 +334,15 @@ export default function shares(router) {
 		if (!share) return error(404, 'Not found');
 		const limited = enforce(`delete:${ctx.params.id}`, ctx.ip, 60, 60_000);
 		if (limited) return limited;
-		if (!isOwner(ctx.req, share) && !isAdmin(ctx.req)) return error(403, 'Forbidden');
+		const owner = isOwner(ctx.req, share);
+		if (!owner && !isAdmin(ctx.req)) return error(403, 'Forbidden');
+		// Only the edit-token (key-owner) path is scope-gated; an admin deleting
+		// through the admin session bypasses per-key scopes entirely, same as
+		// every other admin route.
+		if (owner) {
+			const scopeErr = scopeErrorForShare(share, 'delete');
+			if (scopeErr) return scopeErr;
+		}
 
 		softDelete.run(now(), share.id);
 		quota.releaseShare(share.id);

@@ -9,7 +9,7 @@ import { config } from '../config.js';
 import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
-import { verifyApiKey, readApiKey, readApiKeySession, keyValidForShare } from '../lib/apikeys.js';
+import { verifyApiKey, readApiKey, readApiKeySession, keyValidForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
 import { blobPath, blobRangeStream, deleteShareFiles, fileEnc, plainSize } from '../lib/storage.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
@@ -95,9 +95,13 @@ function accessCheck(share, req, url) {
 	// branch just below is already safe: verifyApiKey/readApiKeySession reject
 	// a revoked/expired key on their own.)
 	let owner = !!editToken && verifySecretToken(editToken, share.edit_token) && keyValidForShare(share);
+	// A valid edit token only grants read-owner access when the backing key
+	// still holds the shares:read scope - a write-only (e.g. drop-box) key's
+	// edit token must not unlock reading/downloading what it uploaded.
+	if (owner && share.api_key_id && !hasScope(apiKeyRow(share.api_key_id), 'read')) owner = false;
 	if (!owner && share.api_key_id) {
 		const key = verifyApiKey(readApiKey(req)) || readApiKeySession(req);
-		if (key && key.id === share.api_key_id) owner = true;
+		if (key && key.id === share.api_key_id && hasScope(key, 'read')) owner = true;
 	}
 	if (owner || !share.password_hash) return { ok: true, owner };
 	const token = readAccessToken(req, url);

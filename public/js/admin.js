@@ -898,6 +898,18 @@ function scopeControls(initial = {}, opts = {}) {
 	const allowPassword = el('input', { type: 'checkbox' });
 	allowPassword.checked = initial.allowPassword !== false;
 
+	// Operation-level scopes (F-06): which /api/v1 operations this key may
+	// perform. All default to allowed, matching a key with no scopes set.
+	const initialScopes = initial.scopes || {};
+	const scopeCreate = el('input', { type: 'checkbox' });
+	scopeCreate.checked = initialScopes.create !== false;
+	const scopeWrite = el('input', { type: 'checkbox' });
+	scopeWrite.checked = initialScopes.write !== false;
+	const scopeRead = el('input', { type: 'checkbox' });
+	scopeRead.checked = initialScopes.read !== false;
+	const scopeDelete = el('input', { type: 'checkbox' });
+	scopeDelete.checked = initialScopes.delete !== false;
+
 	const fields = [
 		editField('Max file size', fileCap.node, 'Per file. Blank uses the server limit.'),
 		editField('Max share size', shareCap.node, 'Per share. Blank uses the server limit.'),
@@ -912,6 +924,13 @@ function scopeControls(initial = {}, opts = {}) {
 			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, allowSlug, el('span', {}, 'Allow custom share links (slugs)')),
 			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, allowPassword, el('span', {}, 'Allow setting share passwords')),
 		),
+		el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' },
+			el('p', { class: 'rl-help', style: 'margin:0' }, 'Operations this key may perform via the API:'),
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, scopeCreate, el('span', {}, 'Create shares')),
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, scopeWrite, el('span', {}, 'Upload/write files')),
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, scopeRead, el('span', {}, 'List and read shares')),
+			el('label', { class: 'rl-row', style: 'gap:var(--rl-space-2);font-size:var(--rl-text-sm)' }, scopeDelete, el('span', {}, 'Delete shares')),
+		),
 	);
 
 	const collect = () => {
@@ -923,6 +942,12 @@ function scopeControls(initial = {}, opts = {}) {
 			maxExpiry: lifetime.value ? Number(lifetime.value) : null,
 			allowSlug: allowSlug.checked,
 			allowPassword: allowPassword.checked,
+			scopes: {
+				create: scopeCreate.checked,
+				write: scopeWrite.checked,
+				read: scopeRead.checked,
+				delete: scopeDelete.checked,
+			},
 		};
 	};
 
@@ -938,6 +963,9 @@ function limitsSummary(limits = {}) {
 	if (limits.maxExpiry) bits.push(`${timeUntil(Math.floor(Date.now() / 1000) + limits.maxExpiry)} max`);
 	if (limits.allowSlug === false) bits.push('no slugs');
 	if (limits.allowPassword === false) bits.push('no passwords');
+	const scopes = limits.scopes || {};
+	const denied = ['create', 'write', 'read', 'delete'].filter(s => scopes[s] === false);
+	if (denied.length) bits.push(`no ${denied.join('/')}`);
 	return bits;
 }
 
@@ -1541,6 +1569,7 @@ function renderApiDocs() {
 				['Max total shares', 'a lifetime cap on how many shares the key can create'],
 				['Max share lifetime', 'forces every share from the key to expire within a window'],
 				['Allow custom links / passwords', 'toggles whether the key may set slugs or share passwords'],
+				['Operation scopes', 'create / write / read / delete - restrict a key to only the operations it needs (e.g. a write-only drop-box key that can never list, read, or delete)'],
 			]),
 			el('p', { class: 'rl-help' }, 'A request that exceeds a cap or uses a disallowed scope gets a 403 (scope/limit) or 413 (size).'),
 		),
