@@ -659,7 +659,10 @@ async function load() {
 		if (err instanceof ApiError && err.status === 404) {
 			renderMissing();
 		} else if (err instanceof ApiError && err.status === 401 && err.data && err.data.protected) {
-			renderPasswordForm(err.data.title);
+			// The server no longer includes the share's title in this response (it
+			// could leak sensitive names before the password is proven), so the
+			// unlock prompt always shows the generic label.
+			renderPasswordForm();
 		} else {
 			clear();
 			renderMissing();

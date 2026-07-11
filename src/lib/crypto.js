@@ -26,7 +26,12 @@ export function signToken(payload, ttlSeconds) {
 // signature is invalid, malformed, or expired.
 export function verifyToken(token) {
 	if (typeof token !== 'string' || !token.includes('.')) return null;
-	const [data, sig] = token.split('.');
+	const parts = token.split('.');
+	// Exactly two segments (data.sig) - any extra "." segment is rejected
+	// outright rather than silently ignored, so a token cannot be extended with
+	// a trailing ".xyz" and still parse as if unmodified.
+	if (parts.length !== 2) return null;
+	const [data, sig] = parts;
 	if (!data || !sig) return null;
 	const expected = sign(data);
 	let ok = false;

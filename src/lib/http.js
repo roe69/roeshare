@@ -48,7 +48,15 @@ export function parseCookies(req) {
 		if (idx === -1) continue;
 		const k = part.slice(0, idx).trim();
 		const v = part.slice(idx + 1).trim();
-		if (k) out[k] = decodeURIComponent(v);
+		if (!k) continue;
+		// A malformed percent-encoding (e.g. a lone "%ZZ") makes decodeURIComponent
+		// throw; treat that single cookie as absent rather than letting it crash
+		// the whole request up to a generic 500.
+		try {
+			out[k] = decodeURIComponent(v);
+		} catch {
+			continue;
+		}
 	}
 	return out;
 }

@@ -257,11 +257,25 @@ export default function download(router) {
 		const { ok, owner } = accessCheck(share, req, url);
 		if (!ok) return error(403, 'Password required');
 		// The owner (edit token or the API key that created the share) manages and
-		// restores their own share, so this gate does not apply to them.
-		if (!owner && share.one_time) return error(403, 'Preview is disabled for one-time shares');
+		// restores their own share, so this gate does not apply to them. Preview
+		// never counts as a download, so any share with retrieval control - burn
+		// on first access, or a download cap - must refuse to preview entirely for
+		// a non-owner; otherwise the full file is retrievable inline with the
+		// counter never incremented, silently bypassing the control.
+		if (!owner && (share.one_time || share.max_downloads !== null)) return error(403, 'Preview is disabled for this share');
 		const file = getFile.get(params.fileId, share.id);
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
+		// A password-protected share's bytes must never linger in a shared/browser
+		// cache keyed only by URL - a subsequent visitor (or the same browser after
+		// the password changes) could read cached content past the point where they
+		// should still be authorized. one_time/max_downloads-capped shares are
+		// already blocked above for non-owners, but the owner's own preview of such
+		// a share should not be cached long-term either. Only a fully public,
+		// uncontrolled share gets the long immutable cache.
+		const cacheControl = share.password_hash || share.one_time || share.max_downloads !== null
+			? 'no-store'
+			: 'private, max-age=31536000, immutable';
 		const offload = offloadHeaders(share, file);
 		if (offload) {
 			const serving = previewServing(file.mime);
@@ -271,7 +285,7 @@ export default function download(router) {
 					'Content-Type': serving.type,
 					'Content-Disposition': contentDisposition(file.name.split('/').pop(), serving.inline),
 					'Content-Security-Policy': PREVIEW_CSP,
-					'Cache-Control': 'private, max-age=31536000, immutable',
+					'Cache-Control': cacheControl,
 					ETag: '"' + file.id + '"',
 					'Accept-Ranges': 'bytes',
 					...SECURITY_HEADERS,
@@ -287,8 +301,9 @@ export default function download(router) {
 				'Content-Security-Policy': PREVIEW_CSP,
 				// Previewed bytes are immutable content addressed by file id, so a
 				// scrub-back in the player can be served from the browser cache
-				// instead of re-requesting already-fetched ranges.
-				'Cache-Control': 'private, max-age=31536000, immutable',
+				// instead of re-requesting already-fetched ranges - but only for a
+				// fully public, uncontrolled share (see cacheControl above).
+				'Cache-Control': cacheControl,
 				ETag: '"' + file.id + '"',
 			},
 		});
@@ -478,6 +493,18 @@ export default function download(router) {
 			const claimed = claimOneTime.run(now(), share.id).changes > 0;
 			if (!claimed) return error(410, 'This one-time share has already been taken');
 		}
+		// A download-capped (non-one-time) share must count only a COMPLETED full
+		// zip delivery, so a cancelled/failed archive never consumes the cap. The
+		// slot is claimed atomically up front here (not via the plain
+		// check-then-act limitReached() check above, which only short-circuits the
+		// common case) so N concurrent zip requests against a maxDownloads=1 share
+		// cannot all pass - the same guarantee the single-file download path
+		// already gets from claimDownload/releaseDownload.
+		const capped = full && !share.one_time && share.max_downloads !== null;
+		if (capped) {
+			const claimed = claimDownload.run(share.id).changes > 0;
+			if (!claimed) return error(410, 'Download limit reached');
+		}
 
 		let body = createZipStream(entries);
 		if (full) {
@@ -486,11 +513,12 @@ export default function download(router) {
 			body = trackedStream(body, {
 				onComplete: () => {
 					completed = true;
-					recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip);
+					recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip, { countShare: !capped });
 					if (share.one_time) burnPending.add(share.id);
 				},
 				onEnd: () => {
 					if (share.one_time && !completed) restoreShare.run(share.id);
+					if (capped && !completed) releaseDownload.run(share.id);
 					readEnd(share.id);
 				},
 			});

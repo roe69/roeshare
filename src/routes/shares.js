@@ -231,7 +231,10 @@ export default function shares(router) {
 		if (share.password_hash && !owner) {
 			const token = readAccessToken(ctx.req, ctx.url);
 			if (!token || !hasAccessToken(token, share.id, share.password_hash)) {
-				return json({ protected: true, title: share.title }, 401);
+				// No share metadata (title in particular, which for backup jobs may
+				// contain hostnames/customer names) before the visitor has proven
+				// they know the password.
+				return json({ protected: true }, 401);
 			}
 		}
 
