@@ -70,32 +70,53 @@ the "HTTPS (reverse proxy)" section in [README.md](README.md) and
 [`deploy/nginx.example.conf`](deploy/nginx.example.conf) /
 [`deploy/Caddyfile.example`](deploy/Caddyfile.example).
 
-### `TRUSTED_PROXY_HOPS`: local reverse proxy vs. a CDN connecting directly
+### `TRUSTED_PROXY_CIDRS` / `TRUSTED_PROXY_HOPS`: verify, don't assume
 
 `TRUSTED_PROXY_HOPS` (default `1`) is how many of X-Forwarded-For's trailing
-entries are a trusted proxy's own relayed address rather than the real
-client, and so get skipped:
+entries to skip (a relaying proxy's own appended address) before taking the
+real client. `TRUSTED_PROXY_CIDRS` is who's allowed to set that header at
+all - checked against the actual TCP socket peer of the request, which a
+client can never spoof.
 
-- **A local reverse proxy on the same host** (nginx/Caddy per the examples
-  above, appending its own peer address via `$proxy_add_x_forwarded_for` or
-  equivalent) - use the default, `1`.
-- **A CDN/edge network connects straight to this host's published port**,
-  with no local reverse proxy in front of it (e.g. Cloudflare DNS-proxied
-  straight to the origin IP) - use `TRUSTED_PROXY_HOPS=0`. That one trusted
-  hop terminates the client connection itself and sets X-Forwarded-For to the
-  real visitor IP outright, so nothing should be skipped; also set
-  `TRUSTED_PROXY_CIDRS` to that provider's published edge IP ranges (for
-  Cloudflare: https://www.cloudflare.com/ips/ - re-check occasionally, they
-  change rarely but do change), not a local/loopback range.
+**Don't guess these from the deployment's architecture on paper - verify
+against the real request.** Two things can make the socket peer NOT be what
+you'd expect from a diagram:
 
-If a CDN connects directly to the origin's published port, that port is also
-reachable by anyone who finds the host's real IP, bypassing the CDN's own
-WAF/DDoS protection entirely (forwarding-header spoofing is still safe -
-requests arriving that way come from an untrusted peer and get their headers
-ignored - but the CDN's own protections are skipped). Where the host's
-firewall supports it, restrict the published port to only the CDN's IP
-ranges (e.g. Cloudflare's, kept current from the same URL above) so direct-IP
-traffic is dropped before it reaches Docker at all.
+- A **local reverse proxy on the same host** (nginx/Caddy per the examples
+  above) normally appends its own peer address via
+  `$proxy_add_x_forwarded_for` or equivalent, making the default `HOPS=1`
+  correct, with `TRUSTED_PROXY_CIDRS` set to wherever that proxy's own
+  connection to the app actually originates from - which, behind Docker's
+  published-port NAT, is often the Docker bridge gateway, not literally
+  `127.0.0.1`; check `docker network inspect <project>_default`.
+- A **CDN/edge network connecting straight to the host's published port**
+  (no local reverse proxy) doesn't necessarily mean the app sees the CDN's
+  own edge IP as the socket peer, or that X-Forwarded-For has only one entry
+  - some cloud providers NAT all inbound traffic onto a private per-VM
+  address before Docker ever sees it, and some CDNs (Cloudflare included)
+  can present an internal relay address as a second X-Forwarded-For entry
+  rather than setting a single one outright. Assuming `HOPS=0` and a
+  CDN-published CIDR list here was tried on this project's own production
+  instance and was wrong on both counts.
+
+The reliable way to get this right: temporarily add a diagnostic route that
+reports `server.requestIP(req)` and the incoming forwarding headers back to
+the caller (nothing about any other visitor - just the requester's own
+connection), deploy it, hit the public URL once, read the real values, then
+remove it. Set `TRUSTED_PROXY_CIDRS` to the exact peer address(es) you
+observed and `TRUSTED_PROXY_HOPS` to whatever count actually lands on the
+real client in the header you saw.
+
+**Whatever the peer turns out to be, if it's not something an outside
+attacker can be excluded from presenting as** (e.g. it's a NAT address shared
+by all inbound traffic to the host, not something CDN-specific), trusting it
+is only as safe as the host firewall. Restrict the provider firewall/security
+group for the published port to the CDN's published IP ranges (for
+Cloudflare: https://www.cloudflare.com/ips/ - re-check occasionally, they
+change rarely but do change) so a direct hit against the host's real IP is
+dropped before it reaches Docker at all - otherwise anyone who finds that IP
+can present the same trusted peer address and have a forged
+X-Forwarded-For fully believed.
 
 ## Schema changes migrate automatically - you never need to reset
 

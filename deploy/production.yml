@@ -11,19 +11,28 @@ services:
     environment:
       BASE_URL: ${BASE_URL}
       TRUST_PROXY: "1"
-      # Cloudflare (orange-cloud DNS) connects DIRECTLY to this host's public
-      # IP on the published port - there is no local nginx/Caddy in front of
-      # this specific site, so the socket peer the app sees on every request
-      # is one of Cloudflare's own edge IPs. Trust exactly Cloudflare's
-      # published edge ranges (https://www.cloudflare.com/ips/ - re-check
-      # periodically, they change rarely but do change) rather than any
-      # Docker-internal range. HOPS=0 because Cloudflare is the ONE hop that
-      # terminates the client connection and SETS X-Forwarded-For to the real
-      # visitor IP itself (it does not relay/append to an existing chain from
-      # a further upstream proxy, since there is no such proxy here) - so its
-      # single XFF entry already IS the client, nothing gets skipped.
-      TRUSTED_PROXY_CIDRS: "127.0.0.1/32,::1/128,173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32"
-      TRUSTED_PROXY_HOPS: "0"
+      # Cloudflare (orange-cloud DNS) connects to this host's public IP on the
+      # published port; there is no local nginx/Caddy for this site. Verified
+      # empirically against the live instance (temporary /health/debug-peer
+      # diagnostic, removed again immediately after use): the socket peer the
+      # app actually sees is this VM's provider-assigned private/NAT address,
+      # NOT a Cloudflare edge IP directly - the cloud provider NATs all
+      # inbound traffic onto it before Docker's own port-forwarding ever sees
+      # it. X-Forwarded-For arrives as TWO entries ("<real client>,
+      # <Cloudflare-internal relay ip>"), matching CF-Connecting-IP in the
+      # first position - so HOPS=1 (skip the trailing Cloudflare-internal
+      # entry) is correct here, not 0.
+      #
+      # IMPORTANT: because the peer is this VM's own NAT address rather than
+      # something Cloudflare-specific, trusting it is only as safe as the
+      # host's firewall - anyone who finds this VM's real public IP and
+      # connects to :6968 directly would present the SAME peer address and
+      # have their forged X-Forwarded-For fully believed. Restrict the
+      # provider firewall/security group for this port to Cloudflare's
+      # published ranges (https://www.cloudflare.com/ips/) so a direct hit is
+      # dropped before it ever reaches Docker - see DEPLOY.md.
+      TRUSTED_PROXY_CIDRS: "127.0.0.1/32,::1/128,192.168.100.2/32"
+      TRUSTED_PROXY_HOPS: "1"
       ADMIN_PASSWORD: ${ADMIN_PASSWORD}
       UPLOAD_PASSWORD: ${UPLOAD_PASSWORD:-}
       SECRET: ${SECRET}

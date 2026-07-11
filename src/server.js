@@ -188,26 +188,6 @@ const server = Bun.serve({
 			let res = null;
 			if (url.pathname === '/health') {
 				res = json({ ok: true, uptime: Math.floor(process.uptime()) });
-			} else if (url.pathname === '/health/debug-peer') {
-				// TEMPORARY diagnostic for the live trusted-proxy investigation - only
-				// echoes the requester's OWN connection metadata (their own socket
-				// peer + their own request headers), nothing about any other
-				// visitor/share/secret. Remove this branch once the topology is
-				// confirmed.
-				let peer = null;
-				try { peer = server?.requestIP?.(req) ?? null; } catch {}
-				res = json({
-					peer,
-					headers: {
-						'x-forwarded-for': req.headers.get('x-forwarded-for'),
-						'x-forwarded-proto': req.headers.get('x-forwarded-proto'),
-						'x-real-ip': req.headers.get('x-real-ip'),
-						'cf-connecting-ip': req.headers.get('cf-connecting-ip'),
-					},
-					trustedProxyCidrsConfigured: config.trustedProxyCidrs.length,
-					trustedProxyHops: config.trustedProxyHops,
-					resolvedClientIp: clientIp(req, server),
-				});
 			} else {
 				const matched = router.match(method, url.pathname);
 				if (matched) {
