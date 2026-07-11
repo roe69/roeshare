@@ -6,7 +6,7 @@
 
 import { db, now } from '../db.js';
 import { config } from '../config.js';
-import { error, parseRange, contentDisposition, SECURITY_HEADERS } from '../lib/http.js';
+import { error, parseRange, contentDisposition, FILE_SECURITY_HEADERS } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken } from '../lib/auth.js';
 import { verifyApiKey, readApiKey, readApiKeySession, keyValidForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
@@ -225,7 +225,7 @@ function rangeResponse(share, file, req, opts = {}) {
 	if (range?.invalid) {
 		return new Response(null, {
 			status: 416,
-			headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', ...SECURITY_HEADERS },
+			headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', ...FILE_SECURITY_HEADERS },
 		});
 	}
 	const start = range ? range.start : 0;
@@ -246,7 +246,7 @@ function rangeResponse(share, file, req, opts = {}) {
 			'Accept-Ranges': 'bytes',
 			'Content-Disposition': contentDisposition(file.name.split('/').pop(), inline),
 			'Cache-Control': 'no-store',
-			...SECURITY_HEADERS,
+			...FILE_SECURITY_HEADERS,
 			...(extraHeaders || {}),
 			...(range ? { 'Content-Range': `bytes ${range.start}-${range.end}/${size}` } : {}),
 		},
@@ -312,7 +312,7 @@ export default function download(router) {
 						'Cache-Control': cacheControl,
 						ETag: '"' + file.id + '"',
 						'Accept-Ranges': 'bytes',
-						...SECURITY_HEADERS,
+						...FILE_SECURITY_HEADERS,
 					},
 				});
 			}
@@ -530,7 +530,7 @@ export default function download(router) {
 					'Content-Type': 'application/zip',
 					'Content-Disposition': contentDisposition((share.title || share.id) + '.zip', false),
 					'Cache-Control': 'no-store',
-					...SECURITY_HEADERS,
+					...FILE_SECURITY_HEADERS,
 				},
 			});
 		}
@@ -604,7 +604,7 @@ export default function download(router) {
 					'Content-Type': 'application/zip',
 					'Content-Disposition': contentDisposition(zipName, false),
 					'Cache-Control': 'no-store',
-					...SECURITY_HEADERS,
+					...FILE_SECURITY_HEADERS,
 				},
 			});
 		} catch (e) {

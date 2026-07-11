@@ -9,6 +9,23 @@ const SECURITY_HEADERS = {
 	'X-Frame-Options': 'SAMEORIGIN',
 	'Referrer-Policy': 'strict-origin-when-cross-origin',
 	'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+	// Isolates our browsing context from any cross-origin opener/openee (blocks
+	// Spectre-style cross-window snooping). Safe everywhere: nothing in this app
+	// relies on a window.opener relationship - every target=_blank link already
+	// carries rel="noopener", and the only postMessage traffic is the page
+	// talking to its own same-origin Service Worker (see public/js/view.js /
+	// public/sw.js), never a cross-origin window.
+	'Cross-Origin-Opener-Policy': 'same-origin',
+	// Blocks cross-origin no-cors subresource loads (<img>/<video>/<script>/...)
+	// of OUR pages/API/admin responses - the app's own origin never needs to be
+	// embedded elsewhere. NOT applied to shared file bytes: src/routes/download.js
+	// overrides this back to 'cross-origin' on preview/download/zip responses,
+	// since those are meant to be hotlinked/embedded from other origins (an
+	// <img>/<video> pointed at a public share link) and access to them is
+	// already gated by the share id/token/password, not by an ambient cookie -
+	// so CORP's cross-site-probing protection buys nothing there while breaking
+	// a real feature.
+	'Cross-Origin-Resource-Policy': 'same-origin',
 	// HSTS: only sent when the deployment's canonical public origin (BASE_URL) is
 	// https, so a plain-http local/dev instance is never told to force https on
 	// itself. Decided once at boot from config rather than per-request via
@@ -20,6 +37,16 @@ const SECURITY_HEADERS = {
 	// regardless of which proxy/CDN sits in front.
 	...(config.baseUrl.startsWith('https://') ? { 'Strict-Transport-Security': 'max-age=31536000; includeSubDomains' } : {}),
 };
+
+// Same headers, but with CORP relaxed to 'cross-origin' for responses that
+// stream actual shared file bytes (preview/download/zip in
+// src/routes/download.js). Those are meant to be loaded cross-origin - an
+// <img>/<video>/<audio> tag on another site pointed at a share link, or a
+// direct cross-origin fetch of a public download - so CORP:same-origin here
+// would silently break hotlinking/embedding of shared content without adding
+// real protection (these routes are already gated by share id/token/password,
+// not by an ambient cookie CORP exists to protect).
+export const FILE_SECURITY_HEADERS = { ...SECURITY_HEADERS, 'Cross-Origin-Resource-Policy': 'cross-origin' };
 
 export function json(data, init = {}) {
 	const status = typeof init === 'number' ? init : (init.status ?? 200);

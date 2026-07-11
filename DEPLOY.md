@@ -171,6 +171,97 @@ should ever require. Two ways to do it:
 > data volume, written `0600`) only holds panel-set values for keys the
 > environment leaves unset, such as the size limits.
 
+## Optional: serving file content from a separate domain
+
+This is an **advanced, optional** hardening step - not something you're
+currently exposed without. Today, every file RoeShare ever renders inline
+(preview) is already locked down on the app's own origin:
+
+- `SAFE_INLINE` (`src/routes/download.js`) only ever serves images, video,
+  audio, PDF, and plain text inline. Everything else - HTML, SVG, scripts,
+  office documents, anything ambiguous - is forced to a neutral
+  `application/octet-stream` attachment, so it downloads instead of
+  rendering, and can never execute as a document in the app's origin.
+- Every preview response also carries a locked-down
+  `Content-Security-Policy` (`PREVIEW_CSP`) that disables scripts, forms, and
+  everything but same-origin/blob media - so even a mislabeled or malicious
+  file served inline cannot run script or exfiltrate via a form post.
+- The app's own pages carry their own strict CSP (`PAGE_CSP`, only
+  same-origin scripts, no inline script) and `Cross-Origin-Opener-Policy` /
+  `Cross-Origin-Resource-Policy: same-origin` on every non-file response.
+
+In other words: a malicious upload cannot run script in RoeShare's origin
+today. What a **separate registrable domain** for file bytes buys on top of
+that is one more layer - if a future browser parser bug or CSP bypass were
+ever found in how inline previews render, isolating file bytes onto their
+own domain means that bug can't touch admin/session state, because that
+state was never reachable from that domain in the first place. If your
+threat model wants that extra isolation (e.g. you run the admin panel for
+other people's uploads), here's how to set it up with what's already built:
+
+**Why it's cheap to bolt on:** the preview/download/zip endpoints
+(`/api/shares/:id/files/:fileId/preview`, `.../download`,
+`.../download-all`) authenticate via a bearer access token, an `X-Edit-Token`
+header, or a `?access=` query parameter - never a cookie. Only the admin
+panel, the API-key portal, and the upload page's unlock flow use cookies.
+So a second domain that reverse-proxies *only* those three GET routes to the
+same backend, and never receives the app's cookies, is already isolated from
+session state without any code change - the isolation is a proxy-layer
+routing decision, not an auth redesign.
+
+1. Point a **separate registrable domain** (not a subdomain of the app's own
+   domain - `files.example.net` beside `app.example.com`, not
+   `files.app.example.com`) at the same container/port.
+2. Restrict what that vhost forwards - reject everything except the file
+   routes above (and `HEAD`/`OPTIONS` on them). Nginx example:
+
+   ```nginx
+   server {
+       server_name files.example.net;
+
+       location ~ ^/api/shares/[^/]+/(files/[^/]+/(preview|download)|download-all)$ {
+           proxy_pass http://127.0.0.1:6968;
+           proxy_set_header Host $host;
+           proxy_set_header X-Forwarded-Proto $scheme;
+           add_header Content-Security-Policy "sandbox; default-src 'none'" always;
+       }
+
+       location / { return 404; }
+   }
+   ```
+
+3. Do **not** add `files.example.net` to `BASE_URL` - that list controls
+   which hostnames the app treats as itself for link-building and CSRF
+   origin checks (`src/config.js` `allowedHosts`), which this domain should
+   stay outside of. Instead, have the app or your own tooling substitute the
+   file domain into share links/`<img src>`/`<video src>` wherever you embed
+   them, pointing at the same `/api/shares/...` paths on
+   `files.example.net`.
+4. Leave `Cross-Origin-Resource-Policy` alone on this vhost (or set it to
+   `cross-origin`) if you still want those links embeddable/hotlinkable from
+   other sites - the same reasoning `FILE_SECURITY_HEADERS` already applies
+   on the main domain (`src/lib/http.js`).
+
+**Gotchas:**
+
+- **E2E shares' Service Worker stays on the main domain.** `public/sw.js`
+  intercepts virtual `/_e2e/*` and `/_e2e-dl/*` URLs to stream-decrypt
+  ciphertext for seekable video/audio and whole-file downloads (see
+  `public/js/view.js`); it runs in the scope of whichever origin registered
+  it, and its internal ciphertext `fetch()` calls are same-origin by design.
+  Moving E2E preview/download to a second domain means those internal
+  fetches become cross-origin and need the file domain to answer with
+  `Access-Control-Allow-Origin` for the app's origin (and to handle
+  preflight on the `Range` header) - simplest is to leave E2E shares served
+  from the main domain and only point non-E2E share links at the isolated
+  domain.
+- **Range requests** (used for video/audio scrubbing and resumable
+  downloads) pass through unchanged as long as step 2's proxy block forwards
+  headers normally - no special config needed for plain (non-E2E) shares
+  fetched directly by the browser, since those aren't cross-origin `fetch()`
+  calls (an `<img>`/`<video>` `src` doesn't need CORS headers, only a plain
+  cross-origin `fetch()` in `cors` mode does).
+
 ## Storage volume isolation
 
 The app creates the storage directory `0700` and every blob file `0600`, and
