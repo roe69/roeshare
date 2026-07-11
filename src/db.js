@@ -239,6 +239,20 @@ const schema = {
 		created_at: 'INTEGER NOT NULL',
 		used_at:    'INTEGER',
 	},
+	// Structured security-event audit log (see lib/audit.js). A plain schema
+	// entry, not a MIGRATIONS one - it needs no backfill, mirrors share_renames'
+	// precedent. Retention (90 days) is swept alongside the expired-share sweep
+	// in server.js. NEVER write a password/secret/token value into any column
+	// here - see lib/audit.js's module comment for the full redaction policy.
+	audit_events: {
+		id:     'INTEGER PRIMARY KEY AUTOINCREMENT',
+		ts:     'INTEGER NOT NULL',  // unix epoch seconds
+		event:  'TEXT NOT NULL',     // taxonomy string, e.g. 'admin.login.failure'
+		ip:     'TEXT',              // NULL for internal events (sweeper, reconcile)
+		actor:  'TEXT',              // 'admin' | 'apikey:<key id>' | NULL (anonymous)
+		target: 'TEXT',              // object acted on: share id, file id, key id, ...
+		detail: 'TEXT',              // JSON string of allowlisted non-sensitive context
+	},
 };
 
 for (const [table, columns] of Object.entries(schema)) {
@@ -254,6 +268,8 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_reservations_share ON storage_reservations(share_id);
 	CREATE INDEX IF NOT EXISTS idx_reservations_expires ON storage_reservations(expires_at);
 	CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at);
+	CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
+	CREATE INDEX IF NOT EXISTS idx_audit_event_ts ON audit_events(event, ts);
 `);
 
 const getMeta = db.query('SELECT value FROM meta WHERE key = ?');

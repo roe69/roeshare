@@ -25,6 +25,7 @@
 // no longer on the hot path.
 import { config } from '../config.js';
 import { db, now } from '../db.js';
+import { audit } from './audit.js';
 
 // Same clock as the abandoned-share sweeper (config.js) - deliberately, so a
 // reservation for an upload that is still actively resuming/chunking never
@@ -67,7 +68,10 @@ export function reserveInTx(fileId, shareId, bytes) {
 
 	if (config.maxTotalSize > 0) {
 		const ledger = getLedgerStmt.get() || { used_bytes: 0, reserved_bytes: 0 };
-		if (ledger.used_bytes + ledger.reserved_bytes + bytes > config.maxTotalSize) return false;
+		if (ledger.used_bytes + ledger.reserved_bytes + bytes > config.maxTotalSize) {
+			audit('quota.reservation.denied', { target: fileId, detail: { requestedBytes: bytes } });
+			return false;
+		}
 	}
 
 	insertReservationStmt.run(fileId, shareId ?? null, bytes, ts, ts + RESERVATION_TTL());

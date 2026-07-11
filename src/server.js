@@ -16,6 +16,7 @@ import { deleteShareFiles } from './lib/storage.js';
 import { pickEncoding, compressBytes, isCompressibleType, compressResponse } from './lib/compress.js';
 import * as quota from './lib/quota.js';
 import { reconcileShareRenames } from './lib/renames.js';
+import { audit, AUDIT_RETENTION_SECONDS } from './lib/audit.js';
 
 // Authoritative recompute of the storage quota ledger (see lib/quota.js) -
 // self-initializing (creates the single ledger row) and self-healing (a crash
@@ -137,6 +138,7 @@ async function serveStatic(req, pathname) {
 const selectExpired = db.query('SELECT id FROM shares WHERE deleted_at IS NULL AND finalized = 1 AND expires_at IS NOT NULL AND expires_at < ?');
 const selectAbandoned = db.query('SELECT id FROM shares WHERE deleted_at IS NULL AND finalized = 0 AND created_at < ?');
 const markDeleted = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
+const sweepAuditEvents = db.query('DELETE FROM audit_events WHERE ts < ?');
 
 async function sweep() {
 	const ts = now();
@@ -146,6 +148,7 @@ async function sweep() {
 			await deleteShareFiles(id);
 			markDeleted.run(ts, id);
 			quota.releaseShare(id);
+			audit('share.expired', { target: id });
 		} catch (e) {
 			console.error('sweep failed for', id, e);
 		}
@@ -169,6 +172,9 @@ async function sweep() {
 		}
 	}
 	if (abandoned.length) console.log(`[sweep] removed ${abandoned.length} abandoned upload(s)`);
+
+	// Audit-log retention (section 10 of the security audit): 90 days.
+	sweepAuditEvents.run(ts - AUDIT_RETENTION_SECONDS);
 }
 
 // ---- Server ----------------------------------------------------------------

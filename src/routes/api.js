@@ -28,6 +28,7 @@ import { enforce, enforceKey } from '../lib/ratelimit.js';
 import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
 import { authenticate, authenticateSource, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow, requireScope } from '../lib/apikeys.js';
+import { audit } from '../lib/audit.js';
 
 // lower(id) so a slug can never collide-by-case with an existing one (the
 // on-disk share directory is effectively case-insensitive on some
@@ -243,6 +244,9 @@ async function createShare(ctx, key, opts) {
 	// Lifetime stats (persist past deletion); not part of the atomic check.
 	bumpMetric('shares_created');
 	bumpUploader(ctx.ip, { shares: 1 });
+	// Shared by both the resumable (/api/v1/shares) and one-shot (/api/v1/upload)
+	// creation paths - this is the single site both funnel through.
+	audit('share.created', { ip: ctx.ip, actor: `apikey:${key.id}`, target: id });
 
 	return { id, editToken };
 }
@@ -262,8 +266,11 @@ export default function apiV1(router) {
 		// Both fields must check out: the token must be valid (and not revoked/
 		// expired) AND match the given name, so it reads like a name + secret login.
 		if (!key || name.toLowerCase() !== String(key.name).toLowerCase()) {
+			// No key id in the record when the token itself didn't resolve to one.
+			audit('apikey.login.failure', { ip: ctx.ip, target: key ? key.id : null });
 			return error(403, 'That name and token do not match an active key');
 		}
+		audit('apikey.login.success', { ip: ctx.ip, actor: `apikey:${key.id}` });
 		const setCookie = cookie(APIKEY_COOKIE, issueApiKeySession(key), {
 			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url, ctx.server) === 'https',
 		});
@@ -556,6 +563,7 @@ export default function apiV1(router) {
 		softDeleteShare.run(now(), share.id);
 		quota.releaseShare(share.id);
 		await deleteShareFiles(share.id);
+		audit('share.deleted', { ip: ctx.ip, actor: `apikey:${key.id}`, target: share.id });
 		return json({ ok: true });
 	});
 }

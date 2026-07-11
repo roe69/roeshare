@@ -23,7 +23,7 @@ import { slugError } from '../lib/slug.js';
 import { getLogs } from '../lib/logbuffer.js';
 import { ALLOWED_KEYS, ALLOWLIST, envManagedKeys, readSettings, validatePatch, writeSettings } from '../lib/settings.js';
 import { lifetimeMetrics, topUploaders as lifetimeUploaders } from '../lib/stats.js';
-import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, rotateApiKey, deleteApiKey, sanitizeLimits } from '../lib/apikeys.js';
+import { listApiKeys, getApiKey, createApiKey, updateApiKey, revokeApiKey, reinstateApiKey, rotateApiKey, deleteApiKey, sanitizeLimits, limitsOf } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
 import { performShareRename, BUSY } from '../lib/renames.js';
 import { audit } from '../lib/audit.js';
@@ -81,12 +81,16 @@ export default router => {
 		if (limited) return limited;
 
 		const { password } = await readBody(req);
-		if (!checkAdminPassword(password)) return error(403, 'Invalid password');
+		if (!checkAdminPassword(password)) {
+			audit('admin.login.failure', { ip });
+			return error(403, 'Invalid password');
+		}
 
 		const secure = requestScheme(req, url, server) === 'https';
 
 		if (!mfaEnabled()) {
 			reset('admin-login', ip);
+			audit('admin.login.success', { ip, actor: 'admin' });
 			const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure });
 			return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 		}
@@ -121,7 +125,11 @@ export default router => {
 		reset('admin-mfa', ip);
 		reset('admin-login', ip);
 		audit('admin.login.mfa_success', { ip });
-		if (!isTotpShaped) audit('admin.mfa.backup_code_used', { ip });
+		// The password step (POST /login) intentionally does not log
+		// admin.login.success while MFA is enabled - only once this second
+		// factor also completes does the login actually finish.
+		audit('admin.login.success', { ip, actor: 'admin' });
+		if (!isTotpShaped) audit('admin.mfa.backup_code_used', { ip, actor: 'admin', detail: { remaining: backupCodesRemaining() } });
 
 		const secure = requestScheme(req, url, server) === 'https';
 		const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
@@ -130,9 +138,10 @@ export default router => {
 		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
-	router.post('/api/admin/logout', async ({ req }) => {
+	router.post('/api/admin/logout', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
+		if (isAdmin(req)) audit('admin.logout', { ip, actor: 'admin' });
 		const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
 		headers.append('Set-Cookie', clearCookie(ADMIN_COOKIE));
 		headers.append('Set-Cookie', clearCookie(ADMIN_MFA_COOKIE));
@@ -158,7 +167,7 @@ export default router => {
 		const limited = enforce('admin-mfa-setup', ip, 20, 60 * 60 * 1000);
 		if (limited) return limited;
 		const { secret, otpauth } = beginEnrollment();
-		audit('admin.mfa.setup_started', { ip });
+		audit('admin.mfa.setup_started', { ip, actor: 'admin' });
 		return json({ secret, otpauth });
 	});
 
@@ -171,10 +180,10 @@ export default router => {
 		const { code } = await readBody(req);
 		const backupCodes = confirmEnrollment(code);
 		if (!backupCodes) {
-			audit('admin.mfa.confirm_failed', { ip });
+			audit('admin.mfa.confirm_failed', { ip, actor: 'admin' });
 			return error(403, 'Invalid code');
 		}
-		audit('admin.mfa.enabled', { ip });
+		audit('admin.mfa.enabled', { ip, actor: 'admin' });
 		return json({ ok: true, backupCodes });
 	});
 
@@ -189,15 +198,15 @@ export default router => {
 		if (limited) return limited;
 		const { password, code } = await readBody(req);
 		if (!checkAdminPassword(password)) {
-			audit('admin.mfa.disable_failed', { ip, reason: 'password' });
+			audit('admin.mfa.disable_failed', { ip, detail: { reason: 'password' } });
 			return error(403, 'Invalid password');
 		}
 		if (!verifyMfaCode(code)) {
-			audit('admin.mfa.disable_failed', { ip, reason: 'code' });
+			audit('admin.mfa.disable_failed', { ip, detail: { reason: 'code' } });
 			return error(403, 'Invalid code');
 		}
 		disableMfa();
-		audit('admin.mfa.disabled', { ip });
+		audit('admin.mfa.disabled', { ip, actor: 'admin' });
 		return json({ ok: true });
 	});
 
@@ -210,11 +219,11 @@ export default router => {
 		if (!mfaEnabled()) return error(400, 'MFA is not enabled');
 		const { code } = await readBody(req);
 		if (!verifyLoginCode(code)) {
-			audit('admin.mfa.backup_codes_regen_failed', { ip });
+			audit('admin.mfa.backup_codes_regen_failed', { ip, actor: 'admin' });
 			return error(403, 'Invalid code');
 		}
 		const backupCodes = regenerateBackupCodes();
-		audit('admin.mfa.backup_codes_regenerated', { ip });
+		audit('admin.mfa.backup_codes_regenerated', { ip, actor: 'admin' });
 		return json({ backupCodes });
 	});
 
@@ -464,6 +473,7 @@ export default router => {
 		db.query('DELETE FROM files WHERE share_id = ?').run(params.id);
 		db.query('DELETE FROM download_events WHERE share_id = ?').run(params.id);
 		db.query('DELETE FROM shares WHERE id = ?').run(params.id);
+		audit('share.deleted', { ip, actor: 'admin', target: params.id });
 
 		return json({ ok: true });
 	});
@@ -588,6 +598,7 @@ export default router => {
 
 		// The token is returned exactly once here; afterwards only its hash exists.
 		const made = createApiKey(name, expiresAt, lim.values);
+		audit('apikey.created', { ip, actor: 'admin', target: made.id });
 		return json({ id: made.id, name: made.name, token: made.token, prefix: made.prefix, expiresAt }, 201);
 	});
 
@@ -603,7 +614,20 @@ export default router => {
 		if (!name) return error(400, 'A name is required');
 		const lim = sanitizeLimits(body.limits || {});
 		if (lim.error) return error(400, lim.error);
+		const before = getApiKey(params.id);
 		if (!updateApiKey(params.id, name, lim.values)) return error(404, 'Not found');
+		if (before) {
+			const changed = [];
+			if (before.name !== name) changed.push('name');
+			const after = limitsOf(lim.values);
+			for (const k of ['maxFileSize', 'maxShareSize', 'maxShares', 'maxExpiry', 'allowSlug', 'allowPassword']) {
+				if (before.limits[k] !== after[k]) changed.push(k);
+			}
+			for (const s of ['create', 'write', 'read', 'delete']) {
+				if (before.limits.scopes[s] !== after.scopes[s]) changed.push(`scope:${s}`);
+			}
+			if (changed.length) audit('apikey.updated', { ip, actor: 'admin', target: params.id, detail: { changed } });
+		}
 		return json({ ok: true });
 	});
 
@@ -630,6 +654,7 @@ export default router => {
 		const limited = enforce('admin-apikey-revoke', ip, 120, 60 * 1000);
 		if (limited) return limited;
 		if (!revokeApiKey(params.id)) return error(404, 'Not found');
+		audit('apikey.revoked', { ip, actor: 'admin', target: params.id });
 		return json({ ok: true });
 	});
 
@@ -640,6 +665,7 @@ export default router => {
 		const limited = enforce('admin-apikey-reinstate', ip, 120, 60 * 1000);
 		if (limited) return limited;
 		if (!reinstateApiKey(params.id)) return error(404, 'Not found');
+		audit('apikey.reinstated', { ip, actor: 'admin', target: params.id });
 		return json({ ok: true });
 	});
 
@@ -654,6 +680,7 @@ export default router => {
 		if (limited) return limited;
 		const made = rotateApiKey(params.id);
 		if (!made) return error(404, 'Not found');
+		audit('apikey.rotated', { ip, actor: 'admin', target: params.id });
 		return json({ id: made.id, name: made.name, token: made.token, prefix: made.prefix });
 	});
 
@@ -664,6 +691,7 @@ export default router => {
 		const limited = enforce('admin-apikey-delete', ip, 120, 60 * 1000);
 		if (limited) return limited;
 		if (!deleteApiKey(params.id)) return error(404, 'Not found');
+		audit('apikey.deleted', { ip, actor: 'admin', target: params.id });
 		return json({ ok: true });
 	});
 
@@ -725,6 +753,10 @@ export default router => {
 			console.error('settings write failed:', e);
 			return error(500, 'Could not save settings');
 		}
+		// target = comma-joined changed KEY names ONLY - never values (some of
+		// these keys are secrets: SECRET/ADMIN_PASSWORD/UPLOAD_PASSWORD).
+		const changedKeys = [...Object.keys(r.set), ...r.clear];
+		if (changedKeys.length) audit('admin.settings.updated', { ip, actor: 'admin', target: changedKeys.join(',') });
 		return json({ ok: true, restartRequired: true, warnings: [] });
 	});
 
@@ -736,6 +768,7 @@ export default router => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-restart', ip, 5, 60 * 60 * 1000);
 		if (limited) return limited;
+		audit('admin.restart', { ip, actor: 'admin' });
 		console.warn('[admin] restart requested - exiting for the supervisor to relaunch');
 		// Exit after the response has a chance to flush.
 		setTimeout(() => process.exit(0), 200);
@@ -750,5 +783,47 @@ export default router => {
 		let limit = Number(query.get('limit'));
 		if (!Number.isFinite(limit) || limit <= 0) limit = 300;
 		return json({ logs: getLogs(limit) });
+	});
+
+	// Structured security-event audit log (see lib/audit.js). Same pagination
+	// shape as GET /api/admin/shares: limit capped at 500 (default 100),
+	// offset >= 0, ordered newest-first, with an optional exact-match event
+	// filter. detail is stored as a JSON string; parsed back here for the
+	// caller's convenience (falls back to the raw string if it somehow isn't
+	// valid JSON, rather than dropping it).
+	router.get('/api/admin/audit', ({ req, ip, query }) => {
+		if (!isAdmin(req)) return error(403, 'Forbidden');
+		const limited = enforce('admin-audit', ip, 120, 60 * 1000);
+		if (limited) return limited;
+
+		let limit = Number(query.get('limit'));
+		if (!Number.isFinite(limit) || limit <= 0) limit = 100;
+		limit = Math.min(Math.trunc(limit), 500);
+		let offset = Number(query.get('offset'));
+		if (!Number.isFinite(offset) || offset < 0) offset = 0;
+		offset = Math.trunc(offset);
+		const eventFilter = query.get('event') || '';
+
+		const where = eventFilter ? 'WHERE event = ?' : '';
+		const args = eventFilter ? [eventFilter] : [];
+
+		const total = db.query(`SELECT COUNT(*) AS n FROM audit_events ${where}`).get(...args).n;
+		const rows = db
+			.query(`SELECT id, ts, event, ip, actor, target, detail FROM audit_events ${where} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`)
+			.all(...args, limit, offset);
+
+		const events = rows.map(r => {
+			let detail = null;
+			if (r.detail != null) {
+				try {
+					detail = JSON.parse(r.detail);
+				} catch {
+					detail = r.detail;
+				}
+			}
+			return { id: r.id, ts: r.ts, event: r.event, ip: r.ip, actor: r.actor, target: r.target, detail };
+		});
+
+		return json({ events, total });
 	});
 };

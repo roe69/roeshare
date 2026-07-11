@@ -17,6 +17,7 @@
 
 import { SECURITY_HEADERS } from './http.js';
 import { db } from '../db.js';
+import { audit } from './audit.js';
 
 // Bucket-key prefixes (the exact strings enforce()/enforceKey() build - see
 // routes/admin.js login and login/mfa, routes/api.js /api/v1/login,
@@ -98,8 +99,16 @@ export function hit(key, max, windowMs) {
 // Convenience: enforce a limit for (bucket, ip). Returns null when allowed, or a
 // ready-to-return 429 Response when the limit is exceeded.
 export function enforce(bucket, ip, max, windowMs) {
-	const r = hit(`${bucket}:${ip || 'unknown'}`, max, windowMs);
+	const key = `${bucket}:${ip || 'unknown'}`;
+	const r = hit(key, max, windowMs);
 	if (r.allowed) return null;
+	// ratelimit.blocked is ONLY audited for the five credential-brute-force
+	// security buckets (PERSIST_PREFIXES) - the password-unlock-threshold
+	// signal. Every other (volatile) bucket is deliberately never audited:
+	// noise plus attacker-driven write amplification against a bucket that
+	// isn't a credential-guessing signal in the first place.
+	const prefix = PERSIST_PREFIXES.find(p => key.startsWith(p));
+	if (prefix) audit('ratelimit.blocked', { ip, detail: { bucket: prefix.slice(0, -1) } });
 	return new Response(JSON.stringify({ error: 'Too many requests. Please slow down.', retryAfter: r.retryAfter }), {
 		status: 429,
 		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': String(r.retryAfter), ...SECURITY_HEADERS },

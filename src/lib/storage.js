@@ -19,6 +19,7 @@ import { Readable } from 'node:stream';
 import { join, resolve, sep } from 'node:path';
 import { config } from '../config.js';
 import { transformAt, decryptStream, PLAIN_CHUNK, FULL_RECORD, fileKeyForV2, sealRecordV2, openRecordV2 } from './filecrypt.js';
+import { audit } from './audit.js';
 
 // Random ids use the ids.js alphabet; custom share slugs add - and _. Neither
 // dots nor path separators are allowed, so a segment can never escape its dir.
@@ -325,7 +326,17 @@ function blobRangeStreamV2(shareId, fileId, start, end, enc) {
 						controller.error(new Error('at-rest record layout mismatch: unexpected end of blob'));
 						return;
 					}
-					const plain = openRecordV2(fileKey, enc.keyId, enc.fileId, chunkIndex, rec);
+					let plain;
+					try {
+						plain = openRecordV2(fileKey, enc.keyId, enc.fileId, chunkIndex, rec);
+					} catch (e) {
+						// The GCM auth-tag (or malformed-record) throw - tamper/corruption
+						// signal. Audited here, at the exact point it surfaces, then
+						// rethrown so the outer catch below still errors the stream exactly
+						// as before.
+						audit('file.integrity_failure', { target: fileId, detail: { chunkIndex } });
+						throw e;
+					}
 					chunkIndex++;
 					let out = plain;
 					if (skip > 0) {

@@ -62,7 +62,9 @@ function limitColumns(limits = {}) {
 }
 
 // The scopes/limits of a key row, in the camelCase shape the API/UI use.
-function limitsOf(k) {
+// Exported so routes/admin.js can diff a PATCH's changed fields for the
+// apikey.updated audit event without duplicating this mapping.
+export function limitsOf(k) {
 	return {
 		maxFileSize: k.max_file_size ?? null,
 		maxShareSize: k.max_share_size ?? null,

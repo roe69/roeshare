@@ -16,6 +16,7 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
 import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import * as quota from '../lib/quota.js';
+import { audit } from '../lib/audit.js';
 
 // Whether a resolved Range (or the absence of one) covers the ENTIRE file in
 // one shot - i.e. letting the stream drain would deliver the file in full.
@@ -431,6 +432,7 @@ export default function download(router) {
 				if (full) {
 					const claimed = claimOneTime.run(now(), share.id).changes > 0;
 					if (!claimed) { release(); return error(410, 'This one-time share has already been taken'); }
+					audit('share.burned', { ip, target: share.id });
 				}
 				readStart(share.id);
 				let completed = false;
@@ -560,6 +562,7 @@ export default function download(router) {
 			if (full && share.one_time) {
 				const claimed = claimOneTime.run(now(), share.id).changes > 0;
 				if (!claimed) { release(); return error(410, 'This one-time share has already been taken'); }
+				audit('share.burned', { ip, target: share.id });
 			}
 			// A download-capped (non-one-time) share must count only a COMPLETED full
 			// zip delivery, so a cancelled/failed archive never consumes the cap. The

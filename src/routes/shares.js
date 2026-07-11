@@ -15,6 +15,7 @@ import { acquire, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
 import { keyValidForShare, scopeErrorForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
+import { audit } from '../lib/audit.js';
 
 const getShare = db.query('SELECT * FROM shares WHERE id = ?');
 // Case-insensitive slug-conflict check: a soft-deleted share no longer holds
@@ -87,7 +88,10 @@ export default function shares(router) {
 		if (limited) return limited;
 		if (!config.uploadPassword) return json({ ok: true });
 		const body = (await readJson(ctx.req)) || {};
-		if (!uploadAllowed(body.password)) return error(403, 'Incorrect upload password');
+		if (!uploadAllowed(body.password)) {
+			audit('upload.verify.failure', { ip: ctx.ip });
+			return error(403, 'Incorrect upload password');
+		}
 		const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url, ctx.server) === 'https' });
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
@@ -197,6 +201,7 @@ export default function shares(router) {
 		// Lifetime stats (persist past deletion).
 		bumpMetric('shares_created');
 		bumpUploader(ctx.ip, { shares: 1 });
+		audit('share.created', { ip: ctx.ip, target: id });
 
 		return json(
 			{
@@ -234,7 +239,10 @@ export default function shares(router) {
 		} finally {
 			release();
 		}
-		if (!ok) return error(403, 'Incorrect password');
+		if (!ok) {
+			audit('share.unlock.failure', { ip: ctx.ip, target: share.id });
+			return error(403, 'Incorrect password');
+		}
 
 		return json({ accessToken: issueAccessToken(share.id, share.password_hash) });
 	});
@@ -361,6 +369,11 @@ export default function shares(router) {
 		softDelete.run(now(), share.id);
 		quota.releaseShare(share.id);
 		await deleteShareFiles(share.id);
+		// actor: the edit-token owner (an API key, or an anonymous web-portal
+		// uploader with no key attached) vs. an admin deleting through the
+		// ambient cookie - mirrors the authorization branch just above.
+		const actor = owner ? (share.api_key_id ? `apikey:${share.api_key_id}` : null) : 'admin';
+		audit('share.deleted', { ip: ctx.ip, actor, target: share.id });
 		return json({ ok: true });
 	});
 }

@@ -3,6 +3,7 @@
 
 import { config } from '../config.js';
 import { parseIp, ipInCidrs } from './net.js';
+import { audit } from './audit.js';
 
 const SECURITY_HEADERS = {
 	'X-Content-Type-Options': 'nosniff',
@@ -230,20 +231,32 @@ export function contentDisposition(filename, inline = false) {
 // and/or Origin on non-GET; a request with neither header is a non-browser
 // client, which carries no ambient cookie an attacker can ride, so it passes.
 export function requireSameOrigin(req) {
+	// No `ip` is available in this helper's signature (widening it across every
+	// call site is not worth it for an audit-only field) - the csrf.rejected
+	// event is logged with ip: null. pathname ONLY, never the query string -
+	// see lib/audit.js's redaction policy.
+	const reject = () => {
+		let path = null;
+		try {
+			path = new URL(req.url).pathname;
+		} catch {}
+		audit('csrf.rejected', { detail: { method: req.method, path } });
+		return error(403, 'Cross-origin request blocked');
+	};
 	const sfs = (req.headers.get('sec-fetch-site') || '').toLowerCase();
 	if (sfs) {
 		// 'same-origin' = our own pages; 'none' = direct user action (address bar,
 		// bookmark) - neither is attacker-forgeable. 'same-site' (a subdomain) and
 		// 'cross-site' are both rejected.
 		if (sfs === 'same-origin' || sfs === 'none') return null;
-		return error(403, 'Cross-origin request blocked');
+		return reject();
 	}
 	const origin = req.headers.get('origin');
 	if (origin) {
 		try {
 			if (config.allowedHosts.has(new URL(origin).host.toLowerCase())) return null;
 		} catch {}
-		return error(403, 'Cross-origin request blocked');
+		return reject();
 	}
 	return null;
 }
