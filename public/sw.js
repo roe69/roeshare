@@ -76,9 +76,9 @@ function attachmentDisposition(filename) {
 // the share's state changed in the race between probe and click.
 function failPage(status, message) {
 	const html = '<!doctype html><meta charset="utf-8"><title>Download failed</title>'
-		+ '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#0d1017;color:#dfe3ea;font:15px system-ui">'
+		+ '<body style="margin:0;height:100vh;display:grid;place-items:center;background:#000000;color:#ededf0;font:15px system-ui">'
 		+ '<div style="text-align:center"><p>' + message + '</p>'
-		+ '<p><a href="#" onclick="history.back();return false" style="color:#7aa2f7">Go back</a></p></div>'
+		+ '<p><a href="#" onclick="history.back();return false" style="color:#ff6b35">Go back</a></p></div>'
 		+ '<script>setTimeout(function () { history.back(); }, 2500)</scr' + 'ipt>';
 	return new Response(html, { status, headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 }
