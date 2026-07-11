@@ -1,10 +1,14 @@
 // Admin API: session login/logout, share browsing, hard deletes, and dashboard
 // stats. Every endpoint except login/logout/me requires a valid admin cookie.
+// Every non-GET route (including login/logout) additionally requires
+// requireSameOrigin() to pass first (F-10 CSRF defense-in-depth: the admin
+// cookie is already SameSite=Lax, this rejects cross-site requests from old
+// browsers or same-site attackers too - see lib/http.js).
 
 import { existsSync } from 'node:fs';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, cookie, clearCookie, requestScheme, requestOrigin } from '../lib/http.js';
+import { json, error, cookie, clearCookie, requestScheme, requestOrigin, requireSameOrigin } from '../lib/http.js';
 import { ADMIN_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken } from '../lib/auth.js';
 import { deleteShareFiles, deleteBlob, totalUsage, renameShareDir } from '../lib/storage.js';
 import { enforce, reset } from '../lib/ratelimit.js';
@@ -67,6 +71,8 @@ export default router => {
 	// ---- Session ----------------------------------------------------------
 
 	router.post('/api/admin/login', async ({ req, ip, url, server }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		// Brute-force guard: 8 attempts per 5 minutes per IP. A successful login
 		// clears the counter so a legitimate admin is never locked out.
 		const limited = enforce('admin-login', ip, 8, 5 * 60 * 1000);
@@ -79,7 +85,9 @@ export default router => {
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
-	router.post('/api/admin/logout', async () => {
+	router.post('/api/admin/logout', async ({ req }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		return json({ ok: true }, { headers: { 'Set-Cookie': clearCookie(ADMIN_COOKIE) } });
 	});
 
@@ -209,6 +217,8 @@ export default router => {
 	// ---- Edit (full field control) ----------------------------------------
 
 	router.patch('/api/admin/shares/:id', async ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-share-edit', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -302,6 +312,8 @@ export default router => {
 	// ---- Hard deletes -----------------------------------------------------
 
 	router.delete('/api/admin/shares/:id', async ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-share-delete', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -326,6 +338,8 @@ export default router => {
 	});
 
 	router.delete('/api/admin/shares/:id/files/:fileId', async ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-share-file-delete', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -421,6 +435,8 @@ export default router => {
 	});
 
 	router.post('/api/admin/api-keys', async ({ req, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-apikey', ip, 30, 60 * 60 * 1000);
 		if (limited) return limited;
@@ -446,6 +462,8 @@ export default router => {
 
 	// Edit a key's name and limits/scopes (does not touch the secret or expiry).
 	router.patch('/api/admin/api-keys/:id', async ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-apikey-edit', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -475,6 +493,8 @@ export default router => {
 	});
 
 	router.post('/api/admin/api-keys/:id/revoke', ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-apikey-revoke', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -483,6 +503,8 @@ export default router => {
 	});
 
 	router.post('/api/admin/api-keys/:id/reinstate', ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-apikey-reinstate', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -494,6 +516,8 @@ export default router => {
 	// sessions bound to it are signed out. The new token is returned exactly once,
 	// like creation; afterwards only its hash exists.
 	router.post('/api/admin/api-keys/:id/rotate', ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-apikey-rotate', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -503,6 +527,8 @@ export default router => {
 	});
 
 	router.delete('/api/admin/api-keys/:id', ({ req, params, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-apikey-delete', ip, 120, 60 * 1000);
 		if (limited) return limited;
@@ -547,6 +573,8 @@ export default router => {
 
 	// Save settings to the managed file (does NOT apply live - needs a restart).
 	router.put('/api/admin/settings', async ({ req, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-settings', ip, 30, 60 * 60 * 1000);
 		if (limited) return limited;
@@ -572,6 +600,8 @@ export default router => {
 	// Restart by exiting; a supervisor (Docker restart: unless-stopped, systemd)
 	// relaunches the process, which re-reads the managed settings file.
 	router.post('/api/admin/restart', ({ req, ip }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-restart', ip, 5, 60 * 60 * 1000);
 		if (limited) return limited;

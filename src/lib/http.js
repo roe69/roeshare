@@ -198,4 +198,27 @@ export function contentDisposition(filename, inline = false) {
 	return `${type}; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
+// Reject a cookie-authenticated state change unless the request provably came
+// from our own origin. Browser cross-site requests always carry Sec-Fetch-Site
+// and/or Origin on non-GET; a request with neither header is a non-browser
+// client, which carries no ambient cookie an attacker can ride, so it passes.
+export function requireSameOrigin(req) {
+	const sfs = (req.headers.get('sec-fetch-site') || '').toLowerCase();
+	if (sfs) {
+		// 'same-origin' = our own pages; 'none' = direct user action (address bar,
+		// bookmark) - neither is attacker-forgeable. 'same-site' (a subdomain) and
+		// 'cross-site' are both rejected.
+		if (sfs === 'same-origin' || sfs === 'none') return null;
+		return error(403, 'Cross-origin request blocked');
+	}
+	const origin = req.headers.get('origin');
+	if (origin) {
+		try {
+			if (config.allowedHosts.has(new URL(origin).host.toLowerCase())) return null;
+		} catch {}
+		return error(403, 'Cross-origin request blocked');
+	}
+	return null;
+}
+
 export { SECURITY_HEADERS };

@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, requestOrigin, cookie, clearCookie, requestScheme } from '../lib/http.js';
+import { json, error, requestOrigin, cookie, clearCookie, requestScheme, requireSameOrigin } from '../lib/http.js';
 import { hashPassword, hashSecretToken } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
 import { writeChunk, deleteShareFiles, isCleanupPending } from '../lib/storage.js';
@@ -27,7 +27,7 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce, enforceKey } from '../lib/ratelimit.js';
 import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
-import { authenticate, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow, requireScope } from '../lib/apikeys.js';
+import { authenticate, authenticateSource, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow, requireScope } from '../lib/apikeys.js';
 
 // lower(id) so a slug can never collide-by-case with an existing one (the
 // on-disk share directory is effectively case-insensitive on some
@@ -251,6 +251,8 @@ export default function apiV1(router) {
 	// ---- Browser portal session (name + token login) -----------------------
 	// Lets a key holder sign in to the web portal and manage the key's shares.
 	router.post('/api/v1/login', async ctx => {
+		const csrf = requireSameOrigin(ctx.req);
+		if (csrf) return csrf;
 		const limited = enforce('apikey-login', ctx.ip, 10, 5 * 60 * 1000);
 		if (limited) return limited;
 		const body = (await readJson(ctx.req)) || {};
@@ -273,7 +275,11 @@ export default function apiV1(router) {
 		return json({ session: key ? { id: key.id, name: key.name } : null });
 	});
 
-	router.post('/api/v1/logout', () => json({ ok: true }, { headers: { 'Set-Cookie': clearCookie(APIKEY_COOKIE) } }));
+	router.post('/api/v1/logout', ctx => {
+		const csrf = requireSameOrigin(ctx.req);
+		if (csrf) return csrf;
+		return json({ ok: true }, { headers: { 'Set-Cookie': clearCookie(APIKEY_COOKIE) } });
+	});
 
 	// ---- Key check ---------------------------------------------------------
 	// A cheap endpoint a client can hit to confirm its key works.
@@ -295,8 +301,13 @@ export default function apiV1(router) {
 
 	// ---- Create a share (resumable flow) -----------------------------------
 	router.post('/api/v1/shares', async ctx => {
-		const key = authenticate(ctx.req);
-		if (!key) return error(401, 'Invalid or missing API key');
+		const auth = authenticateSource(ctx.req);
+		if (!auth) return error(401, 'Invalid or missing API key');
+		if (auth.viaCookie) {
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
+		}
+		const key = auth.key;
 		const scopeDenied = requireScope(key, 'create');
 		if (scopeDenied) return scopeDenied;
 		const limited = enforceKey('api-create', key.id, 120, 10 * 60 * 1000);
@@ -342,8 +353,13 @@ export default function apiV1(router) {
 	// backwards compatibility for one release but is deprecated - remove it in a
 	// future release once clients have migrated.
 	router.post('/api/v1/upload', async ctx => {
-		const key = authenticate(ctx.req);
-		if (!key) return error(401, 'Invalid or missing API key');
+		const auth = authenticateSource(ctx.req);
+		if (!auth) return error(401, 'Invalid or missing API key');
+		if (auth.viaCookie) {
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
+		}
+		const key = auth.key;
 		let scopeDenied = requireScope(key, 'create');
 		if (scopeDenied) return scopeDenied;
 		scopeDenied = requireScope(key, 'write');
@@ -524,8 +540,13 @@ export default function apiV1(router) {
 
 	// ---- Delete one of this key's shares (backup rotation) -----------------
 	router.delete('/api/v1/shares/:id', async ctx => {
-		const key = authenticate(ctx.req);
-		if (!key) return error(401, 'Invalid or missing API key');
+		const auth = authenticateSource(ctx.req);
+		if (!auth) return error(401, 'Invalid or missing API key');
+		if (auth.viaCookie) {
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
+		}
+		const key = auth.key;
 		const scopeDenied = requireScope(key, 'delete');
 		if (scopeDenied) return scopeDenied;
 		const limited = enforceKey('api-delete', key.id, 60, 60000);

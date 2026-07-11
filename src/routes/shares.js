@@ -4,7 +4,7 @@
 
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, cookie, requestOrigin, requestScheme } from '../lib/http.js';
+import { json, error, cookie, requestOrigin, requestScheme, requireSameOrigin } from '../lib/http.js';
 import { hashPassword, verifyPassword, hashSecretToken, verifySecretToken } from '../lib/crypto.js';
 import { uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, uploadLinkToken, UPLOAD_COOKIE } from '../lib/auth.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
@@ -114,8 +114,14 @@ export default function shares(router) {
 		const body = (await readJson(ctx.req)) || {};
 
 		// Authorized by the upload cookie (the gate) or an explicit password in the body.
-		if (config.uploadPassword && !hasUploadAccess(ctx.req) && !uploadAllowed(body.uploadPassword)) {
-			return error(403, 'Upload password required');
+		if (config.uploadPassword && !uploadAllowed(body.uploadPassword)) {
+			if (!hasUploadAccess(ctx.req)) return error(403, 'Upload password required');
+			// Ambient-cookie authorization (no explicit password in this request) -
+			// require same-origin proof (F-10 CSRF defense-in-depth). A request that
+			// supplied a real body password needs no such proof: it is not riding an
+			// ambient credential.
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
 		}
 
 		let title = null;
@@ -335,7 +341,15 @@ export default function shares(router) {
 		const limited = enforce(`delete:${ctx.params.id}`, ctx.ip, 60, 60_000);
 		if (limited) return limited;
 		const owner = isOwner(ctx.req, share);
-		if (!owner && !isAdmin(ctx.req)) return error(403, 'Forbidden');
+		if (!owner) {
+			if (!isAdmin(ctx.req)) return error(403, 'Forbidden');
+			// Admin authorization here is the ambient isAdmin() cookie, not the
+			// X-Edit-Token header - require same-origin proof (F-10 CSRF
+			// defense-in-depth). The edit-token path below is a header, not an
+			// ambient credential, so it needs no such proof.
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
+		}
 		// Only the edit-token (key-owner) path is scope-gated; an admin deleting
 		// through the admin session bypasses per-key scopes entirely, same as
 		// every other admin route.

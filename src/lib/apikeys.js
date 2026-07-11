@@ -225,6 +225,18 @@ export function authenticate(req) {
 	return key;
 }
 
+// Like authenticate(), but also reports HOW the caller authenticated, so
+// call sites can require same-origin proof (F-10 CSRF defense) only for the
+// ambient-cookie path - a bearer/X-Api-Key request carries no cookie an
+// attacker's cross-site page could ride, so it is never asked for it.
+// Returns { key, viaCookie } or null.
+export function authenticateSource(req) {
+	const bearer = verifyApiKey(readApiKey(req));
+	const key = bearer || readApiKeySession(req);
+	if (key) touchKey.run(now(), key.id);
+	return key ? { key, viaCookie: !bearer } : null;
+}
+
 // Add to a key's lifetime usage tallies (shares created, bytes stored).
 export function recordKeyUsage(id, { shares = 0, bytes = 0 } = {}) {
 	if (!id) return;
