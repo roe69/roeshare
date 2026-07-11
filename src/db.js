@@ -39,7 +39,10 @@ import { config } from './config.js';
 import { hashSecretToken } from './lib/crypto.js';
 
 mkdirSync(config.dataDir, { recursive: true });
-mkdirSync(config.storageDir, { recursive: true });
+// 0700: only this process's owner should ever read/write the storage volume -
+// see storage.js's symlink/O_NOFOLLOW guards and DEPLOY.md's note on not
+// sharing the volume writable with any other process/container.
+mkdirSync(config.storageDir, { recursive: true, mode: 0o700 });
 
 export const db = new Database(config.dbPath, { create: true });
 

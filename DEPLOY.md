@@ -122,3 +122,17 @@ should ever require. Two ways to do it:
 > repository secrets, never on the box. The panel's `settings.env` (in the
 > data volume, written `0600`) only holds panel-set values for keys the
 > environment leaves unset, such as the size limits.
+
+## Storage volume isolation
+
+The app creates the storage directory `0700` and every blob file `0600`, and
+refuses to follow a symlink planted anywhere under it (see `lib/storage.js`) -
+but that only protects against another *unprivileged* process on the same
+host. Never share the storage volume (or a bind mount backing it) as
+writable with any other process or container: anything that can write into
+it can plant a symlink or otherwise race the app's own writes, and ambient
+root/host-level access still bypasses the app's own checks entirely. Where
+your deployment supports it, mount the volume with `nodev,nosuid,noexec` -
+none of `roeshare`'s own writes need device nodes, setuid execution, or to
+execute anything from the data volume, so those options cost nothing and
+close off a class of post-compromise escalation.

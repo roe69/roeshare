@@ -14,7 +14,7 @@
 //        below, never stat()/blobFile().size.
 
 import { mkdir, open, rm, stat, readdir, rename } from 'node:fs/promises';
-import { existsSync, createReadStream, statSync } from 'node:fs';
+import { existsSync, createReadStream, statSync, lstatSync, constants as FS_CONST } from 'node:fs';
 import { Readable } from 'node:stream';
 import { join, resolve, sep } from 'node:path';
 import { config } from '../config.js';
@@ -24,9 +24,51 @@ import { transformAt, decryptStream, PLAIN_CHUNK, FULL_RECORD, fileKeyForV2, sea
 // dots nor path separators are allowed, so a segment can never escape its dir.
 const ID = /^[0-9A-Za-z_-]+$/;
 
+// O_NOFOLLOW isn't defined on every platform (notably: absent from
+// node:fs.constants on Windows) - fall back to 0 (no-op flag) there. On a
+// platform that lacks it, the lstat-based checks below (assertRealDirIfExists
+// / assertRealFileIfExists) are the only symlink defense; where it IS defined
+// (Linux/macOS - the actual deploy target, see DEPLOY.md) it additionally
+// closes the lstat-then-open TOCTOU race at the syscall level.
+const O_NOFOLLOW = FS_CONST.O_NOFOLLOW || 0;
+const { O_WRONLY, O_RDONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC } = FS_CONST;
+
 function safeSegment(id) {
 	if (typeof id !== 'string' || !ID.test(id)) throw new Error('invalid storage id');
 	return id;
+}
+
+// Throws if `dir` exists but is not a real directory - e.g. a symlink planted
+// in its place (pointing anywhere, including outside storageDir) or a plain
+// file. Uses lstat, never stat, so a symlink is never followed to decide "yes
+// this resolves to a directory" (which is exactly what Node's recursive
+// mkdir() does internally, and why it alone is not a sufficient guard). A
+// missing path is not an error here - callers create it on demand.
+function assertRealDirIfExists(dir) {
+	let st;
+	try {
+		st = lstatSync(dir);
+	} catch (e) {
+		if (e.code === 'ENOENT') return false;
+		throw e;
+	}
+	if (!st.isDirectory()) throw new Error(`refusing to use non-directory storage path: ${dir}`);
+	return true;
+}
+
+// Throws if `path` exists but is not a regular file (e.g. a symlink planted
+// there). Uses lstat, never stat. A missing path is not an error - it just
+// means "not created yet" and returns false so the caller knows to O_CREAT.
+function assertRealFileIfExists(path) {
+	let st;
+	try {
+		st = lstatSync(path);
+	} catch (e) {
+		if (e.code === 'ENOENT') return false;
+		throw e;
+	}
+	if (!st.isFile()) throw new Error(`refusing to open non-regular-file storage path: ${path}`);
+	return true;
 }
 
 export function shareDir(shareId) {
@@ -34,11 +76,19 @@ export function shareDir(shareId) {
 }
 
 export function blobPath(shareId, fileId) {
-	const p = resolve(shareDir(shareId), safeSegment(fileId));
+	const dir = shareDir(shareId);
+	const p = resolve(dir, safeSegment(fileId));
 	// Defense in depth: the resolved path must stay under storageDir.
 	if (p !== config.storageDir && !p.startsWith(config.storageDir + sep)) {
 		throw new Error('path escapes storage root');
 	}
+	// Reject a symlink planted in place of the storage root or the share
+	// directory - every parent directory component under storageDir must be a
+	// real directory, never a link followed somewhere else. The leaf (the blob
+	// file itself) is checked separately at open time by the read/write paths
+	// below, which also need to tell "doesn't exist yet" from "exists".
+	assertRealDirIfExists(config.storageDir);
+	assertRealDirIfExists(dir);
 	return p;
 }
 
@@ -69,8 +119,7 @@ export function plainSize(fileRow, shareId) {
 // ---- v1 / plaintext write path (unchanged) ---------------------------------
 
 async function writeChunkPlain(path, offset, buf) {
-	const flags = offset === 0 ? 'w' : 'r+';
-	const fh = await open(path, flags);
+	const fh = await openBlobForChunkWrite(path, offset);
 	try {
 		await fh.write(buf, 0, buf.length, offset);
 	} finally {
@@ -80,13 +129,50 @@ async function writeChunkPlain(path, offset, buf) {
 	return s.size;
 }
 
+// Open a blob file for a chunk write at PLAINTEXT/on-disk offset `diskOffset`,
+// never following a symlink into it. Shared by the v1/plaintext and v2 write
+// paths (they differ only in how "offset 0" maps to disk position).
+//
+//   - diskOffset === 0 and nothing exists there yet: a genuinely new blob -
+//     O_CREAT|O_EXCL, so the create fails outright (rather than silently
+//     reusing) if anything - file or symlink - appears at this path between
+//     our lstat and the open.
+//   - diskOffset === 0 and a real file already exists: an idempotent retry of
+//     the first chunk after it landed on disk but the DB commit that would
+//     have advanced `received` never happened (a crash between the two - see
+//     uploads.js's offset===received check). O_EXCL doesn't apply here since
+//     the file legitimately exists; O_TRUNC restarts it cleanly.
+//   - diskOffset > 0: resuming a partial upload. The blob must already exist
+//     as a real regular file (verified via lstat above) - reopened without
+//     O_CREAT, so a missing file still fails exactly as it did before.
+//
+// O_NOFOLLOW (where supported - see the constant above) additionally blocks a
+// symlink swapped in for the path in the window between the lstat check and
+// this open.
+async function openBlobForChunkWrite(path, diskOffset) {
+	const existed = assertRealFileIfExists(path);
+	if (diskOffset === 0) {
+		// O_CREAT is included even when the file already exists (harmless
+		// without O_EXCL - it just opens it) because some platforms reject
+		// O_TRUNC without O_CREAT outright (e.g. Windows: EINVAL).
+		const flags = existed ? O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW : O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW;
+		return open(path, flags, 0o600);
+	}
+	return open(path, O_RDWR | O_NOFOLLOW);
+}
+
 // ---- v2 chunked-GCM write path ----------------------------------------------
 
 // Read the tail record currently on disk (the last, possibly partial, record
 // - by construction there is nothing after it) so a non-chunk-aligned write
 // can verify it before resealing it with the new bytes appended.
 async function readTailRecord(path, recordStart) {
-	const fh = await open(path, 'r');
+	// The tail record must already be a real file on disk (this is only called
+	// when resealing an existing partial v2 blob) - reject a symlink rather
+	// than reading through it. A missing file falls through to open()'s own
+	// ENOENT, unchanged from before.
+	assertRealFileIfExists(path);
+	const fh = await open(path, O_RDONLY | O_NOFOLLOW);
 	try {
 		const st = await fh.stat();
 		const len = st.size - recordStart;
@@ -122,11 +208,10 @@ async function writeChunkV2(path, offset, data, enc) {
 	}
 
 	// Records only ever grow or append at this position, never shrink, so no
-	// truncation is needed: 'w' only fires for the very first bytes of the
-	// file (disk offset 0), everything else opens without truncating.
+	// truncation is needed beyond the very first bytes of the file (disk
+	// offset 0) - see openBlobForChunkWrite() above for the symlink-safe open.
 	const diskOffset = startRec * FULL_RECORD;
-	const flags = diskOffset === 0 ? 'w' : 'r+';
-	const fh = await open(path, flags);
+	const fh = await openBlobForChunkWrite(path, diskOffset);
 	try {
 		let pos = diskOffset;
 		for (const rec of records) {
@@ -149,7 +234,14 @@ async function writeChunkV2(path, offset, data, enc) {
 // from the server-reported offset after an interruption. `enc` (build with
 // fileEnc()) selects the at-rest format; null means the blob is stored raw.
 export async function writeChunk(shareId, fileId, offset, data, enc) {
-	await mkdir(shareDir(shareId), { recursive: true });
+	const dir = shareDir(shareId);
+	// Checked BEFORE mkdir: Node's recursive mkdir stats (follows symlinks) to
+	// decide "does this already resolve to a directory", so a symlink planted
+	// at the share-dir path would otherwise be silently reused rather than
+	// rejected. lstat here catches that up front.
+	assertRealDirIfExists(config.storageDir);
+	assertRealDirIfExists(dir);
+	await mkdir(dir, { recursive: true, mode: 0o700 });
 	const path = blobPath(shareId, fileId);
 	const buf = data instanceof Uint8Array ? data : new Uint8Array(data);
 
@@ -195,6 +287,10 @@ function blobRangeStreamV2(shareId, fileId, start, end, enc) {
 	const firstRec = Math.floor(start / PLAIN_CHUNK);
 	const lastRec = Math.floor(end / PLAIN_CHUNK);
 	const path = blobPath(shareId, fileId);
+	// Reject a symlink planted at the blob leaf itself (blobPath() already
+	// checked the directory components above it). A missing file is not
+	// rejected here - it falls through to diskSize=0 below, unchanged.
+	assertRealFileIfExists(path);
 	const diskStart = firstRec * FULL_RECORD;
 	let diskSize;
 	try {
@@ -265,12 +361,17 @@ function blobRangeStreamV2(shareId, fileId, start, end, enc) {
 export function blobRangeStream(shareId, fileId, start, end, enc) {
 	if (end < start) return new ReadableStream({ start(c) { c.close(); } });
 	if (enc?.version === 2) return blobRangeStreamV2(shareId, fileId, start, end, enc);
+	const path = blobPath(shareId, fileId);
+	// Reject a symlink planted at the blob leaf itself (blobPath() already
+	// checked the directory components above it). A missing file is not
+	// rejected here - createReadStream below emits its own ENOENT, unchanged.
+	assertRealFileIfExists(path);
 	// Not Bun.file().slice(start, end).stream(): Bun ignores the slice end when
 	// streaming and reads from `start` to EOF in huge buffered chunks, so on a
 	// large blob a small Range request never terminates (the client hangs after
 	// Content-Length bytes) and each seek materializes the file tail in memory.
 	// fs.createReadStream honors start/end and reads in small chunks.
-	const src = Readable.toWeb(createReadStream(blobPath(shareId, fileId), { start, end }));
+	const src = Readable.toWeb(createReadStream(path, { start, end }));
 	if (enc?.version === 1) return decryptStream(enc.iv, start, src);
 	return src;
 }
@@ -284,6 +385,7 @@ export function blobSize(shareId, fileId) {
 	const path = blobPath(shareId, fileId);
 	if (!existsSync(path)) return 0;
 	try {
+		assertRealFileIfExists(path); // reject a symlink at the leaf; treat like "absent"
 		return Bun.file(path).size;
 	} catch {
 		return 0;
@@ -292,7 +394,9 @@ export function blobSize(shareId, fileId) {
 
 // A Bun file handle for streaming. Callers use .stream() / .slice() / .size.
 export function blobFile(shareId, fileId) {
-	return Bun.file(blobPath(shareId, fileId));
+	const path = blobPath(shareId, fileId);
+	assertRealFileIfExists(path); // reject a symlink at the leaf (missing is fine - not created yet)
+	return Bun.file(path);
 }
 
 // Tracks share ids whose on-disk blobs are currently being removed by an
