@@ -2,9 +2,11 @@
    Component styles for the no-build frontend. Plain CSS (no build step) that
    consumes the palette from tokens.css. Class prefix: rl-. To re-theme, set the
    THEME_PRIMARY / THEME_ACCENT env vars or edit tokens.css (see CUSTOMIZING.md).
+   Note: tokens.css must be linked separately in each HTML <head>, BEFORE this
+   file's <link>, so both fetch in parallel (see public/*.html) - do not
+   reintroduce an @import here, it forces a sequential fetch (browser can't
+   discover the imported URL until this file has downloaded and begun parsing).
    ========================================================================== */
-
-@import './tokens.css';
 
 /* ---------- Reset / base ---------- */
 *,
