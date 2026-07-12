@@ -169,6 +169,31 @@ describe('static asset Cache-Control (no-store -> no-cache)', () => {
 		}
 	});
 
+	test('a compressible asset requested with no Accept-Encoding still carries Vary: Accept-Encoding', async () => {
+		// Now that these responses are cacheable (no-cache, not no-store), an
+		// intermediary caching by URL alone without Vary could store the
+		// uncompressed body from a client that sent no/identity Accept-Encoding
+		// and later hand it to a client that supports br/gzip, without knowing a
+		// different representation existed for that same URL. Vary used to only
+		// be set on the compressed-response branch.
+		const dir = freshDataDir('static-cache-vary');
+		try {
+			const proc = await bootServer(dir, 3874);
+			try {
+				const base = 'http://127.0.0.1:3874';
+				const res = await fetch(`${base}/css/app.css`, { headers: { 'Accept-Encoding': 'identity' } });
+				expect(res.status).toBe(200);
+				expect(res.headers.get('content-encoding')).toBeNull();
+				expect(res.headers.get('vary')).toBe('Accept-Encoding');
+				await res.arrayBuffer();
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
 	test('authorized admin.js and upload.js stay no-store even though the caller is entitled to see them, and do not 304', async () => {
 		const dir = freshDataDir('static-cache-gated-nostore');
 		try {

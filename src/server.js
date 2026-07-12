@@ -124,12 +124,20 @@ function staticResponse(req, e) {
 	const headers = { 'Content-Type': e.type, ETag: e.etag, 'Cache-Control': e.cacheControl, ...SECURITY_HEADERS };
 	let body = e.identity;
 	if (isCompressibleType(e.type)) {
+		// Set regardless of whether this particular request negotiated a
+		// compressed body: an identity (uncompressed) response is just as much a
+		// distinct representation as a br/gzip one, and now that these responses
+		// are cacheable (no-cache, not no-store - see staticEntry()), an
+		// intermediary caching by URL alone without this header could otherwise
+		// store the uncompressed body and later hand it to a client that sent a
+		// different Accept-Encoding, without knowing a different representation
+		// existed for that same URL.
+		headers['Vary'] = 'Accept-Encoding';
 		const enc = pickEncoding(req);
 		if (enc) {
 			if (!e.enc[enc]) e.enc[enc] = compressBytes(e.identity, enc, 11); // max quality, computed once
 			body = e.enc[enc];
 			headers['Content-Encoding'] = enc;
-			headers['Vary'] = 'Accept-Encoding';
 		}
 	}
 	return new Response(body, { headers });
