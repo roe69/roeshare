@@ -170,8 +170,13 @@ export function validatePatch(body) {
 	const clearReq = Array.isArray(body.clear) ? body.clear : [];
 	const set = {};
 	for (const [key, val] of Object.entries(values)) {
+		// L-1: a plain bracket lookup would resolve a key like "__proto__" to
+		// Object.prototype (truthy, but with none of the {rule, label, ...} shape
+		// below expects), throwing deep inside spec.rule() instead of hitting the
+		// "drop non-allowlisted" path this is meant to be. hasOwn only matches a
+		// real allowlisted key, never an inherited one.
+		if (!Object.hasOwn(ALLOWLIST, key)) continue; // drop non-allowlisted
 		const spec = ALLOWLIST[key];
-		if (!spec) continue; // drop non-allowlisted
 		if (val == null) continue;
 		if (typeof val !== 'string') return { error: `${spec.label} must be text` };
 		if (spec.secret && val === '') continue; // blank secret = leave unchanged
@@ -182,8 +187,8 @@ export function validatePatch(body) {
 	}
 	const clear = [];
 	for (const key of clearReq) {
+		if (!Object.hasOwn(ALLOWLIST, key)) continue; // L-1: same hasOwn guard as above
 		const spec = ALLOWLIST[key];
-		if (!spec) continue;
 		if (envManagedKeys.has(key)) return { error: `${spec.label} is set by the server environment and cannot be changed here` };
 		if (!spec.clearable) return { error: `${spec.label} cannot be cleared` };
 		clear.push(key);

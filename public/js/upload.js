@@ -2,7 +2,7 @@
 // card with link, copy, and QR. Uses shared helpers and the rl-* design system.
 
 import { el, $, api, ApiError, toast, toastOk, toastErr, copyText, formatBytes, fileGlyph, addOwnedShare } from '/js/shared.js';
-import { generateKey, importKey, encryptBytes, encryptString, ENC_OVERHEAD } from '/js/e2e.js';
+import { generateKey, importKey, encryptBytes, encryptString, ENC_OVERHEAD, recordAad, CURRENT_AAD_VERSION, toB64u } from '/js/e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
 
 // The shared rail. The quick-access upload link is an admin-only control (it
@@ -634,15 +634,25 @@ async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name, 
 	const numChunks = Math.max(1, Math.ceil(plainSize / chunkSize));
 	const cipherSize = plainSize + numChunks * ENC_OVERHEAD;
 
-	let fileId;
+	let fileId, aadVersion;
 	if (existing && existing.fileId) {
 		fileId = existing.fileId;
+		// H-1: a resumed file keeps whatever AAD scheme it was registered under -
+		// that is fixed for the file's whole lifetime. Sourced from the server's
+		// live file metadata (see startResume), never guessed here.
+		aadVersion = existing.aadVersion === 1 ? 1 : 0;
 	} else {
+		// H-1: the browser mints the file id itself (same shape as the E2E key)
+		// so the encrypted-filename record below can be AAD-bound to it - the id
+		// would otherwise only exist after this same registration request.
+		fileId = toB64u(crypto.getRandomValues(new Uint8Array(16)));
+		aadVersion = CURRENT_AAD_VERSION;
 		// Encrypted metadata: real name (incl. folder path), mime, and the plaintext
 		// chunk size so the recipient can frame the records for decryption.
-		const meta = await encryptString(key, JSON.stringify({ name: name || file.name, mime: file.type || 'application/octet-stream', cs: chunkSize }));
-		const reg = await api.post(`/api/shares/${id}/files`, { name: meta, size: cipherSize, mime: 'application/octet-stream' }, { headers: editTokenHeaders(token) });
-		fileId = reg.fileId;
+		const metaJson = JSON.stringify({ name: name || file.name, mime: file.type || 'application/octet-stream', cs: chunkSize });
+		const metaAad = recordAad('name', fileId, 0, new TextEncoder().encode(metaJson).length);
+		const meta = await encryptString(key, metaJson, metaAad);
+		await api.post(`/api/shares/${id}/files`, { name: meta, size: cipherSize, mime: 'application/octet-stream', id: fileId, aadVersion }, { headers: editTokenHeaders(token) });
 		if (onRegister) onRegister(fileId);
 	}
 	const headers = editTokenHeaders(token, { 'Content-Type': 'application/octet-stream' });
@@ -668,7 +678,8 @@ async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name, 
 		const plainOff = chunkIndex * chunkSize;
 		const end = Math.min(plainOff + chunkSize, plainSize);
 		const plainChunk = new Uint8Array(await file.slice(plainOff, end).arrayBuffer());
-		const record = await encryptBytes(key, plainChunk);
+		const chunkAad = aadVersion === 1 ? recordAad('chunk', fileId, chunkIndex, plainChunk.length) : undefined;
+		const record = await encryptBytes(key, plainChunk, chunkAad);
 		let handled = false;
 		for (let attempt = 0; attempt < MAX_CHUNK_RETRIES && !handled; attempt++) {
 			// Back off before every retry (never before a chunk's first attempt,
@@ -1077,7 +1088,7 @@ async function startResume(d, meta, files) {
 		if (!file) { toastErr('Please re-select all of the remaining files.'); return; }
 		selected.push({
 			file, path: df.path, key: ++keyCounter, row: null, done: false,
-			_resume: df.fileId && m ? { fileId: df.fileId, received: m.received || 0 } : null,
+			_resume: df.fileId && m ? { fileId: df.fileId, received: m.received || 0, aadVersion: (m && m.aadVersion) || 0 } : null,
 		});
 	}
 	if (!selected.length) { clearDraft(); removeResumeBanner(); return; }

@@ -7,7 +7,7 @@ import { db, now } from '../db.js';
 import { json, error, cookie, sessionCookieName, requestOrigin, requestScheme, requireSameOrigin, readJson, LOGIN_BODY_MAX, METADATA_BODY_MAX } from '../lib/http.js';
 import { hashPassword, verifyPassword, hashSecretToken, verifySecretToken } from '../lib/crypto.js';
 import {
-	uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, mintUploadLink, UPLOAD_COOKIE,
+	uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, mintUploadLink, redeemUploadLink, UPLOAD_COOKIE,
 	issueOwnerToken, hasOwnerCookie, ownerCookieBase,
 } from '../lib/auth.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
@@ -30,7 +30,7 @@ const insertShare = db.query(
 	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e)
 	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
-const getFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, sha256 FROM files WHERE share_id = ? ORDER BY created_at ASC');
+const getFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, sha256, e2e_aad_version FROM files WHERE share_id = ? ORDER BY created_at ASC');
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
 // Shifts a share's expiry forward by the time spent uploading, so the
 // published-link expiry clock effectively starts at finalize rather than at
@@ -130,6 +130,35 @@ export default function shares(router) {
 		if (!config.uploadPassword) return json({ enabled: false });
 		if (!hasUploadAccess(ctx.req)) return error(403, 'Forbidden');
 		return json({ enabled: true, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/?token=${encodeURIComponent(mintUploadLink())}` });
+	});
+
+	// Redeems a magic-link token (the ?token= on the / page - see
+	// routes/pages.js) and issues the upload cookie, exactly like
+	// /api/upload/verify does for a typed password. M-03: this is deliberately
+	// a POST, fired only from the interstitial page's browser JS
+	// (public/js/link-redeem.js), never a bare GET - a GET/HEAD that redeemed
+	// the token directly would let a server-side link-preview scanner (which
+	// prefetches pasted URLs with no cookie and no JS execution) silently and
+	// permanently burn the single-use token before the intended human ever
+	// clicked it. No ambient cookie is read here (the token itself is the
+	// credential, like /api/upload/verify's password), so this needs no CSRF
+	// proof. Rate-limited per IP (same 'magic-link' bucket the old GET-based
+	// redemption used) so the token space cannot be brute-forced.
+	declareRoutePolicy('POST', '/api/upload/link/redeem', { auth: 'public', csrf: false, rateLimit: 'magic-link', audit: 'upload.link.redeemed' });
+	router.post('/api/upload/link/redeem', async ctx => {
+		const limited = enforce('magic-link', ctx.ip, 20, 5 * 60 * 1000);
+		if (limited) return limited;
+		const { value, response } = await readJson(ctx.req, LOGIN_BODY_MAX);
+		if (response) return response;
+		const token = (value || {}).token;
+		// Generic failure for missing/invalid/expired/already-redeemed - never
+		// reveals which, same as the old GET path's silent fall-through to the
+		// lock page.
+		if (!redeemUploadLink(token)) return error(403, 'Invalid or expired link');
+		audit('upload.link.redeemed', { ip: ctx.ip });
+		const secure = requestScheme(ctx.req, ctx.url, ctx.server) === 'https';
+		const setCookie = cookie(sessionCookieName(UPLOAD_COOKIE, secure), issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure });
+		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
 	// ---- Create draft ------------------------------------------------------
@@ -354,6 +383,11 @@ export default function shares(router) {
 				complete: !!f.complete,
 				downloadCount: f.download_count,
 				sha256: f.sha256,
+				// H-1: which AAD scheme (see e2e.js's recordAad) this file's E2E
+				// records were sealed under - 0 legacy/unauthenticated-position, 1
+				// current. Meaningless for a non-E2E share; the client only reads
+				// this when share.e2e is true.
+				aadVersion: f.e2e_aad_version,
 				// Owners get the resume offset (bytes received so far) so a refreshed
 				// upload page can continue an in-flight file. Not exposed to visitors.
 				...(owner ? { received: f.received } : {}),

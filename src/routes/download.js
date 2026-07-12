@@ -655,10 +655,37 @@ export default function download(router) {
 				if (fileEnc(f)?.version === 1) scheduleMigration(f.id);
 			}
 
+			// M-5: the batch snapshot above (and the loop's own per-file
+			// awaitFileMigration check) only guarantees THAT file's row is fresh at
+			// the moment it was checked - it says nothing about a DIFFERENT file's
+			// migration completing its swap while this loop was awaiting on some
+			// other entry. Trusting `f` here would risk opening a blob that has
+			// since been promoted to v2 on disk with the stale v1 iv/version still
+			// in hand (silent CTR "decryption" of authenticated GCM ciphertext -
+			// garbage, and it would never fail loudly). Re-resolve each file fresh
+			// right when the zip writer actually asks for its bytes (createZipStream
+			// streams entries strictly one at a time, so this happens immediately
+			// before that entry is read) - mirroring resolveFile()'s single-file
+			// safety above, but evaluated at the true point of use instead of from
+			// this batch snapshot.
 			const usedZipNames = new Set();
 			const entries = files.map(f => ({
 				name: uniqueZipName(f.name, usedZipNames),
-				file: { stream: () => blobRangeStream(share.id, f.id, 0, f.size - 1, fileEnc(f)) },
+				file: {
+					stream: () => new ReadableStream({
+						async start(controller) {
+							const fresh = await resolveFile(share.id, f.id);
+							if (!fresh) { controller.close(); return; } // deleted concurrently; emit an empty entry rather than stale/wrong bytes
+							const reader = blobRangeStream(share.id, fresh.id, 0, fresh.size - 1, fileEnc(fresh)).getReader();
+							while (true) {
+								const { done, value } = await reader.read();
+								if (done) break;
+								controller.enqueue(value);
+							}
+							controller.close();
+						},
+					}),
+				},
 				size: f.size,
 			}));
 

@@ -25,11 +25,12 @@ import { newFileSalt } from '../lib/filecrypt.js';
 import { CURRENT_AT_REST_KEY_ID } from '../lib/keys.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce, enforceKey } from '../lib/ratelimit.js';
-import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
+import { acquire, acquireAll, overloaded, takeBytes } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
 import { authenticate, authenticateSource, verifyApiKey, recordKeyUsage, effectiveCaps, clampExpiry, issueApiKeySession, readApiKeySession, APIKEY_COOKIE, apiKeyRow, requireScope } from '../lib/apikeys.js';
 import { audit } from '../lib/audit.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
+import { sanitizeName } from '../lib/names.js';
 
 // lower(id) so a slug can never collide-by-case with an existing one (the
 // on-disk share directory is effectively case-insensitive on some
@@ -55,7 +56,7 @@ const softDeleteShare = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?'
 // expiry is NOT applied here so a key can still inspect/delete an expired-but-not-
 // yet-swept share it created.
 const getOwnedShare = db.query('SELECT * FROM shares WHERE id = ? AND api_key_id = ? AND deleted_at IS NULL');
-const getShareFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, created_at, sha256 FROM files WHERE share_id = ? ORDER BY created_at ASC, id ASC');
+const getShareFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, created_at, sha256, e2e_aad_version FROM files WHERE share_id = ? ORDER BY created_at ASC, id ASC');
 
 // Map a share row to the API shape, with a built download/share URL.
 function shareView(s, origin, files) {
@@ -85,23 +86,17 @@ function shareView(s, origin, files) {
 						complete: !!f.complete,
 						downloadCount: f.download_count,
 						sha256: f.sha256,
+						// H-1: read-only parity with GET /api/shares/:id - see e2e.js's
+						// recordAad. Not used to gate any write here; this endpoint has no
+						// client-id/aadVersion registration support (E2E creation isn't a
+						// documented programmatic flow).
+						aadVersion: f.e2e_aad_version,
 						// Ready-to-use retrieval URL (authorize with this same API key).
 						download: `${origin}/api/shares/${s.id}/files/${f.id}/download`,
 					})),
 			  }
 			: {}),
 	};
-}
-
-// Keep a SAFE relative path (mirrors uploads.js): drop "."/".."/empty/drive
-// segments and control chars. Never used as an on-disk path (blobs use the file
-// id), only as the display name and zip entry path.
-function sanitizeName(name) {
-	const parts = String(name ?? '')
-		.split(/[/\\]+/)
-		.map(s => s.replace(/[\x00-\x1f\x7f]/g, '').replace(/^[A-Za-z]:$/, '').trim())
-		.filter(s => s && s !== '.' && s !== '..');
-	return parts.join('/').slice(0, 1024) || 'file';
 }
 
 // Normalize share options from either a JSON body or query params (values may be
@@ -441,6 +436,22 @@ export default function apiV1(router) {
 		if (!release) return overloaded(3);
 
 		try {
+			// M-2: byte-rate budget, matching the chunk-upload path's 'chunk-bytes'
+			// gate in uploads.js (same config values, charged BEFORE buffering the
+			// body into memory). This was the only byte-serving/receiving path with
+			// no rate control at all - a one-shot upload could otherwise ignore
+			// UPLOAD_BYTES_PER_SEC entirely just by not using the chunked flow. Cost
+			// uses the declared length when the client sent one, or the worst-case
+			// size this request could still be (this key's per-file cap) otherwise -
+			// the same "declared length, else worst case for this request" idiom as
+			// uploads.js's rateCost (there the worst case is one chunk; here it is
+			// one whole one-shot body).
+			if (config.uploadBytesPerSec > 0) {
+				const rateCost = Number.isFinite(declaredLen) && declaredLen >= 0 ? declaredLen : caps.maxFileSize;
+				const rateLimited = takeBytes('upload-bytes', key.id, rateCost, config.uploadBytesPerSec * 4, config.uploadBytesPerSec);
+				if (rateLimited) return rateLimited;
+			}
+
 			const buf = new Uint8Array(await ctx.req.arrayBuffer());
 			const size = buf.length;
 			if (size === 0) return error(400, 'Empty request body');

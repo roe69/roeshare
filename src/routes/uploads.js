@@ -18,29 +18,24 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare, scopeErrorForShare } from '../lib/apikeys.js';
 import { enforceKey } from '../lib/ratelimit.js';
 import { reserveInTx, commitInTx, touchInTx } from '../lib/quota.js';
-import { acquireAll, overloaded, takeBytes } from '../lib/semaphore.js';
+import { acquireAll, overloaded, takeBytes, wouldPassBytes } from '../lib/semaphore.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
+import { sanitizeName } from '../lib/names.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
 const insertFile = db.query(
-	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, enc_version, key_id) VALUES (?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?)'
+	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, enc_version, key_id, e2e_aad_version) VALUES (?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?)'
 );
-const getFile = db.query('SELECT id, size, received, complete, iv, enc_version, key_id FROM files WHERE id = ? AND share_id = ?');
+const getFile = db.query('SELECT id, size, received, complete, iv, enc_version, key_id, e2e_aad_version FROM files WHERE id = ? AND share_id = ?');
 const updateReceived = db.query('UPDATE files SET received = ?, complete = ? WHERE id = ?');
 const updateSha256 = db.query('UPDATE files SET sha256 = ? WHERE id = ?');
 
-// Keep a SAFE relative path so dragged folders preserve their structure (used as
-// the display name and the zip entry path). Drops any "." / ".." / empty / drive
-// segments and control chars, so it can never traverse - and it is never used as
-// an on-disk path anyway (blobs are stored under the generated file id).
-function sanitizeName(name) {
-	const parts = String(name ?? '')
-		.split(/[/\\]+/)
-		.map(s => s.replace(/[\x00-\x1f\x7f]/g, '').replace(/^[A-Za-z]:$/, '').trim())
-		.filter(s => s && s !== '.' && s !== '..');
-	return parts.join('/').slice(0, 1024) || 'file';
-}
+// H-1: charset/length a client-generated E2E file id must satisfy (same
+// convention as every other id in this app - see lib/ids.js) before it is
+// trusted as a primary key. toB64u(crypto.getRandomValues(16)) - what
+// e2e.js/upload.js actually send - produces a 22-character subset of this.
+const CLIENT_FILE_ID_RE = /^[0-9A-Za-z_-]{1,64}$/;
 
 // Resolve the share and verify ownership (X-Edit-Token header, or - M-05 - the
 // per-share owner cookie). Returns { share, via: 'header'|'cookie' }, or a
@@ -147,7 +142,20 @@ export default function uploads(router) {
 		if (agg.count >= config.maxFilesPerShare) return error(413, 'Too many files in this share');
 		if (agg.total + size > caps.maxShareSize) return error(413, 'Share exceeds the per-share size limit');
 
-		const fileId = newFileId();
+		// H-1: an E2E client MAY supply its own file id plus the AAD scheme it
+		// used (aadVersion) - both together, never just one. This is what lets
+		// the encrypted-filename record be AAD-bound to fileId even though the id
+		// would otherwise only be minted by this same request (see e2e.js /
+		// upload.js). Old clients, and non-E2E shares, send neither and get the
+		// original server-generated id / aadVersion=0 behavior unchanged.
+		const clientSuppliedId = !!(share.e2e && body?.id !== undefined && body?.aadVersion !== undefined);
+		let fileId = newFileId();
+		let aadVersion = 0;
+		if (clientSuppliedId) {
+			if (typeof body.id !== 'string' || !CLIENT_FILE_ID_RE.test(body.id)) return error(400, 'Invalid file id');
+			fileId = body.id;
+			aadVersion = body.aadVersion === 1 ? 1 : 0;
+		}
 		// E2E shares arrive already encrypted by the client - store the bytes raw
 		// (iv = null means storage does not apply its own encryption layer). A
 		// non-E2E file only gets an iv (and thus server-side encryption) when
@@ -166,13 +174,23 @@ export default function uploads(router) {
 		// Re-reading fresh and reserving right before the insert (with no await
 		// in between) closes both races - reserveInTx is what makes the global
 		// cap atomic instead of the old cached-disk-walk check-then-act.
-		const registered = db.transaction(() => {
-			const fresh = shareTotal.get(share.id);
-			if (fresh.total + size > caps.maxShareSize) return 'share';
-			if (!reserveInTx(fileId, share.id, size)) return 'server';
-			insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv, 2, CURRENT_AT_REST_KEY_ID);
-			return true;
-		})();
+		let registered;
+		try {
+			registered = db.transaction(() => {
+				const fresh = shareTotal.get(share.id);
+				if (fresh.total + size > caps.maxShareSize) return 'share';
+				if (!reserveInTx(fileId, share.id, size)) return 'server';
+				insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv, 2, CURRENT_AT_REST_KEY_ID, aadVersion);
+				return true;
+			})();
+		} catch (e) {
+			// Astronomically unlikely PK collision on a client-generated 16-random-
+			// byte id (see e2e.js's toB64u(crypto.getRandomValues(16))) - ask the
+			// client to regenerate and retry once, same convention as the custom-
+			// slug PK-collision catch in shares.js's POST /api/shares.
+			if (clientSuppliedId && String(e?.message).includes('UNIQUE constraint failed')) return error(409, 'File id already in use, please retry');
+			throw e;
+		}
 		if (registered === 'share') return error(413, 'Share exceeds the per-share size limit');
 		if (registered === 'server') return error(413, 'Server storage limit reached');
 
@@ -195,7 +213,7 @@ export default function uploads(router) {
 
 	// Append a chunk of raw bytes at the given offset.
 	declareRoutePolicy('PATCH', '/api/shares/:id/files/:fileId', { auth: 'editTokenOrKey', csrf: true, rateLimit: 'chunk-patch', audit: null });
-	router.patch('/api/shares/:id/files/:fileId', async ({ req, params, query }) => {
+	router.patch('/api/shares/:id/files/:fileId', async ({ req, params, query, ip }) => {
 		const { share, res, via } = authShare(req, params.id);
 		if (res) return res;
 		if (via === 'cookie') {
@@ -255,10 +273,36 @@ export default function uploads(router) {
 				// buffering the body into memory, using the declared length when the
 				// client sent one, or the worst-case chunkSize otherwise, so an
 				// over-budget client is rejected without paying for the read first.
+				//
+				// L-2: the per-share bucket above only bounds bytes/sec into a SINGLE
+				// share - a single IP/actor can create multiple shares and multiply
+				// its effective sustained bandwidth that way. Gate on a second,
+				// per-IP bucket too (same convention as download.js's 'dl-bytes',
+				// which is keyed by ip) - both budgets must have room, on top of one
+				// another, not instead of.
+				//
+				// Peek both budgets before committing to either: takeBytes() deducts
+				// as soon as it admits, so charging the share bucket first and only
+				// then checking the IP bucket would drain the share's budget for
+				// bytes that are never actually transferred whenever the IP bucket
+				// rejects - exactly what happens on a real client's retry-with-
+				// backoff loop under per-IP contention (e.g. two of the same user's
+				// shares uploading concurrently from one IP). Peeking first (with a
+				// tiny, accepted race window against a concurrent request) keeps a
+				// rejected request from permanently draining a budget it never used.
 				if (config.uploadBytesPerSec > 0) {
 					const rateCost = Number.isFinite(declaredLen) && declaredLen >= 0 ? declaredLen : config.chunkSize;
-					const rateLimited = takeBytes('chunk-bytes', share.id, rateCost, config.uploadBytesPerSec * 4, config.uploadBytesPerSec);
+					const capacity = config.uploadBytesPerSec * 4;
+					if (!wouldPassBytes('chunk-bytes', share.id, rateCost, capacity, config.uploadBytesPerSec)) {
+						return takeBytes('chunk-bytes', share.id, rateCost, capacity, config.uploadBytesPerSec);
+					}
+					if (!wouldPassBytes('chunk-bytes-ip', ip, rateCost, capacity, config.uploadBytesPerSec)) {
+						return takeBytes('chunk-bytes-ip', ip, rateCost, capacity, config.uploadBytesPerSec);
+					}
+					const rateLimited = takeBytes('chunk-bytes', share.id, rateCost, capacity, config.uploadBytesPerSec);
 					if (rateLimited) return rateLimited;
+					const ipRateLimited = takeBytes('chunk-bytes-ip', ip, rateCost, capacity, config.uploadBytesPerSec);
+					if (ipRateLimited) return ipRateLimited;
 				}
 
 				const buf = await req.arrayBuffer();

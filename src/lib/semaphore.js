@@ -82,6 +82,21 @@ function reclaimByteBuckets() {
 // budget instead of either being rejected forever (if cost were capped to
 // capacity and never fit) or passing for free (if cost were capped and
 // admitted at zero marginal charge).
+// Non-mutating check: would takeBytes(name, key, cost, ...) currently admit
+// this request? Used to check multiple independent budgets (e.g. a per-share
+// AND a per-IP byte-rate bucket) before committing to any of them, so a
+// request rejected by one budget never permanently drains another one it
+// already passed - takeBytes alone can't do this since it deducts the cost
+// as soon as it decides to admit.
+export function wouldPassBytes(name, key, cost, capacityBytes, refillBytesPerSec) {
+	const k = `${name}\0${key ?? 'global'}`;
+	const b = byteBuckets.get(k);
+	if (!b) return true; // fresh bucket starts full
+	const elapsedSec = Math.max(0, (Date.now() - b.last) / 1000);
+	const tokens = Math.min(capacityBytes, b.tokens + elapsedSec * refillBytesPerSec);
+	return tokens > 0;
+}
+
 export function takeBytes(name, key, cost, capacityBytes, refillBytesPerSec) {
 	const k = `${name}\0${key ?? 'global'}`;
 	const t = Date.now();

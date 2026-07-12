@@ -5,7 +5,7 @@ import {
 	el, $, api, ApiError, toastErr, openModal, copyText,
 	formatBytes, timeUntil, fileGlyph, previewKind, migrateLegacyOwnerTokens,
 } from './shared.js';
-import { importKey, decryptFile, decryptString } from './e2e.js';
+import { importKey, decryptFile, decryptString, recordAad, fromB64u, IV_LEN, TAG_LEN } from './e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
 
 mountSidebar();
@@ -129,6 +129,10 @@ async function ensureE2eStream(file, count) {
 			cipherSize: file.size,
 			cs: file.cs,
 			mime: file.mime,
+			// H-1: lets the worker build matching per-record AAD (see e2e.js's
+			// recordAad, duplicated in sw.js since it is a classic script).
+			fileId: file.id,
+			aadVersion: file.aadVersion,
 			authHeaders,
 		});
 		await ready;
@@ -163,9 +167,14 @@ function splitPath(p) {
 	return i < 0 ? { dir: '', base: p } : { dir: p.slice(0, i + 1), base: p.slice(i + 1) };
 }
 
+// M-1 defense-in-depth: sanitizeName (src/lib/names.js) already strips bidi-
+// control/zero-width characters server-side, but isolate the rendered name's
+// text direction anyway so an unanticipated bidi character in an older/
+// external file record can never visually escape this element and relabel
+// neighboring UI (e.g. the download button next to it).
 function fileNameNode(name) {
 	const { dir, base } = splitPath(name);
-	return el('div', { class: 'rl-file-name', title: name },
+	return el('div', { class: 'rl-file-name', title: name, style: 'unicode-bidi: isolate;' },
 		dir ? el('span', { class: 'rl-file-dir' }, dir) : null,
 		base,
 	);
@@ -346,7 +355,7 @@ async function e2eFetch(file, count) {
 	const res = await fetch(`${fileBase(file.id)}/${count ? 'download' : 'preview'}`, { headers });
 	if (!res.ok && res.status !== 206) throw new ApiError(res.status, 'fetch failed');
 	const cipher = new Uint8Array(await res.arrayBuffer());
-	return decryptFile(e2eKey, cipher, file.cs);
+	return decryptFile(e2eKey, cipher, file.cs, file.id, file.aadVersion);
 }
 
 // A whole-file download's object URL used to be revoked on a fixed 30s timer,
@@ -668,13 +677,23 @@ async function load() {
 			}
 			try {
 				for (const f of share.files) {
-					const meta = JSON.parse(await decryptString(e2eKey, f.name));
+					// H-1: f.aadVersion comes straight from the (unencrypted) share
+					// metadata, so there is no ordering problem reading it before
+					// decrypting - only aadVersion 1 records were sealed with AAD.
+					const plainLen = fromB64u(f.name).length - IV_LEN - TAG_LEN;
+					const aad = f.aadVersion === 1 ? recordAad('name', f.id, 0, plainLen) : undefined;
+					const meta = JSON.parse(await decryptString(e2eKey, f.name, aad));
 					f.name = meta.name;
 					f.mime = meta.mime;
 					f.cs = meta.cs;
 				}
 			} catch {
-				return renderE2eError('Could not decrypt this share', 'The key may be wrong, or the data was tampered with.');
+				// Not overclaiming precision: for an aadVersion 1 file this failure
+				// really does mean a wrong key or a tampered/spliced record, but for
+				// a legacy aadVersion 0 file a GCM failure can equally be ordinary
+				// unauthenticated-position corruption - this message covers both
+				// without claiming splice-detection that doesn't exist for legacy.
+				return renderE2eError('Could not decrypt this share', 'The key may be wrong, or the data was tampered with or corrupted.');
 			}
 		}
 		renderShare(share);

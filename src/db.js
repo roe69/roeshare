@@ -105,6 +105,17 @@ const schema = {
 		// Which lib/keys.js AT_REST_KEYS entry the file's v2 per-file key was
 		// derived from (inert for v1/plaintext/E2E rows).
 		key_id:         'INTEGER NOT NULL DEFAULT 1',
+		// H-1: E2E record AAD-binding version, CLIENT-ASSERTED at registration
+		// (the server never holds the E2E key, so it cannot infer this itself -
+		// see public/js/e2e.js and public/js/upload.js). 0 = legacy, records are
+		// [12B IV][ct][16B tag] with no additionalData - self-authenticated only,
+		// so splicing two same-length records under the same key goes undetected.
+		// 1 = current, every record additionally binds purpose+fileId+chunkIndex+
+		// plainLen as GCM AAD (see e2e.js's recordAad), closing that gap. ALTER
+		// TABLE's DEFAULT 0 backfill is exactly correct for every pre-existing
+		// row: they really were encrypted without AAD. Meaningless (always 0,
+		// never read) for non-E2E rows - inert like enc_version/key_id above.
+		e2e_aad_version: 'INTEGER NOT NULL DEFAULT 0',
 	},
 	download_events: {
 		id:       'INTEGER PRIMARY KEY AUTOINCREMENT',

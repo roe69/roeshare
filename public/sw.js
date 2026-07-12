@@ -54,9 +54,29 @@
 // pressing Download on the share page again. The key already lives in the
 // recipient's history (it is part of the share link), so the IDB copy adds no
 // new exposure; entries are swept after IDB_TTL regardless.
+//
+// L-3: `authHeaders` (the share's bearer accessToken) is the one field in a
+// registration that the SERVER stops honoring after config.accessTokenTtl
+// (1 hour - src/config.js) - unlike the AES key and routing metadata, it has
+// no reason to sit in durable per-origin storage for the full IDB_TTL (7
+// days). It can't simply be dropped from IDB: a video seek or a Range re-
+// request after this worker was killed and revived is a browser-initiated
+// fetch with no page JS in the loop to "re-supply" it in time. Instead every
+// read of an entry (getEntry) scrubs authHeaders once it is older than
+// AUTH_TTL, in both the in-memory copy and the persisted one, and idbSweep
+// does the same for rows a fetch never touches again - so the bearer token
+// never lives in IndexedDB materially longer than the server accepts it.
 
 const IV_LEN = 12;
 const ENC_OVERHEAD = 28; // IV_LEN + 16-byte GCM tag
+
+// H-1: duplicated from public/js/e2e.js's recordAad (this is a classic
+// script - no import - same reason ENC_OVERHEAD above is duplicated rather
+// than shared). KEEP IN SYNC with e2e.js if either changes. Builds the GCM
+// additional-authenticated-data for one E2E chunk record.
+function recordAad(purpose, fileId, chunkIndex, plainLen) {
+	return new TextEncoder().encode(`roeshare/e2e/v1\0${purpose}\0${fileId}\0${chunkIndex}\0${plainLen}`);
+}
 
 // token -> { key, name, fileBase, cipherSize, cs, mime, plainTotal, numChunks, authHeaders, createdAt }
 const files = new Map();
@@ -88,6 +108,18 @@ function failPage(status, message) {
 const IDB_NAME = 'roeshare-e2e';
 const IDB_STORE = 'files';
 const IDB_TTL = 7 * 24 * 60 * 60 * 1000; // sweep registrations older than 7 days
+// L-3: authHeaders must not outlive the server's own token lifetime
+// (config.accessTokenTtl, src/config.js) sitting in durable storage, even
+// though the rest of a registration is kept around for IDB_TTL.
+const AUTH_TTL = 60 * 60 * 1000;
+
+// Returns entry with authHeaders removed if it carried any. Same object back
+// (no-op) when there was nothing to scrub, so callers can cheaply skip a
+// write-through.
+function scrubAuth(entry) {
+	if (!entry || !entry.authHeaders || Object.keys(entry.authHeaders).length === 0) return entry;
+	return { ...entry, authHeaders: {} };
+}
 
 let idbPromise = null;
 function idb() {
@@ -133,14 +165,25 @@ async function idbGet(token) {
 async function idbSweep() {
 	try {
 		const db = await idb();
-		const cutoff = Date.now() - IDB_TTL;
+		const now = Date.now();
+		const cutoff = now - IDB_TTL;
+		const authCutoff = now - AUTH_TTL;
 		await new Promise((resolve, reject) => {
 			const tx = db.transaction(IDB_STORE, 'readwrite');
 			const cur = tx.objectStore(IDB_STORE).openCursor();
 			cur.onsuccess = () => {
 				const c = cur.result;
 				if (!c) return;
-				if (!c.value.createdAt || c.value.createdAt < cutoff) c.delete();
+				const v = c.value;
+				if (!v.createdAt || v.createdAt < cutoff) {
+					c.delete();
+				} else if (v.createdAt < authCutoff) {
+					// L-3: the row itself is still within IDB_TTL (routing metadata /
+					// key stay useful), but the bearer token in authHeaders is already
+					// past what the server accepts - don't let it keep sitting on disk.
+					const scrubbed = scrubAuth(v);
+					if (scrubbed !== v) c.update(scrubbed);
+				}
 				c.continue();
 			};
 			tx.oncomplete = resolve;
@@ -149,13 +192,33 @@ async function idbSweep() {
 	} catch { /* best-effort */ }
 }
 
+// Periodic backstop: a registration whose token is never fetched again after
+// crossing AUTH_TTL would otherwise only get scrubbed on this worker's next
+// 'activate' (a new deploy / restart). A page can keep this worker instance
+// alive indefinitely via the e2e-ping keepalive, so also sweep on an interval
+// well inside AUTH_TTL while the worker stays resident.
+setInterval(() => { idbSweep(); }, Math.floor(AUTH_TTL / 4));
+
 // Resolve a token from memory first, then IndexedDB (a fresh worker instance
-// hydrating a registration made by a previous one).
+// hydrating a registration made by a previous one). L-3: every resolution
+// re-checks the entry's age and strips authHeaders once it is older than
+// AUTH_TTL - the one guaranteed choke point every fetch handler goes through,
+// so no code path can hand back a bearer token the server would already be
+// rejecting, whether the entry came from memory or IDB.
 async function getEntry(token) {
 	let entry = files.get(token);
-	if (entry) return entry;
-	entry = await idbGet(token);
-	if (entry) files.set(token, entry);
+	if (!entry) {
+		entry = await idbGet(token);
+		if (entry) files.set(token, entry);
+	}
+	if (entry && entry.createdAt && Date.now() - entry.createdAt > AUTH_TTL) {
+		const scrubbed = scrubAuth(entry);
+		if (scrubbed !== entry) {
+			entry = scrubbed;
+			files.set(token, entry);
+			await idbPut(entry);
+		}
+	}
 	return entry;
 }
 
@@ -191,6 +254,10 @@ self.addEventListener('message', async e => {
 			mime: m.mime,
 			plainTotal,
 			numChunks,
+			// H-1: which AAD scheme (recordAad above) this file's records are
+			// sealed under - undefined/anything but 1 means legacy, no AAD.
+			fileId: m.fileId,
+			aadVersion: m.aadVersion,
 			authHeaders: m.authHeaders || {},
 			createdAt: Date.now(),
 		};
@@ -204,8 +271,10 @@ self.addEventListener('message', async e => {
 	}
 });
 
-async function decryptRecord(key, record) {
-	return new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: record.subarray(0, IV_LEN) }, key, record.subarray(IV_LEN)));
+async function decryptRecord(key, record, aad) {
+	const iv = record.subarray(0, IV_LEN);
+	const params = aad === undefined ? { name: 'AES-GCM', iv } : { name: 'AES-GCM', iv, additionalData: aad };
+	return new Uint8Array(await crypto.subtle.decrypt(params, key, record.subarray(IV_LEN)));
 }
 
 // Lazy, backpressure-friendly plaintext stream for the inclusive plaintext
@@ -214,7 +283,7 @@ async function decryptRecord(key, record) {
 // file size, and only pulls more once the consumer (the <video> element / a
 // disk write) asks for more.
 function plainStream(entry, start, end, endpoint) {
-	const { key, fileBase, cipherSize, cs, plainTotal, authHeaders } = entry;
+	const { key, fileBase, cipherSize, cs, plainTotal, authHeaders, fileId, aadVersion } = entry;
 	const recordSize = cs + ENC_OVERHEAD;
 	const BATCH = Math.max(1, Math.floor((4 * 1024 * 1024) / cs)); // ~4MB plaintext per fetch
 	let rec = Math.floor(start / cs);
@@ -256,9 +325,10 @@ function plainStream(entry, start, end, endpoint) {
 				const recLen = (cEnd - cStart) + ENC_OVERHEAD;
 				const record = buf.subarray(pos, pos + recLen);
 				pos += recLen;
+				const aad = aadVersion === 1 ? recordAad('chunk', fileId, i, cEnd - cStart) : undefined;
 				let plain;
 				try {
-					plain = await decryptRecord(key, record);
+					plain = await decryptRecord(key, record, aad);
 				} catch (err) {
 					controller.error(err);
 					return;
@@ -385,7 +455,7 @@ async function handleDownload(token, req, endpoint) {
 			? 'This share’s download limit has been reached.'
 			: 'This share is no longer available.');
 	}
-	const { cs, key, plainTotal } = entry;
+	const { cs, key, plainTotal, fileId, aadVersion } = entry;
 	const numChunks = Math.ceil(plainTotal / cs) || 1;
 	// Reassemble fixed-size ciphertext records from arbitrarily-sized network
 	// chunks by copying each byte exactly once into the record it belongs to
@@ -414,9 +484,10 @@ async function handleDownload(token, req, endpoint) {
 					else pending[0] = head.subarray(take);
 				}
 				pendingLen -= recLen;
+				const aad = aadVersion === 1 ? recordAad('chunk', fileId, recIndex, thisPlain) : undefined;
 				let plain;
 				try {
-					plain = await decryptRecord(key, record);
+					plain = await decryptRecord(key, record, aad);
 				} catch (err) {
 					controller.error(err);
 					return;

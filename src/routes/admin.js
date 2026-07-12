@@ -261,8 +261,16 @@ export default router => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 
 		const search = (query.get('search') || '').trim();
-		const sortCol = SORT_COLUMNS[query.get('sort')] || SORT_COLUMNS.created;
-		const sortOrder = SORT_ORDERS[(query.get('order') || '').toLowerCase()] || 'DESC';
+		// L-1: a plain bracket lookup on a client-supplied key (e.g. "__proto__")
+		// resolves to Object.prototype instead of undefined - truthy, so the `||`
+		// fallback never kicks in, and the object then gets stringified into the
+		// raw SQL below as "[object Object]", a syntax error (500). hasOwn ignores
+		// inherited properties, so an unrecognized/prototype-polluting key always
+		// falls through to the default.
+		const sortKeyIn = query.get('sort');
+		const sortCol = (sortKeyIn && Object.hasOwn(SORT_COLUMNS, sortKeyIn)) ? SORT_COLUMNS[sortKeyIn] : SORT_COLUMNS.created;
+		const orderKeyIn = (query.get('order') || '').toLowerCase();
+		const sortOrder = Object.hasOwn(SORT_ORDERS, orderKeyIn) ? SORT_ORDERS[orderKeyIn] : 'DESC';
 
 		let limit = Number(query.get('limit'));
 		if (!Number.isFinite(limit) || limit <= 0) limit = 50;
@@ -364,6 +372,10 @@ export default router => {
 				complete: !!f.complete,
 				downloadCount: f.download_count,
 				createdAt: f.created_at,
+				// H-1: operator visibility only - which AAD scheme (e2e.js's
+				// recordAad) this file's E2E records were sealed under. Meaningless
+				// for a non-E2E share.
+				aadVersion: f.e2e_aad_version,
 			})),
 			events: events.map(e => ({
 				id: e.id,

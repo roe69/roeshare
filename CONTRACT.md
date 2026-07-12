@@ -96,8 +96,28 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
   disables server-side zip (`download-all` -> `409`). `GET /api/shares/:id`
   returns `e2e: boolean`; for e2e shares the file `name` is the encrypted blob and
   `mime` is `application/octet-stream`. The chunk guard allows `chunkSize + 64`.
-- `POST /api/shares/:id/files` (X-Edit-Token) body `{ name, size, mime }`
-  -> `{ fileId, received }`. Sanitize `name` (basename only). Enforce
+  Two record formats exist, disambiguated per-file by `files.e2e_aad_version`
+  (H-1): **legacy** (`aadVersion 0`) is `12B IV + ct + 16B tag` with no AAD -
+  self-authenticated only, so splicing two same-length records under the same
+  key goes undetected. **Current** (`aadVersion 1`) additionally binds
+  `roeshare/e2e/v1\0<purpose>\0<fileId>\0<chunkIndex>\0<plainLen>` as GCM
+  additional data on every record (`purpose` is `name` for the encrypted
+  filename/metadata record, `chunk` for a content record; see
+  `public/js/e2e.js`'s `recordAad`), closing that gap. `GET /api/shares/:id`
+  includes `aadVersion` on every file in `files`; the client must use it to
+  pick the right scheme when decrypting, or when encrypting further chunks of
+  an already-registered (possibly resumed) file - a file's scheme is fixed for
+  its whole lifetime once registered.
+- `POST /api/shares/:id/files` (X-Edit-Token) body `{ name, size, mime, id?, aadVersion? }`
+  -> `{ fileId, received }`. Sanitize `name` (basename only). `id`/`aadVersion`
+  are optional and only honored together on an `e2e` share (H-1): the browser
+  generates `id` itself (same shape as the encryption key -
+  `toB64u(crypto.getRandomValues(16))`, charset `[0-9A-Za-z_-]{1,64}`) so the
+  encrypted-filename record can be AAD-bound to it, and asserts `aadVersion`
+  (the scheme it actually used - the server cannot infer this). A PK collision
+  on a supplied `id` is `409` (regenerate and retry). Omitted on old clients
+  or non-`e2e` shares, which keep the server-generated id / `aadVersion 0`
+  behavior unchanged. Enforce
   `size <= maxFileSize` and running share total `<= maxShareSize`; if
   `maxTotalSize` set, enforce `totalUsage()+size <= maxTotalSize`.
 - `GET /api/shares/:id/files/:fileId/status` (X-Edit-Token) -> `{ received, size, complete }` (for resume).
@@ -110,7 +130,7 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 ### View / download (visitor)
 - `GET /api/shares/:id` -> share metadata. `404` if missing/deleted/expired.
   If password-protected and caller lacks a valid access/edit token: `401 { protected: true, title? }`.
-  Otherwise `{ id, title, createdAt, expiresAt, oneTime, maxDownloads, downloadCount, finalized, totalSize, owner: boolean, files: [{ id, name, size, mime, complete, downloadCount }] }`.
+  Otherwise `{ id, title, createdAt, expiresAt, oneTime, maxDownloads, downloadCount, finalized, totalSize, owner: boolean, files: [{ id, name, size, mime, complete, downloadCount, aadVersion }] }`.
 - `POST /api/shares/:id/unlock` body `{ password }` -> `{ accessToken }` on success, `403` on failure. Use `verifyPassword`.
 - `GET /api/shares/:id/files/:fileId/preview` -> inline stream
   (`Content-Disposition: inline`), Range-aware (`206` + `Content-Range` +

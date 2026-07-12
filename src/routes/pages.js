@@ -5,10 +5,8 @@
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { config } from '../config.js';
-import { error, cookie, sessionCookieName, requestScheme, SECURITY_HEADERS } from '../lib/http.js';
-import { hasUploadAccess, isAdmin, redeemUploadLink, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
-import { enforce } from '../lib/ratelimit.js';
-import { audit } from '../lib/audit.js';
+import { error, SECURITY_HEADERS } from '../lib/http.js';
+import { hasUploadAccess, isAdmin } from '../lib/auth.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
 
 const PAGES_DIR = join(import.meta.dir, '..', '..', 'public');
@@ -67,31 +65,26 @@ export default function pages(router) {
 	// When an upload password is set, an unauthorized visitor gets only the lock
 	// page - the upload portal's markup is never served without the cookie.
 	// The route itself needs no credential (it branches to lock.html for an
-	// unauthorized visitor internally); the magic-link query param is what the
-	// 'magic-link' rate-limit bucket below guards against brute-forcing.
-	declareRoutePolicy('GET', '/', { auth: 'public', csrf: false, rateLimit: 'magic-link', audit: 'upload.link.redeemed' });
+	// unauthorized visitor internally).
+	//
+	// M-03: a bare GET/HEAD here must NEVER consume the magic-link token. This
+	// route is reachable by a server-side link-preview scanner (Slack, Teams,
+	// Outlook Safe Links, Proofpoint, iMessage, ...) that prefetches a pasted
+	// URL with no cookie and no JS execution - router.js auto-routes HEAD to
+	// GET, so the old design (redeeming the single-use token directly in this
+	// handler) let such a prefetch silently and permanently burn the token
+	// before the intended human ever clicked the link. A token in the query
+	// string now only selects an interstitial page (link.html) that redeems
+	// it via a real POST fired from browser JS (public/js/link-redeem.js,
+	// see POST /api/upload/link/redeem in routes/shares.js) - something a
+	// non-JS-executing scanner cannot do. Nothing here has a side effect, so
+	// no rate limit/audit is needed on this route itself.
+	declareRoutePolicy('GET', '/', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/', ctx => {
-		const { req, url, ip, server } = ctx;
+		const { req, url } = ctx;
 
-		// Magic-link login: ?token=<quick-access token> grants the upload cookie
-		// and redirects to a clean URL (so the token does not linger in the
-		// address bar/history). M-01: the token is now single-use and short-lived
-		// (see lib/auth.js's redeemUploadLink) - a second visit with the same
-		// token falls through to the lock page exactly like an invalid one.
-		// Rate-limited so the token space cannot be brute-forced.
-		if (config.uploadPassword && !hasUploadAccess(req)) {
-			const token = url.searchParams.get('token');
-			if (token) {
-				const limited = enforce('magic-link', ip, 20, 5 * 60 * 1000);
-				if (!limited && redeemUploadLink(token)) {
-					audit('upload.link.redeemed', { ip });
-					const secure = requestScheme(req, url, server) === 'https';
-					const setCookie = cookie(sessionCookieName(UPLOAD_COOKIE, secure), issueUploadToken(), {
-						maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure,
-					});
-					return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': setCookie, 'Cache-Control': 'no-store' } });
-				}
-			}
+		if (config.uploadPassword && !hasUploadAccess(req) && url.searchParams.get('token')) {
+			return servePage('link.html', { 'Cache-Control': 'no-store' });
 		}
 
 		const file = config.uploadPassword && !hasUploadAccess(req) ? 'lock.html' : 'upload.html';

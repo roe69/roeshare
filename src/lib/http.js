@@ -194,6 +194,29 @@ function isTrustedPeer(peer) {
 	return !!peer && config.trustedProxyCidrs.length > 0 && ipInCidrs(peer, config.trustedProxyCidrs);
 }
 
+// M-6: TRUSTED_PROXY_CIDRS is configured but this request's direct socket
+// peer doesn't match any entry in it, despite the request carrying a
+// forwarding header - i.e. someone/something upstream is still sending
+// X-Forwarded-For/X-Real-IP, but this specific connection is no longer
+// recognized as the trusted proxy. This is exactly the silent-failure mode a
+// runner's NAT/egress address change would cause: every request quietly
+// falls back to the raw socket peer (breaking real-IP rate-limiting/audit)
+// with nothing in the logs to say why. Rate-limited to at most once per
+// interval (module-level, not per-request) so a sustained mismatch doesn't
+// spam the log.
+let lastUntrustedProxyWarnAt = 0;
+const UNTRUSTED_PROXY_WARN_INTERVAL_MS = 5 * 60 * 1000;
+
+function warnIfUntrustedProxyPeer(req, peer) {
+	if (config.trustedProxyCidrs.length === 0) return;
+	if (isTrustedPeer(peer)) return;
+	if (!req.headers.get('x-forwarded-for') && !req.headers.get('x-real-ip')) return;
+	const nowMs = Date.now();
+	if (nowMs - lastUntrustedProxyWarnAt < UNTRUSTED_PROXY_WARN_INTERVAL_MS) return;
+	lastUntrustedProxyWarnAt = nowMs;
+	console.warn(`  WARNING: received X-Forwarded-For/X-Real-IP from peer ${peer ?? 'unknown'}, which does not match TRUSTED_PROXY_CIDRS - the header is being ignored and the raw socket peer is used instead. If the trusted proxy's address changed, update TRUSTED_PROXY_CIDRS.`);
+}
+
 const MAX_FORWARDED_ENTRIES = 20;
 
 // Walk an X-Forwarded-For chain from the right, skipping exactly `hops`
@@ -228,6 +251,8 @@ export function clientIp(req, server) {
 			const real = req.headers.get('x-real-ip')?.trim();
 			if (real && parseIp(real)) return real;
 		}
+	} else {
+		warnIfUntrustedProxyPeer(req, socket);
 	}
 	return socket;
 }
