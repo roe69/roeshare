@@ -260,15 +260,28 @@ describe('database migrations', () => {
 			const proc = await bootServer(dir, port);
 			try {
 				// The new columns must exist, defaulted for this pre-existing row to
-				// enc_version=1 (legacy CTR) / key_id=1 - never enc_version=2, which
-				// would make storage.js try to parse this CTR blob as chunked GCM.
+				// enc_version=1 (legacy CTR) / key_id=1 by the automatic ADD COLUMN
+				// migration. From the moment the server boots, M-06's background
+				// migration (lib/migrate.js) is ALSO free to pick this row up and
+				// promote it to v2 - so both enc_version values are valid outcomes
+				// here depending on exactly how that race lands; what must never
+				// happen is the column migration itself silently rewriting the row
+				// (checked via `iv` staying exactly the original v1 IV whenever
+				// enc_version is still 1) or the file becoming undecryptable (checked
+				// via the download assertions below, which must pass regardless of
+				// which side of the race this observes).
 				const after = new Database(join(dir, 'roeshare.db'));
 				const cols = after.query('PRAGMA table_info(files)').all().map(c => c.name);
 				expect(cols).toContain('enc_version');
 				expect(cols).toContain('key_id');
-				const row = after.query('SELECT enc_version, key_id FROM files WHERE id = ?').get('v1file1');
-				expect(row.enc_version).toBe(1);
+				const row = after.query('SELECT enc_version, key_id, iv FROM files WHERE id = ?').get('v1file1');
+				expect([1, 2]).toContain(row.enc_version);
 				expect(row.key_id).toBe(1);
+				if (row.enc_version === 1) {
+					expect(row.iv).toBe(ivHex);
+				} else {
+					expect(row.iv).not.toBe(ivHex); // migrated: a fresh v2 salt, not the original v1 IV
+				}
 				after.close();
 
 				// The pre-existing v1 CTR blob must still decrypt correctly end to end.

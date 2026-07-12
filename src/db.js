@@ -91,9 +91,16 @@ const schema = {
 		// only via enc_version, never by content. See lib/filecrypt.js.
 		iv:             'TEXT',
 		sha256:         'TEXT',                         // content digest of the plaintext; null until upload completes
-		// At-rest format version: 1 = legacy unauthenticated AES-CTR (kept
-		// forever, never migrated), 2 = authenticated per-chunk AES-GCM (every
-		// new file). Existing rows default to 1, which is correct for them.
+		// At-rest format version: 1 = legacy unauthenticated AES-CTR, 2 =
+		// authenticated per-chunk AES-GCM (every new file). Existing rows
+		// default to 1, which is correct for them; a background migration
+		// (lib/migrate.js, M-06) automatically and transparently re-encrypts
+		// every complete enc_version=1 row to 2 - triggered lazily on next
+		// read and by a periodic sweep, with a verified-read-back atomic swap
+		// so the original v1 bytes are never touched until the v2 replacement
+		// is confirmed byte-identical. A row can still be found at 1
+		// indefinitely if that verification ever fails (treated as latent v1
+		// disk corruption, not a migration bug - see migrate.js).
 		enc_version:    'INTEGER NOT NULL DEFAULT 1',
 		// Which lib/keys.js AT_REST_KEYS entry the file's v2 per-file key was
 		// derived from (inert for v1/plaintext/E2E rows).
@@ -253,6 +260,21 @@ const schema = {
 		target: 'TEXT',              // object acted on: share id, file id, key id, ...
 		detail: 'TEXT',              // JSON string of allowlisted non-sensitive context
 	},
+	// M-01 Part B: single-use, short-TTL upload magic-link tokens (replaces the
+	// old stateless 90-day signed token, which was replayable forever until it
+	// aged out). token_hash is sha256(raw token) (hashSecretToken - same
+	// storage discipline as a share's edit_token), so the raw token is never at
+	// rest; the primary key IS the hash, so redemption is a direct lookup, not
+	// a linear scan. `k` is the uploadTag() fingerprint at mint time, re-checked
+	// at redemption so rotating/clearing UPLOAD_PASSWORD kills every unredeemed
+	// link. expires_at is a 15-minute TTL from mint; a row is deleted the
+	// instant it is redeemed (first redemption wins) or opportunistically swept
+	// once expired. See lib/auth.js's mintUploadLink()/redeemUploadLink().
+	upload_link_tokens: {
+		token_hash: 'TEXT PRIMARY KEY',
+		k:          'TEXT NOT NULL',
+		expires_at: 'INTEGER NOT NULL',
+	},
 };
 
 for (const [table, columns] of Object.entries(schema)) {
@@ -270,6 +292,7 @@ db.exec(`
 	CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at);
 	CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 	CREATE INDEX IF NOT EXISTS idx_audit_event_ts ON audit_events(event, ts);
+	CREATE INDEX IF NOT EXISTS idx_upload_link_tokens_expires ON upload_link_tokens(expires_at);
 `);
 
 const getMeta = db.query('SELECT value FROM meta WHERE key = ?');

@@ -7,11 +7,19 @@
 // fileEnc() below (built from the file row's iv/enc_version/key_id columns;
 // see lib/filecrypt.js for the format details):
 //   v1 - AES-256-CTR. Ciphertext length == plaintext length, so disk size and
-//        plaintext size always agree (legacy; kept forever, never migrated).
+//        plaintext size always agree (legacy; automatically migrated to v2 in
+//        the background - see lib/migrate.js, M-06 - so a v1 row is expected
+//        to be transient, not permanent).
 //   v2 - AES-256-GCM in independently-authenticated PLAIN_CHUNK-byte records.
 //        Disk size != plaintext size (each record carries framing overhead),
 //        so callers needing the LOGICAL file length must use plainSize()
 //        below, never stat()/blobFile().size.
+//
+// M-06 migration support: a migration re-encrypts a v1 blob to a sibling
+// temp file (<fileId>-mig), then atomically swaps it in via two renames
+// (original -> <fileId>-v1, temp -> <fileId>) around one DB UPDATE - see
+// migrationTempPath/migrationBackupPath/openMigrationTemp/fsyncDir below and
+// lib/migrate.js for the full state machine and crash-recovery reconciler.
 
 import { mkdir, open, rm, stat, readdir, rename } from 'node:fs/promises';
 import { existsSync, createReadStream, statSync, lstatSync, constants as FS_CONST } from 'node:fs';
@@ -31,8 +39,9 @@ const ID = /^[0-9A-Za-z_-]+$/;
 // / assertRealFileIfExists) are the only symlink defense; where it IS defined
 // (Linux/macOS - the actual deploy target, see DEPLOY.md) it additionally
 // closes the lstat-then-open TOCTOU race at the syscall level.
-const O_NOFOLLOW = FS_CONST.O_NOFOLLOW || 0;
+export const O_NOFOLLOW = FS_CONST.O_NOFOLLOW || 0;
 const { O_WRONLY, O_RDONLY, O_RDWR, O_CREAT, O_EXCL, O_TRUNC } = FS_CONST;
+export { O_RDONLY };
 
 function safeSegment(id) {
 	if (typeof id !== 'string' || !ID.test(id)) throw new Error('invalid storage id');
@@ -60,7 +69,7 @@ function assertRealDirIfExists(dir) {
 // Throws if `path` exists but is not a regular file (e.g. a symlink planted
 // there). Uses lstat, never stat. A missing path is not an error - it just
 // means "not created yet" and returns false so the caller knows to O_CREAT.
-function assertRealFileIfExists(path) {
+export function assertRealFileIfExists(path) {
 	let st;
 	try {
 		st = lstatSync(path);
@@ -91,6 +100,50 @@ export function blobPath(shareId, fileId) {
 	assertRealDirIfExists(config.storageDir);
 	assertRealDirIfExists(dir);
 	return p;
+}
+
+// ---- M-06: v1 -> v2 at-rest migration support -------------------------------
+// Sibling temp/backup blob names for an in-progress migration, built through
+// blobPath() exactly like the real blob (so every symlink/traversal guard
+// above applies identically) - a plain '-mig'/'-v1' suffix passes safeSegment
+// unmodified since file ids (lib/ids.js) never themselves contain '-'. See
+// lib/migrate.js for the full state machine these back.
+export function migrationTempPath(shareId, fileId) {
+	return blobPath(shareId, `${fileId}-mig`);
+}
+export function migrationBackupPath(shareId, fileId) {
+	return blobPath(shareId, `${fileId}-v1`);
+}
+
+// Open a brand-new migration temp file for exclusive writing - refuses to
+// reuse or follow anything already at that path. A leftover from a crashed
+// attempt must be cleared by reconcileMigrations() before a migration
+// re-attempts the same file; this throws rather than silently reusing one,
+// mirroring openBlobForChunkWrite's brand-new-file branch exactly
+// (O_CREAT|O_EXCL|O_NOFOLLOW).
+export async function openMigrationTemp(path) {
+	if (assertRealFileIfExists(path)) throw new Error('migration temp already exists on disk - crash recovery should have cleared it first');
+	return open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600);
+}
+
+// Best-effort directory fsync, so a promoted/renamed migration file's new
+// directory entry is durable before the DB is told about it. Directory fsync
+// isn't supported on every platform (notably unreliable/absent on Windows) -
+// unlike O_NOFOLLOW above there's no in-band fallback flag for this, so a
+// failure here is swallowed: the atomic rename is what actually matters for
+// correctness, this only tightens the durability window on platforms that
+// support it (the real deploy target - see DEPLOY.md).
+export async function fsyncDir(dir) {
+	try {
+		const fh = await open(dir, 'r');
+		try {
+			await fh.sync();
+		} finally {
+			await fh.close();
+		}
+	} catch {
+		/* best-effort only */
+	}
 }
 
 // Build the at-rest encryption descriptor writeChunk()/blobRangeStream()/
@@ -426,7 +479,33 @@ export function isCleanupPending(shareId) {
 export async function deleteShareFiles(shareId) {
 	cleanupPending.add(shareId);
 	try {
-		await rm(shareDir(shareId), { recursive: true, force: true });
+		const dir = shareDir(shareId);
+		let entries;
+		try {
+			entries = await readdir(dir);
+		} catch (e) {
+			if (e.code === 'ENOENT') return;
+			throw e;
+		}
+		// M-06 TOCTOU fix: group each on-disk entry by its base file id (a
+		// migration's '-mig'/'-v1' sibling carries the same id - see
+		// migrationTempPath/migrationBackupPath) and remove every file under
+		// that id's withFileLock, exactly like the per-file delete route
+		// (admin.js) does for a single file - this gives a whole-share delete
+		// the same mutual exclusion against an in-flight migrateFile() swap
+		// (lib/migrate.js, steps 4-6) that a single-file delete already had.
+		const byFileId = new Map();
+		for (const name of entries) {
+			const fileId = name.endsWith('-mig') ? name.slice(0, -4) : name.endsWith('-v1') ? name.slice(0, -3) : name;
+			if (!byFileId.has(fileId)) byFileId.set(fileId, []);
+			byFileId.get(fileId).push(name);
+		}
+		for (const [fileId, names] of byFileId) {
+			await withFileLock(fileId, async () => {
+				for (const name of names) await rm(blobPath(shareId, name), { recursive: true, force: true });
+			});
+		}
+		await rm(dir, { recursive: true, force: true });
 	} finally {
 		cleanupPending.delete(shareId);
 	}
@@ -443,6 +522,34 @@ export async function renameShareDir(oldId, newId) {
 
 export async function deleteBlob(shareId, fileId) {
 	await rm(blobPath(shareId, fileId), { force: true });
+}
+
+// M-06 TOCTOU fix: an admin per-file/whole-share delete and lib/migrate.js's
+// migration swap both mutate the same blob path + files row for a given file
+// - without coordination a delete landing mid-swap can silently no-op (rm()
+// racing the moment origPath is transiently absent) while the DB row is
+// deleted, then the swap recreates the blob underneath it, leaking an
+// orphaned blob with no DB row forever (invisible to reconcileMigrations()'s
+// old '-mig'/'-v1'-only scan). This is a plain per-fileId async mutex, held
+// by whoever needs exclusive access to a file's blob+row pair: admin.js's
+// per-file delete route around its deleteBlob()+DELETE, and migrate.js's
+// migrateFile() around its rename/rename/UPDATE swap (which also re-checks
+// the row is still eligible once it holds the lock, so a delete that landed
+// first is never raced by a swap that started before it).
+const fileLocks = new Map(); // fileId -> current queue-tail promise
+
+export async function withFileLock(fileId, fn) {
+	const prior = fileLocks.get(fileId) || Promise.resolve();
+	let releaseMine;
+	const mine = new Promise(res => { releaseMine = res; });
+	fileLocks.set(fileId, mine);
+	await prior;
+	try {
+		return await fn();
+	} finally {
+		releaseMine();
+		if (fileLocks.get(fileId) === mine) fileLocks.delete(fileId);
+	}
 }
 
 // Total bytes currently on disk under storageDir. Used for the storage cap and

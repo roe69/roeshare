@@ -4,8 +4,12 @@
 //   v1 - AES-256-CTR (this file's original format). Seekable but has NO
 //        authentication: ciphertext is malleable, so silent corruption or
 //        tampering on disk is undetectable (see F-03 in the security audit).
-//        Kept forever, unchanged, so every already-encrypted blob stays
-//        readable - there is no bulk re-encryption in this pass.
+//        Every v1 blob is automatically, transparently re-encrypted to v2 in
+//        the background (see lib/migrate.js, M-06) - this format is never
+//        written for a new file, and a v1 row is a temporary state, not a
+//        permanent one. The decrypt path here stays forever regardless (a
+//        migration can fail-safe and leave a file on v1 indefinitely - see
+//        migrate.js's verify step).
 //   v2 - AES-256-GCM, sealed independently in fixed-size plaintext chunks
 //        (PLAIN_CHUNK bytes each; see the ON-DISK RECORD layout below). Every
 //        chunk is authenticated on its own, so a Range read only ever has to
@@ -15,7 +19,8 @@
 //
 // v1 key: derived once from config.secret via scrypt, exactly as before
 // (unrelated to the HKDF subkeys in lib/keys.js - the v1 format predates that
-// separation and is left alone).
+// separation and is left alone). Still needed by lib/migrate.js to decrypt a
+// v1 blob's plaintext one final time on its way to v2.
 //
 // v2 keys: see lib/keys.js's AT_REST_KEYS (the wrapping key, chosen by
 // files.key_id) and fileKeyForV2 below (the actual per-file key, HKDF-derived
