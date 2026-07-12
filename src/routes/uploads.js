@@ -7,7 +7,7 @@
 import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, readJson, requireSameOrigin, METADATA_BODY_MAX } from '../lib/http.js';
+import { json, error, readJson, requireSameOrigin, METADATA_BODY_MAX, SECURITY_HEADERS } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
 import { hasOwnerCookie } from '../lib/auth.js';
 import { writeChunk, blobRangeStream, fileEnc } from '../lib/storage.js';
@@ -36,6 +36,50 @@ const updateSha256 = db.query('UPDATE files SET sha256 = ? WHERE id = ?');
 // trusted as a primary key. toB64u(crypto.getRandomValues(16)) - what
 // e2e.js/upload.js actually send - produces a 22-character subset of this.
 const CLIENT_FILE_ID_RE = /^[0-9A-Za-z_-]{1,64}$/;
+
+// Security-audit finding (2026-07, "chunk-upload admission-control semaphore
+// held for the attacker-paced body-read duration"): acquireAll() below is
+// taken BEFORE the request body is read, and released only once the write
+// completes, so a client that paces its own upload body slowly holds one of
+// only 6 per-share / 32 global chunk slots for the full duration of that slow
+// read. Bun's idleTimeout (server.js) only bounds total SILENCE - it resets
+// on any byte of activity - so it does not bound a slow-but-continuously-
+// trickling body. withTimeout()/CHUNK_READ_TIMEOUT below bound the WALL-CLOCK
+// time the body read may take, independent of that idle timeout, releasing
+// the admission-control slot instead of holding it indefinitely against a
+// deliberately slow sender.
+const CHUNK_READ_TIMEOUT = Symbol('chunk-read-timeout');
+// On timeout, actively cancel the request's body stream (rather than merely
+// abandoning the still-pending arrayBuffer() promise) so the underlying
+// connection is torn down cleanly instead of being left half-drained - a
+// half-drained request body left "dangling" would otherwise desync HTTP/1.1
+// framing for whatever request a keep-alive-reusing client sends next on the
+// same connection.
+function withTimeout(req, promise, ms) {
+	let timer;
+	const timeout = new Promise((_, reject) => {
+		timer = setTimeout(() => {
+			req.body?.cancel?.('chunk read timed out').catch(() => {});
+			reject(CHUNK_READ_TIMEOUT);
+		}, ms);
+		timer.unref?.();
+	});
+	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+// Same shape as error(408, ...), but additionally forces `Connection: close`:
+// the client's own body bytes may still be mid-flight to us even after this
+// response ships (that is the whole point of racing the read against a
+// timeout rather than waiting the read out), so this TCP connection can never
+// be safely offered back to a keep-alive pool for the next request - doing so
+// would race a still-in-progress abandonment of this one and risk handing the
+// next request a connection that resets out from under it.
+function chunkReadTimeoutResponse() {
+	return new Response(JSON.stringify({ error: 'Chunk upload stalled; please retry' }), {
+		status: 408,
+		headers: { 'Content-Type': 'application/json; charset=utf-8', Connection: 'close', ...SECURITY_HEADERS },
+	});
+}
 
 // Resolve the share and verify ownership (X-Edit-Token header, or - M-05 - the
 // per-share owner cookie). Returns { share, via: 'header'|'cookie' }, or a
@@ -313,7 +357,24 @@ export default function uploads(router) {
 					if (ipRateLimited) return ipRateLimited;
 				}
 
-				const buf = await req.arrayBuffer();
+				// Bound the WALL-CLOCK time this read may take, independent of Bun's
+				// idleTimeout (see the CHUNK_READ_TIMEOUT comment above) - derived from
+				// the declared chunk length (or the worst-case chunkSize when the
+				// client omitted Content-Length) against a conservative floor rate, so
+				// this only ever fires against a body deliberately paced slower than
+				// any realistic connection, not a normal slow network.
+				const expectedBytes = Number.isFinite(declaredLen) && declaredLen >= 0 ? declaredLen : config.chunkSize;
+				const readTimeoutMs = Math.min(
+					config.chunkReadTimeoutMaxMs,
+					Math.max(config.chunkReadTimeoutMinMs, (expectedBytes / config.chunkReadMinBytesPerSec) * 1000)
+				);
+				let buf;
+				try {
+					buf = await withTimeout(req, req.arrayBuffer(), readTimeoutMs);
+				} catch (e) {
+					if (e === CHUNK_READ_TIMEOUT) return chunkReadTimeoutResponse();
+					throw e;
+				}
 				const chunk = new Uint8Array(buf);
 				// The Content-Length guard above is skipped entirely when the client
 				// omits it (e.g. chunked transfer encoding, where Number(null) === 0

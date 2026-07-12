@@ -266,6 +266,19 @@ export const config = Object.freeze({
 	// Non-finalized (abandoned) uploads are swept after this many seconds.
 	abandonedUploadTtl: int('ABANDONED_UPLOAD_TTL', 24 * 3600),
 
+	// Security-audit finding (2026-07): floor bytes/sec a chunk-upload PATCH's
+	// body read must sustain before its admission-control slot (see
+	// routes/uploads.js's acquireAll()) is forcibly released - bounds the
+	// WALL-CLOCK hold time independent of Bun's idleTimeout below, which only
+	// fires on total silence and does not bound a slow-but-continuously-
+	// trickling body. Generous enough to never trip for a real connection, even
+	// a badly throttled mobile one. chunkReadTimeoutMaxMs is a sanity ceiling on
+	// top of the floor-rate-derived timeout, protecting against an absurdly long
+	// wait if an operator configures a very large CHUNK_SIZE.
+	chunkReadMinBytesPerSec: int('CHUNK_READ_MIN_BYTES_PER_SEC', 16 * 1024),
+	chunkReadTimeoutMinMs: int('CHUNK_READ_TIMEOUT_MIN_MS', 15_000),
+	chunkReadTimeoutMaxMs: int('CHUNK_READ_TIMEOUT_MAX_MS', 20 * 60_000),
+
 	// Session lifetime for the admin cookie, in seconds (7 days).
 	adminSessionTtl: 7 * 24 * 3600,
 	// Lifetime of a per-share access token granted after password unlock (1 hour).
