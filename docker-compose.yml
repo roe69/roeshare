@@ -11,6 +11,28 @@ services:
     image: roeshare:latest
     container_name: roeshare
     restart: unless-stopped
+    # Drop every Linux capability (the app needs none - it's a plain Bun
+    # process listening on an unprivileged port) and block privilege
+    # escalation via setuid/setgid binaries or file capabilities.
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    # Resource ceiling so a runaway upload/compression workload can't take
+    # down the host. Bump if legitimate traffic gets OOM-killed or throttled.
+    mem_limit: "1g"
+    cpus: "2"
+    # Read-only root filesystem: every write the app makes (SQLite db + WAL,
+    # blob storage, .secret, settings.env, backups) goes through DATA_DIR
+    # (src/config.js), which is the /data volume below - nothing is ever
+    # written under /app. The only other writable path the base image/Bun
+    # runtime may want is /tmp, given here as a small in-memory tmpfs so it
+    # never persists or grows the container's writable layer. Verified by
+    # running the built image with --read-only --tmpfs /tmp: it boots,
+    # migrates, and serves /health healthy.
+    read_only: true
+    tmpfs:
+      - /tmp
     # Host port: change the left-hand 3300; the container itself always
     # listens on 3300.
     ports:

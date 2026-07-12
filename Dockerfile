@@ -1,6 +1,10 @@
 # RoeShare - a single Bun process. No build step and zero runtime dependencies,
 # so the image is just the Bun runtime plus the source. Data lives on a volume.
-FROM oven/bun:1-alpine
+#
+# Pinned to an exact version (not the floating "1-alpine" tag) plus its digest,
+# resolved via `docker buildx imagetools inspect oven/bun:1-alpine` on
+# 2026-07-12 (bun 1.3.14). Bump both together when intentionally upgrading.
+FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0
 
 WORKDIR /app
 ENV NODE_ENV=production \
