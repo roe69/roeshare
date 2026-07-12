@@ -30,7 +30,8 @@ SQLite, zero npm dependencies).
   inline (video and audio stream with seeking, even for E2E shares); download a
   whole share as one zip; a QR code for every link.
 - **Admin panel.** Browse and manage shares, usage stats, an in-app settings
-  editor, and API keys (create, limit, rotate, revoke).
+  editor, API keys (create, limit, rotate, revoke), and optional TOTP
+  multi-factor login with one-time backup codes.
 - **JSON API.** Per-key tokens with byte, expiry, and scope limits for
   programmatic uploads and managing that key's shares.
 
@@ -50,7 +51,7 @@ services:
     ports:
       - "3300:3300"
     environment:
-      ADMIN_PASSWORD: change-me # admin panel login - change this
+      ADMIN_PASSWORD: replace-with-a-real-password # admin panel login - change this
       SECRET: "" # generate with `openssl rand -hex 32` - back it up!
       BASE_URL: http://localhost:3300 # public URL used in share links
     volumes:
@@ -90,7 +91,7 @@ defaults except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `HOST`           | `0.0.0.0`                | Network interface to bind.                                                   |
 | `PORT`           | `3300`                   | Port to listen on.                                                          |
 | `BASE_URL`       | `http://localhost:3300`  | Public base URL for share links and QR codes. No trailing slash. Comma-separate multiple domains for multi-domain serving (e.g. `https://share.example.com,https://files.example.com`); links are built from the visitor's domain, first entry is the canonical fallback. |
-| `ADMIN_PASSWORD` | (empty)                  | Admin panel password. Required for admin access; if unset, admin is locked. |
+| `ADMIN_PASSWORD` | (empty)                  | Admin panel password. Required for admin access; if unset, admin is locked. A fixed set of well-known placeholder values (`change-me`, `changeme`, `change_me`, `admin`, `password`, `admin123`, `root`, `default`, `123456`) is rejected outright with a fatal error at boot - set a real password. |
 | `SECRET`         | (ephemeral)              | Signs cookies/tokens and derives the at-rest encryption key. Required in production; if unset, an ephemeral one is generated and everything resets on restart. |
 | `TRUSTED_PROXY_CIDRS` | (empty)             | Comma-separated CIDRs (e.g. `127.0.0.1/32,::1/128,10.20.0.0/24`) allowed to set X-Forwarded-For/X-Real-IP/X-Forwarded-Proto/X-Forwarded-Host. Only honored when the DIRECT connection comes from one of these; anything else falls back to the real socket peer. |
 | `TRUSTED_PROXY_HOPS` | `1`                  | Number of trusted-proxy hops to skip from the right of X-Forwarded-For before taking the client address. Raise it if more than one trusted proxy is chained in front of RoeShare. |
@@ -102,6 +103,9 @@ defaults except `ADMIN_PASSWORD` and `SECRET`, which you should always set.
 | `CHUNK_SIZE`     | `8388608` (8 MiB)        | Upload chunk size advertised to clients, in bytes.                         |
 | `MAX_FILES_PER_SHARE` | `10000`             | Max number of files in a single share.                                      |
 | `MAX_PASSWORD_LENGTH` | `1024`              | Max length of a share/upload password, in characters (bounds argon2 cost).  |
+| `UPLOAD_BYTES_PER_SEC` | `52428800` (50 MiB/s) | Per-actor byte-rate budget for uploads (chunk PATCHes), in bytes/second. On top of the existing request-count/concurrency limits. 0 disables the byte-rate check. |
+| `DOWNLOAD_BYTES_PER_SEC` | `52428800` (50 MiB/s) | Per-actor byte-rate budget for downloads/previews, in bytes/second. Same semantics as above. |
+| `DEFAULT_KEY_MAX_SHARES` | `1000`            | Default lifetime share cap applied to a new API key when it isn't given an explicit `maxShares` limit. |
 | `UPLOAD_PASSWORD`| (empty)                  | Require a password to create shares. Empty = open uploads.                  |
 | `DEFAULT_EXPIRY` | `604800` (7 days)        | Default expiry for new shares, in seconds. 0 = never.                       |
 | `DEFAULT_E2E`    | `1` (true)               | Whether new shares default to end-to-end encryption in the upload UI. 0 = default to server-managed shares. |
@@ -125,14 +129,14 @@ To keep secrets out of a compose file you commit or share, move them to a
 with `.env` holding `KEY=value` lines. Remove those keys from `environment:`
 when you do - inline values always win over `env_file`.
 
-Settings can also be edited in the admin panel (Server section); edits are
-saved to `settings.env` in the data volume and applied on the next restart.
-The environment always wins: any key set in your compose file shows as
-locked in the panel and cannot be changed or shadowed there - rotate those
-where you set them. Changing `SECRET` (when it is panel-managed) is guarded:
-it logs everyone out and permanently breaks decryption of existing uploads.
-Because `settings.env` can hold secrets for keys the environment leaves
-unset, protect and encrypt backups of the data volume.
+Non-secret settings (`BASE_URL`, `TRUST_PROXY`, `APP_NAME`, the size/expiry/
+limit knobs) can also be edited in the admin panel (Server section); edits
+are saved to `settings.env` in the data volume and applied on the next
+restart. The environment always wins: any key set in your compose file shows
+as locked in the panel and cannot be changed or shadowed there - rotate
+those where you set them. `ADMIN_PASSWORD`, `UPLOAD_PASSWORD`, and `SECRET`
+are never panel-editable - always set (and rotated) via the environment or
+`.env`, so a compromised admin session can't rotate or exfiltrate them.
 
 ## HTTPS (reverse proxy)
 
@@ -225,6 +229,12 @@ examples, and key holders can manage their shares in the browser at `/api`.
   user-chosen, so password-protect anything sensitive behind one.
 - Share passwords are argon2-hashed and verified in constant time; admin
   cookies and access tokens are HMAC-signed with a `SECRET`-derived subkey.
+- **Optional admin MFA**: enable TOTP (any standard authenticator app) in the
+  admin panel for a second factor on top of the password, with one-time
+  backup codes for device loss. Once enabled, a password alone only opens a
+  short-lived intermediate session - the real admin cookie isn't issued until
+  the second factor also verifies, and disabling MFA itself requires both the
+  password and a valid code.
 - Per-IP rate limiting on admin login, password unlock, and share creation.
 - Uploaded names are sanitized and blobs stored under generated ids - no
   client-controlled paths; size caps are enforced against actual bytes.

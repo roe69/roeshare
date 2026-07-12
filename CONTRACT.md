@@ -38,10 +38,16 @@ Use prepared statements: `db.query('...').get/all/run(...)`.
   `contentDisposition(name, inline?)`, `SECURITY_HEADERS`.
 - `../lib/crypto.js` -> `hashPassword`, `verifyPassword`, `safeEqual`,
   `signToken`, `verifyToken`.
-- `../lib/auth.js` -> `ADMIN_COOKIE`, `checkAdminPassword(pw)`,
-  `issueAdminToken()`, `isAdmin(req)`, `uploadAllowed(pw)`,
+- `../lib/auth.js` -> `ADMIN_COOKIE`, `ADMIN_MFA_COOKIE`, `checkAdminPassword(pw)`,
+  `issueAdminToken()`, `issueAdminMfaToken()`, `checkAdminMfaToken(req)`,
+  `isAdmin(req)`, `uploadAllowed(pw)`, `hasUploadAccess(req)`,
+  `issueUploadToken()`, `mintUploadLink()`, `redeemUploadLink(token)`,
   `issueAccessToken(shareId)`, `hasAccessToken(token, shareId)`,
   `readAccessToken(req, url)`.
+- `../lib/mfa.js` -> `mfaEnabled()`, `mfaEnabledAt()`, `pendingEnrollment()`,
+  `backupCodesRemaining()`, `beginEnrollment()`, `confirmEnrollment(code)`,
+  `disableMfa()`, `regenerateBackupCodes()`, `verifyLoginCode(code)`,
+  `consumeBackupCode(code)`, `verifyMfaCode(code)`.
 - `../lib/storage.js` -> `writeChunk(shareId,fileId,offset,bytes)->newSize`,
   `blobFile(shareId,fileId)` (Bun file: `.size`, `.stream()`, `.slice(a,b)`),
   `deleteShareFiles(shareId)`, `deleteBlob(shareId,fileId)`, `totalUsage()`.
@@ -80,7 +86,24 @@ routes with `router.get/post/patch/delete(pattern, handler)`. Handlers are
 open), else `403`. Rate-limited. The cookie gates BOTH page serving and creation:
 when `config.uploadPassword` is set and the cookie is absent, `GET /` serves
 `lock.html` (not `upload.html`) and `GET /js/upload.js` 404s, so the upload
-portal's markup/code never leaves the server unauthorized. `POST /api/shares`
+portal's markup/code never leaves the server unauthorized.
+
+**Magic link** (instant-login link for someone who already has upload access,
+so the real upload password never has to be shared out):
+- `POST /api/upload/link` (requires existing upload access; CSRF-checked) ->
+  `{ enabled: false }` if no `config.uploadPassword` is set, else
+  `{ enabled: true, url }` where `url` is `<origin>/?token=<token>` - a
+  single-use, 15-minute token minted from `SECRET` (`mintUploadLink()`), not
+  the password itself.
+- `POST /api/upload/link/redeem` body `{ token }` -> `{ ok: true }` and sets
+  the same `roeshare_upload` cookie as `/api/upload/verify`, or `403` for a
+  missing/invalid/expired/already-redeemed token (never reveals which).
+  Rate-limited (`magic-link` bucket, 20/5min per IP). Deliberately a POST
+  fired only from the `/?token=` interstitial's own JS, never a bare GET, so
+  a link-preview scanner prefetching the pasted URL can't silently burn the
+  token before the intended human clicks it.
+
+`POST /api/shares`
 accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 
 ### Upload (owner, via X-Edit-Token except create)
@@ -145,7 +168,12 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 
 ### Owner / admin management
 - `DELETE /api/shares/:id` (X-Edit-Token OR admin) -> owner deletes their own share. `{ ok: true }`.
-- `POST /api/admin/login` body `{ password }` -> set `ADMIN_COOKIE` (HttpOnly, SameSite=Lax, Max-Age=config.adminSessionTtl), `{ ok: true }`. Use `checkAdminPassword`.
+- `POST /api/admin/login` body `{ password }` -> on success, either sets
+  `ADMIN_COOKIE` (HttpOnly, SameSite=Lax, Max-Age=config.adminSessionTtl) and
+  returns `{ ok: true }`, or - when TOTP MFA is enabled (F-13) - returns
+  `{ ok: true, mfaRequired: true }` with NO admin cookie yet, instead setting a
+  short-lived (5 min) intermediate cookie that only `/api/admin/login/mfa`
+  below accepts. `403` on a wrong password either way. Use `checkAdminPassword`.
 - `POST /api/admin/logout` -> clear cookie.
 - `GET /api/admin/me` -> `{ admin: boolean }`.
 - `GET /api/admin/shares?search=&sort=created|size|downloads&order=asc|desc&limit=&offset=&apiKey=` (admin)
@@ -157,13 +185,44 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 - `DELETE /api/admin/shares/:id/files/:fileId` (admin) -> delete one file (blob + row). `{ ok: true }`.
 - `GET /api/admin/stats` (admin) -> `{ shareCount, fileCount, totalSize, downloadTotal, storageUsed, maxTotalSize }`.
 
+### Admin MFA (TOTP step-up)
+F-13: optional second factor on top of the admin password (`src/lib/mfa.js`).
+When enabled, `POST /api/admin/login` alone no longer issues the real admin
+cookie (see above) - the flow finishes at `/login/mfa`. Endpoints below other
+than the login step require the real admin cookie (`isAdmin`) and, where
+noted, the admin PASSWORD again as step-up proof, so a hijacked admin cookie
+alone can never enroll, disable, or read backup codes.
+- `POST /api/admin/login/mfa` (requires the intermediate cookie from a
+  just-passed password check, not the real admin cookie) body `{ code }` -> a
+  6-digit string is tried as a TOTP code, anything else as a backup code ->
+  sets `ADMIN_COOKIE` and clears the intermediate cookie, `{ ok: true }`.
+  `403 'Invalid code'` on failure, `403` with a re-authenticate message if the
+  intermediate cookie expired (5 min). Rate-limited (`admin-mfa`, 8/5min).
+- `GET /api/admin/mfa` (admin) -> `{ enabled, pendingSetup: boolean, backupCodesRemaining }`.
+- `POST /api/admin/mfa/setup` (admin) body `{ password }` -> `{ secret, otpauth }`
+  (a new pending TOTP secret + `otpauth://` URI to render as a QR code). `403`
+  on a wrong password. Rate-limited (`admin-mfa-setup`, 20/hour).
+- `POST /api/admin/mfa/confirm` (admin) body `{ password, code, existingCode? }`
+  -> confirms the pending secret from `/setup` with a valid 6-digit `code`,
+  enabling MFA -> `{ ok: true, backupCodes: string[] }` (shown once). Requires
+  `existingCode` (valid against the currently enabled factor) when MFA is
+  already on, so a hijacked cookie can't swap out the enrolled authenticator.
+  `403` on a wrong password/existingCode/code. Rate-limited (`admin-mfa-confirm`, 10/5min).
+- `POST /api/admin/mfa/disable` (admin) body `{ password, code }` -> disables
+  MFA. Requires both the password and a valid TOTP/backup `code`. `403` on
+  either failing. Rate-limited (`admin-mfa-disable`, 8/5min).
+- `POST /api/admin/mfa/backup-codes` (admin) body `{ code }` -> regenerates
+  the backup code set -> `{ backupCodes: string[] }`. `400` if MFA isn't
+  enabled, `403` on an invalid code. Rate-limited (`admin-mfa-backup-codes`, 20/hour).
+
 ### API keys (admin manages; programs use)
 API keys let other servers/scripts upload without a browser session. A key is a
 bearer token `rsk_<id>_<secret>`; only `sha256(secret)` is stored (`src/lib/apikeys.js`).
 The `id` is the public lookup key and the recognizable prefix.
 Each key carries optional limits/scopes (`limits` object, all optional):
 `maxFileSize`/`maxShareSize` (bytes, clamped to the server maxima, 0/blank=inherit),
-`maxShares` (lifetime share cap, null=unlimited), `maxExpiry` (seconds; forces every
+`maxShares` (lifetime share cap; omitted/blank defaults to `config.defaultKeyMaxShares`
+(`DEFAULT_KEY_MAX_SHARES`, default 1000), explicit `0`/null=unlimited), `maxExpiry` (seconds; forces every
 share from the key to expire within this window), `allowSlug`/`allowPassword` (bool,
 default true). Enforced at share creation and file registration.
 - `GET /api/admin/api-keys` (admin) -> `{ keys: [{ id, name, prefix, createdAt, lastUsedAt, expiresAt, revokedAt, uploadCount, bytesUploaded, liveShares, limits }] }`.
