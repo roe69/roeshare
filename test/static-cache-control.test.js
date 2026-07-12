@@ -146,6 +146,29 @@ describe('static asset Cache-Control (no-store -> no-cache)', () => {
 		}
 	});
 
+	test('the gated 404 for /js/upload.js and /js/admin.js is itself no-store, so a CDN cannot cache a stale "Not Found" and later serve it to a legitimate authorized caller', async () => {
+		const dir = freshDataDir('static-cache-gated-404-nostore');
+		try {
+			const proc = await bootServer(dir, 3873, { UPLOAD_PASSWORD });
+			try {
+				const base = 'http://127.0.0.1:3873';
+				const uploadRes = await fetch(`${base}/js/upload.js`);
+				expect(uploadRes.status).toBe(404);
+				expect(uploadRes.headers.get('cache-control')).toBe('no-store');
+				await uploadRes.arrayBuffer();
+
+				const adminRes = await fetch(`${base}/js/admin.js`);
+				expect(adminRes.status).toBe(404);
+				expect(adminRes.headers.get('cache-control')).toBe('no-store');
+				await adminRes.arrayBuffer();
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
 	test('authorized admin.js and upload.js stay no-store even though the caller is entitled to see them, and do not 304', async () => {
 		const dir = freshDataDir('static-cache-gated-nostore');
 		try {

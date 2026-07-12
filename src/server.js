@@ -135,6 +135,25 @@ function staticResponse(req, e) {
 	return new Response(body, { headers });
 }
 
+// The gate below has to reject with a 404 shaped exactly like the generic
+// `error(404, 'Not found')` fallback in fetch() - but it ALSO has to mark that
+// 404 `no-store`, unlike the generic fallback. A CDN (Cloudflare in front of
+// the live deployment) applies its own default caching heuristic to any
+// response with no Cache-Control header at all for a `.js` extension - so an
+// unauthenticated visitor's 404 for /js/admin.js could get cached at the edge
+// and later served, stale, to a legitimate logged-in admin whose own request
+// happens to land on the same edge node before that entry expires. The file
+// never leaks either way (a cached 404 has no body to leak), but it can break
+// the admin/upload dashboard's JS from loading - so this path is marked
+// `no-store` explicitly rather than relying on the CDN's default for a
+// response we don't otherwise control the headers of.
+function gatedNotFound() {
+	return new Response(JSON.stringify({ error: 'Not found' }), {
+		status: 404,
+		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SECURITY_HEADERS },
+	});
+}
+
 async function serveStatic(req, pathname) {
 	// Only assets under these prefixes are public. Everything else 404s.
 	// `sw.js` is served from the root so its Service Worker scope covers the whole
@@ -148,10 +167,10 @@ async function serveStatic(req, pathname) {
 	if (!/^\/(css|js|fonts|assets|favicon|apple-touch-icon|android-chrome|icon|robots|manifest|site\.webmanifest|sw\.js)/.test(rel)) return null;
 	// The upload portal's code is gated behind the upload-password cookie: an
 	// unauthorized visitor gets a 404 for it, so the source never leaks.
-	if (rel === '/js/upload.js' && !hasUploadAccess(req)) return null;
+	if (rel === '/js/upload.js' && !hasUploadAccess(req)) return gatedNotFound();
 	// Likewise, the admin dashboard's code is served only to a logged-in admin.
 	// The /login page uses the separate, ungated /js/login.js instead.
-	if (rel === '/js/admin.js' && !isAdmin(req)) return null;
+	if (rel === '/js/admin.js' && !isAdmin(req)) return gatedNotFound();
 	const full = join(PUBLIC_DIR, rel);
 	if (full !== PUBLIC_DIR && !full.startsWith(PUBLIC_DIR + sep)) return null; // traversal guard
 	if (!(await Bun.file(full).exists())) return null;
