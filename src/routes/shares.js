@@ -14,7 +14,7 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { newShareId, newToken } from '../lib/ids.js';
 import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
-import { acquire, overloaded } from '../lib/semaphore.js';
+import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
 import { keyValidForShare, scopeErrorForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
@@ -312,7 +312,23 @@ export default function shares(router) {
 		const body = value || {};
 		const password = body.password ?? '';
 		if (typeof password === 'string' && password.length > config.maxPasswordLength) return error(400, 'Password is too long');
-		const release = acquire('argon2', null, 4);
+		// Security-audit finding (2026-07, "argon2 semaphore exhausted via unlock"):
+		// this is the ONLY hashPassword()/verifyPassword() call site reachable
+		// with zero credential beyond a non-secret share id (auth: 'public' - see
+		// the route policy above) - share creation and the admin password edit
+		// both require some prior authorization (an upload password/cookie, or an
+		// admin session). Sharing one global argon2 pool with those meant a burst
+		// of concurrent unlock attempts against ANY live password-protected share
+		// - reachable by anyone who has ever seen that share's id - could starve
+		// unrelated password verification/creation instance-wide (OWASP API4:2023,
+		// Unrestricted Resource Consumption). Give unlock its OWN bulkhead pool
+		// ('argon2-unlock', distinct from the 'argon2' pool the other call sites
+		// still share), with an additional per-IP sub-limit so a single caller
+		// cannot alone consume the whole thing.
+		const release = acquireAll([
+			['argon2-unlock', null, 4],
+			['argon2-unlock', ctx.ip, 2],
+		]);
 		if (!release) return overloaded(2);
 		let ok;
 		try {
