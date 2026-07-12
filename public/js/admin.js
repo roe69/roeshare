@@ -1874,39 +1874,81 @@ function backupCodesBody(codes, note) {
 // just changed) - so the confirmation modal sends the operator to /login to
 // sign back in with the new password+code flow, rather than pretending the
 // panel is still usable.
-async function openMfaEnrollModal() {
+// `alreadyEnabled` is true when this is a re-enrollment (device swap) rather
+// than a first-time setup - the server requires the password up front in
+// both cases, plus a code from the CURRENTLY enrolled factor once MFA is
+// already on, so a hijacked cookie alone can never enroll/swap the factor.
+async function openMfaEnrollModal(alreadyEnabled = false) {
+	const passwordInput = el('input', { class: 'rl-input', type: 'password', autocomplete: 'current-password', placeholder: 'Admin password' });
+
 	let setup;
 	try {
-		setup = await api.post('/api/admin/mfa/setup', {});
-	} catch (err) {
-		toastErr(err);
+		setup = await new Promise((resolve, reject) => {
+			let settled = false;
+			openModal({
+				title: alreadyEnabled ? 'Re-enroll two-factor authentication' : 'Enable two-factor authentication',
+				body: el('div', { class: 'rl-stack' },
+					el('p', { class: 'rl-muted' }, 'Confirm your password to continue.'),
+					editField('Password', passwordInput),
+				),
+				actions: [
+					{ label: 'Cancel', variant: 'ghost' },
+					{
+						label: 'Continue', variant: 'primary', onClick: async () => {
+							const password = passwordInput.value;
+							if (!password) {
+								toastErr('Enter your password');
+								return true; // keep this modal open
+							}
+							try {
+								const res = await api.post('/api/admin/mfa/setup', { password });
+								settled = true;
+								resolve({ password, setup: res });
+							} catch (err) {
+								toastErr(err);
+								return true;
+							}
+						},
+					},
+				],
+				// Covers Cancel, the header's close button, Escape, and clicking the
+				// overlay - all of which close the modal without going through the
+				// Continue action's onClick above.
+				onClose: () => { if (!settled) reject(); },
+			});
+			passwordInput.focus();
+		});
+	} catch {
 		return;
 	}
+	const { password, setup: setupRes } = setup;
 
 	const qrFrame = el('div', { class: 'rl-qr-frame' });
 	import('/js/qrcode.js').then(({ makeQrSvg }) => {
 		try {
-			qrFrame.innerHTML = makeQrSvg(setup.otpauth, { border: 1 });
+			qrFrame.innerHTML = makeQrSvg(setupRes.otpauth, { border: 1 });
 		} catch {
 			/* no QR - the manual-entry secret below still works */
 		}
 	});
 
 	const copySecretBtn = el('button', { class: 'rl-btn rl-btn-secondary', type: 'button' }, 'Copy');
-	copySecretBtn.addEventListener('click', () => copyText(setup.secret));
+	copySecretBtn.addEventListener('click', () => copyText(setupRes.secret));
 	const secretField = el('div', { class: 'rl-copyfield' },
-		el('div', { class: 'rl-copyfield-url', title: setup.secret }, setup.secret),
+		el('div', { class: 'rl-copyfield-url', title: setupRes.secret }, setupRes.secret),
 		copySecretBtn,
 	);
 
 	const codeInput = el('input', { class: 'rl-input', type: 'text', inputmode: 'numeric', autocomplete: 'one-time-code', placeholder: '000000', maxlength: '6' });
+	const existingCodeInput = el('input', { class: 'rl-input', type: 'text', autocomplete: 'one-time-code', placeholder: '6-digit code, or a backup code' });
 
 	openModal({
-		title: 'Enable two-factor authentication',
+		title: alreadyEnabled ? 'Re-enroll two-factor authentication' : 'Enable two-factor authentication',
 		body: el('div', { class: 'rl-stack' },
 			el('p', { class: 'rl-muted' }, 'Scan this with an authenticator app (Google Authenticator, 1Password, Authy, ...), or enter the secret manually.'),
 			qrFrame,
 			editField('Secret (manual entry)', secretField),
+			alreadyEnabled ? editField('Current code', existingCodeInput, 'A current code (or backup code) from your existing authenticator, to prove you still control it.') : false,
 			editField('6-digit code', codeInput, 'Enter the current code from your authenticator app to confirm.'),
 		),
 		actions: [
@@ -1918,9 +1960,14 @@ async function openMfaEnrollModal() {
 						toastErr('Enter the 6-digit code');
 						return true; // keep this modal open
 					}
+					const existingCode = existingCodeInput.value.trim();
+					if (alreadyEnabled && !existingCode) {
+						toastErr('Enter a current code from your existing authenticator');
+						return true;
+					}
 					let res;
 					try {
-						res = await api.post('/api/admin/mfa/confirm', { code });
+						res = await api.post('/api/admin/mfa/confirm', { password, code, existingCode });
 					} catch (err) {
 						toastErr(err);
 						return true;

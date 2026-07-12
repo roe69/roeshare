@@ -31,6 +31,7 @@ import { authenticate, authenticateSource, verifyApiKey, recordKeyUsage, effecti
 import { audit } from '../lib/audit.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
 import { sanitizeName } from '../lib/names.js';
+import { finalizeTx } from './shares.js';
 
 // lower(id) so a slug can never collide-by-case with an existing one (the
 // on-disk share directory is effectively case-insensitive on some
@@ -49,7 +50,6 @@ const insertShare = db.query(
 const insertFile = db.query(
 	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, sha256, enc_version, key_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)',
 );
-const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
 const softDeleteShare = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
 
 // A live share owned by `keyId` (created with that key, not soft-deleted). The
@@ -494,7 +494,18 @@ export default function apiV1(router) {
 				return error(500, 'Could not store the file');
 			}
 			insertFile.run(fileId, made.id, name, size, size, mime, 1, now(), fileId, iv, sha256, 2, CURRENT_AT_REST_KEY_ID);
-			setFinalized.run(made.id);
+			// Routes through the same completeness-gated finalize transaction as
+			// POST /api/shares/:id/finalize (see shares.js) rather than a bespoke
+			// finalized-flip here, so this one-shot path can never bypass that
+			// check. The file row just above is always inserted complete = 1, so
+			// this always succeeds - it is a no-op gate here, kept for defense in
+			// depth.
+			if (!finalizeTx(made.id)) {
+				quota.releaseFile(fileId);
+				softDeleteShare.run(now(), made.id);
+				await deleteShareFiles(made.id).catch(() => {});
+				return error(500, 'Could not finalize the share');
+			}
 			quota.commit(fileId, size);
 
 			// File-completion stats (the chunked flow records these in uploads.js; the

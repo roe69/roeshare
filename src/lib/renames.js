@@ -37,6 +37,18 @@ export const BUSY = Symbol('rename-in-progress');
 // concurrent admin rename requests from interleaving their transactions.
 let renameInFlight = false;
 
+// Non-atomic-window guard: rename-then-fs-move (see below) has a gap, between
+// the DB transaction committing and renameShareDir() finishing, where a
+// download/preview request for either id would hit storage.js against a
+// directory that is momentarily absent (old id) or not yet populated (new
+// id) - a fabricated empty 200 for a legacy (v1/plaintext) blob, or an
+// uncaught mid-stream failure for a v2 blob. Populated with both ids right
+// when a rename starts and cleared in the same `finally` as renameInFlight,
+// so isRenamePending() below lets the read routes (routes/download.js) refuse
+// with a 503 instead of touching storage during that window. Separate from
+// renameInFlight, which only serializes concurrent admin rename REQUESTS.
+const inFlightIds = new Set();
+
 // Row copy + children repoint + old row delete + journal flip to
 // 'db_committed', all inside ONE transaction, so the DB-side rename can never
 // commit without the journal atomically recording it as done - that
@@ -67,6 +79,8 @@ const allJournalStmt = db.query('SELECT * FROM share_renames ORDER BY id');
 export async function performShareRename(oldId, newId) {
 	if (renameInFlight) throw BUSY;
 	renameInFlight = true;
+	inFlightIds.add(oldId);
+	inFlightIds.add(newId);
 	try {
 		// Durable intent recorded BEFORE any state changes.
 		const ts = now();
@@ -93,7 +107,20 @@ export async function performShareRename(oldId, newId) {
 		deleteJournalStmt.run(jid);
 	} finally {
 		renameInFlight = false;
+		inFlightIds.delete(oldId);
+		inFlightIds.delete(newId);
 	}
+}
+
+// Whether `id` (old or new side) is part of a rename that has not fully
+// finished yet - either still running in this process (inFlightIds), or left
+// mid-flight by a crash (a 'db_committed' journal row - see the module
+// comment above; reconcileShareRenames() clears it at the next boot, so this
+// is the fs-failure/pre-restart safety net the in-memory set alone can't
+// cover). Checked by routes/download.js before any storage.js call.
+export function isRenamePending(id) {
+	if (inFlightIds.has(id)) return true;
+	return allJournalStmt.all().some(r => r.old_id === id || r.new_id === id);
 }
 
 // Rolls forward any rename journal rows left behind by a crash. Called once

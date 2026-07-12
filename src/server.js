@@ -151,6 +151,18 @@ async function serveStatic(req, pathname) {
 // abandoned uploads, on their own (much longer) TTL.
 const selectExpired = db.query('SELECT id FROM shares WHERE deleted_at IS NULL AND finalized = 1 AND expires_at IS NOT NULL AND expires_at < ?');
 const selectAbandoned = db.query('SELECT id FROM shares WHERE deleted_at IS NULL AND finalized = 0 AND created_at < ?');
+// Ghost-share cleanup: finalize() now refuses to flip a share to finalized
+// while any of its files is still incomplete (see shares.js's finalizeTx), so
+// this should never match a share created after that fix shipped. It exists
+// to recover any "ghost" share finalized before the fix - permanently
+// unfinished, yet invisible to both queries above (not abandoned, since
+// finalized = 1; not necessarily expired, since its clock may not have
+// elapsed or may not exist at all). Same created_at + abandonedUploadTtl
+// grace period as selectAbandoned, so a share finalized moments ago whose
+// last chunk simply hasn't landed yet is not swept out from under it.
+const selectStuckFinalized = db.query(
+	'SELECT DISTINCT s.id FROM shares s JOIN files f ON f.share_id = s.id WHERE s.deleted_at IS NULL AND s.finalized = 1 AND f.complete = 0 AND s.created_at < ?'
+);
 const markDeleted = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
 const sweepAuditEvents = db.query('DELETE FROM audit_events WHERE ts < ?');
 
@@ -186,6 +198,22 @@ async function sweep() {
 		}
 	}
 	if (abandoned.length) console.log(`[sweep] removed ${abandoned.length} abandoned upload(s)`);
+
+	// Legacy/defense-in-depth: reap any share that reached finalized = 1 with an
+	// incomplete file still attached - a ghost that predates (or somehow evaded)
+	// finalizeTx's completeness gate and that neither loop above can reach.
+	const stuckFinalized = selectStuckFinalized.all(ts - config.abandonedUploadTtl);
+	for (const { id } of stuckFinalized) {
+		try {
+			await deleteShareFiles(id);
+			markDeleted.run(ts, id);
+			quota.releaseShare(id);
+			audit('share.swept.stuck_finalized', { target: id });
+		} catch (e) {
+			console.error('sweep failed for', id, e);
+		}
+	}
+	if (stuckFinalized.length) console.log(`[sweep] removed ${stuckFinalized.length} stuck-finalized ghost share(s)`);
 
 	// Audit-log retention (section 10 of the security audit): 90 days.
 	sweepAuditEvents.run(ts - AUDIT_RETENTION_SECONDS);

@@ -6,12 +6,13 @@
 
 import { db, now } from '../db.js';
 import { config } from '../config.js';
-import { error, parseRange, contentDisposition, FILE_SECURITY_HEADERS } from '../lib/http.js';
+import { error, parseRange, contentDisposition, FILE_SECURITY_HEADERS, SECURITY_HEADERS } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
 import { readAccessToken, hasAccessToken, hasOwnerCookie } from '../lib/auth.js';
 import { verifyApiKey, readApiKey, readApiKeySession, keyValidForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
 import { blobPath, blobRangeStream, deleteShareFiles, fileEnc, plainSize } from '../lib/storage.js';
 import { scheduleMigration, awaitFileMigration } from '../lib/migrate.js';
+import { isRenamePending } from '../lib/renames.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
@@ -99,6 +100,20 @@ async function resolveFile(shareId, fileId) {
 		file = getFile.get(fileId, shareId) || null;
 	}
 	return file;
+}
+
+// A share whose rename (admin slug change) is mid-flight - see lib/renames.js's
+// isRenamePending() - must never be read: storage.js would either 404 against
+// a directory that hasn't moved yet (a fabricated empty response for a legacy
+// v1/plaintext blob) or blow up mid-stream once the directory disappears out
+// from under an open v2 read. Mirrors semaphore.js's overloaded() shape (503 +
+// Retry-After) since this is the same "try again in a moment" signal, just
+// for a different resource than a concurrency slot.
+function renamePendingResponse() {
+	return new Response(JSON.stringify({ error: 'Share temporarily unavailable, retry shortly' }), {
+		status: 503,
+		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': '1', ...SECURITY_HEADERS },
+	});
 }
 
 // Resolve a share that is safe to serve: present, not soft-deleted, not expired.
@@ -312,6 +327,9 @@ export default function download(router) {
 		// rate-limit map at zero cost to the attacker.
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
+		// F-19 follow-up: refuse before any storage.js call while this share's
+		// admin rename is mid-flight (see lib/renames.js's isRenamePending()).
+		if (isRenamePending(share.id)) return renamePendingResponse();
 		// GAP 2 fix: only a genuinely protected share (password-gated or under a
 		// download cap) uses the SQLite-persisted 'dl:' bucket; an ordinary share
 		// uses the plain in-memory-only 'dlv:' bucket instead (see
@@ -433,6 +451,9 @@ export default function download(router) {
 		// rate-limit map at zero cost to the attacker.
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
+		// F-19 follow-up: refuse before any storage.js call while this share's
+		// admin rename is mid-flight (see lib/renames.js's isRenamePending()).
+		if (isRenamePending(share.id)) return renamePendingResponse();
 		// GAP 2 fix: only a genuinely protected share (password-gated or under a
 		// download cap) uses the SQLite-persisted 'dl:' bucket; an ordinary share
 		// uses the plain in-memory-only 'dlv:' bucket instead (see
@@ -588,6 +609,9 @@ export default function download(router) {
 		if (limited) return limited;
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
+		// F-19 follow-up: refuse before any storage.js call while this share's
+		// admin rename is mid-flight (see lib/renames.js's isRenamePending()).
+		if (isRenamePending(share.id)) return renamePendingResponse();
 		const { ok, owner } = accessCheck(share, req, url);
 		if (!ok) return error(403, 'Password required');
 		// Zip is built server-side, which is impossible for E2E shares (the server
@@ -675,7 +699,11 @@ export default function download(router) {
 					stream: () => new ReadableStream({
 						async start(controller) {
 							const fresh = await resolveFile(share.id, f.id);
-							if (!fresh) { controller.close(); return; } // deleted concurrently; emit an empty entry rather than stale/wrong bytes
+							// Deleted concurrently, or this share's admin rename (F-19 follow-up:
+							// isRenamePending()) started/is still mid-flight since the batch
+							// snapshot above - either way, emit an empty entry rather than
+							// stale/wrong/momentarily-missing bytes.
+							if (!fresh || isRenamePending(share.id)) { controller.close(); return; }
 							const reader = blobRangeStream(share.id, fresh.id, 0, fresh.size - 1, fileEnc(fresh)).getReader();
 							while (true) {
 								const { done, value } = await reader.read();

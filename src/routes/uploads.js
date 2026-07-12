@@ -267,6 +267,14 @@ export default function uploads(router) {
 					if (declaredLen > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
 					if (offset + declaredLen > file.size) return error(413, 'Chunk exceeds declared file size');
 				}
+				// A 0-byte PATCH at offset===received makes no forward progress but
+				// still touches the reservation's TTL below - reject it up front (before
+				// the byte-rate charge) so it cannot be used as a free keepalive. The
+				// one legitimate empty body is completing a size:0 file's registration,
+				// which never has bytes to send in the first place.
+				if (Number.isFinite(declaredLen) && declaredLen === 0 && file.size > 0) {
+					return error(400, 'Empty chunk not allowed');
+				}
 
 				// M-04: byte-rate budget, keyed the same as the 'chunk'/'chunk-global'
 				// admission-control slots just above (per share). Charged BEFORE
@@ -313,6 +321,7 @@ export default function uploads(router) {
 				// that path cannot smuggle an oversized chunk past the header check.
 				if (chunk.length > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
 				if (file.received + chunk.length > file.size) return error(413, 'Chunk exceeds declared file size');
+				if (chunk.length === 0 && file.size > 0) return error(400, 'Empty chunk not allowed');
 
 				const received = await writeChunk(share.id, file.id, offset, chunk, fileEnc(file));
 				const complete = received === file.size ? 1 : 0;

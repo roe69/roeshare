@@ -32,6 +32,28 @@ const insertShare = db.query(
 );
 const getFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, sha256, e2e_aad_version FROM files WHERE share_id = ? ORDER BY created_at ASC');
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
+const countIncompleteFiles = db.query('SELECT COUNT(*) AS n FROM files WHERE share_id = ? AND complete = 0');
+// Ghost-share fix: a share must not be flippable to finalized while any of its
+// registered files is still mid-upload (complete = 0) - otherwise the
+// published link is "done" but a file behind it can never finish (the
+// uploader walked away, or never intended to), and neither sweeper below can
+// ever reap it: it is not "abandoned" (finalized = 1 excludes it from
+// selectAbandoned in server.js) and it is not "expired" until its
+// (now-started) expiry clock elapses, if it even has one. Wrapped in ONE
+// db.transaction() with the flip itself (not a bare SELECT then UPDATE) so a
+// concurrent POST /api/shares/:id/files registering a new incomplete file
+// cannot land between the check and the write - bun:sqlite transactions are
+// synchronous, so nothing can interleave inside this call. Zero-file shares
+// pass trivially (n = 0), matching the existing allowed edge case. Shared by
+// both the resumable finalize route below and api.js's one-shot upload path
+// (which always calls this AFTER its single file is already inserted
+// complete = 1, so it is a no-op gate there, kept for defense in depth so
+// that path can never silently bypass this rule if it changes shape later).
+export const finalizeTx = db.transaction(shareId => {
+	if (countIncompleteFiles.get(shareId).n > 0) return false;
+	setFinalized.run(shareId);
+	return true;
+});
 // Shifts a share's expiry forward by the time spent uploading, so the
 // published-link expiry clock effectively starts at finalize rather than at
 // share creation (see the finalize handler below).
@@ -452,7 +474,7 @@ export default function shares(router) {
 		// its intended duration from the moment it is actually published. Only on
 		// the first finalize, so a re-finalize cannot keep pushing the clock out.
 		const firstFinalize = !share.finalized;
-		setFinalized.run(share.id);
+		if (!finalizeTx(share.id)) return error(409, 'All files must finish uploading before finalizing');
 		if (firstFinalize && share.expires_at != null) shiftExpiry.run(now(), share.id);
 		return json({ id: share.id, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${share.id}` });
 	});

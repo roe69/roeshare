@@ -151,7 +151,7 @@ async function enrollMfa(base, adminCookie) {
 	const setupRes = await fetch(`${base}/api/admin/mfa/setup`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
-		body: '{}',
+		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	expect(setupRes.status).toBe(200);
 	const { secret } = await setupRes.json();
@@ -162,7 +162,7 @@ async function enrollMfa(base, adminCookie) {
 	const confirmRes = await fetch(`${base}/api/admin/mfa/confirm`, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
-		body: JSON.stringify({ code }),
+		body: JSON.stringify({ password: ADMIN_PASSWORD, code }),
 	});
 	expect(confirmRes.status).toBe(200);
 	const confirmBody = await confirmRes.json();
@@ -336,6 +336,124 @@ describe('F-13 admin TOTP MFA', () => {
 			const finalBody = await finalLogin.json();
 			expect(finalBody.mfaRequired).toBeFalsy();
 			expect(cookieNamed(getSetCookies(finalLogin), 'roeshare_admin')).toBeTruthy();
+		} finally {
+			await stopServer(proc);
+			cleanupDir(dir);
+		}
+	});
+
+	test('setup/confirm require the admin password - a hijacked cookie alone cannot enroll or swap TOTP', async () => {
+		const dir = freshDataDir('mfa-stepup');
+		const port = 3805;
+		const proc = await bootServer(dir, port);
+		try {
+			const base = `http://127.0.0.1:${port}`;
+			const adminCookie = await fullAdminCookie(base);
+
+			// /setup with no password at all is rejected before a pending secret is
+			// even generated.
+			const setupNoPw = await fetch(`${base}/api/admin/mfa/setup`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
+				body: '{}',
+			});
+			expect(setupNoPw.status).toBe(403);
+
+			// /setup with a WRONG password is rejected too.
+			const setupWrongPw = await fetch(`${base}/api/admin/mfa/setup`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
+				body: JSON.stringify({ password: 'definitely-not-the-password' }),
+			});
+			expect(setupWrongPw.status).toBe(403);
+
+			// The correct password lets setup proceed, producing a pending secret.
+			const setupOk = await fetch(`${base}/api/admin/mfa/setup`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
+				body: JSON.stringify({ password: ADMIN_PASSWORD }),
+			});
+			expect(setupOk.status).toBe(200);
+			const { secret } = await setupOk.json();
+			const code = totpCodeIndependent(secret);
+
+			// /confirm with a correct code but no/wrong password must NOT enable MFA.
+			const confirmNoPw = await fetch(`${base}/api/admin/mfa/confirm`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
+				body: JSON.stringify({ code }),
+			});
+			expect(confirmNoPw.status).toBe(403);
+			const statusStillOff = await fetch(`${base}/api/admin/mfa`, { headers: { Cookie: adminCookie } });
+			expect((await statusStillOff.json()).enabled).toBe(false);
+
+			// The correct password (and the pending code) now succeeds.
+			const confirmOk = await fetch(`${base}/api/admin/mfa/confirm`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
+				body: JSON.stringify({ password: ADMIN_PASSWORD, code }),
+			});
+			expect(confirmOk.status).toBe(200);
+		} finally {
+			await stopServer(proc);
+			cleanupDir(dir);
+		}
+	});
+
+	test('re-enrolling while MFA is already enabled additionally requires a code from the CURRENT factor', async () => {
+		const dir = freshDataDir('mfa-swap-gate');
+		const port = 3806;
+		const proc = await bootServer(dir, port);
+		try {
+			const base = `http://127.0.0.1:${port}`;
+			const adminCookie = await fullAdminCookie(base);
+			const { backupCodes } = await enrollMfa(base, adminCookie);
+
+			// enrollMfa() invalidated that session (mfaEnabledAt() changed); sign
+			// back in the normal password+code way to get a live admin cookie.
+			const loginRes = await passwordLogin(base);
+			const mfaCookie = cookieNamed(getSetCookies(loginRes), 'roeshare_admin_mfa').split(';')[0];
+			const mfaLoginRes = await fetch(`${base}/api/admin/login/mfa`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie, Origin: base },
+				body: JSON.stringify({ code: backupCodes[0] }),
+			});
+			expect(mfaLoginRes.status).toBe(200);
+			const liveCookie = cookieNamed(getSetCookies(mfaLoginRes), 'roeshare_admin').split(';')[0];
+
+			// Attacker holds the hijacked cookie AND has just learned the password
+			// (e.g. via the disable endpoint's own password requirement being
+			// satisfied some other way) - but has no access to the real device's
+			// authenticator. Starting a new enrollment is still allowed (password
+			// checks out)...
+			const setupRes = await fetch(`${base}/api/admin/mfa/setup`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: liveCookie, Origin: base },
+				body: JSON.stringify({ password: ADMIN_PASSWORD }),
+			});
+			expect(setupRes.status).toBe(200);
+			const { secret: newSecret } = await setupRes.json();
+			const newCode = totpCodeIndependent(newSecret);
+
+			// ...but confirming the swap WITHOUT a code from the still-enrolled
+			// factor must be rejected - this is the swap-prevention gate.
+			const confirmNoExisting = await fetch(`${base}/api/admin/mfa/confirm`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: liveCookie, Origin: base },
+				body: JSON.stringify({ password: ADMIN_PASSWORD, code: newCode }),
+			});
+			expect(confirmNoExisting.status).toBe(403);
+			const statusStillOld = await fetch(`${base}/api/admin/mfa`, { headers: { Cookie: liveCookie } });
+			expect((await statusStillOld.json()).enabled).toBe(true);
+
+			// Supplying a correct existingCode (a fresh, still-unused backup code)
+			// lets the swap complete.
+			const confirmWithExisting = await fetch(`${base}/api/admin/mfa/confirm`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', Cookie: liveCookie, Origin: base },
+				body: JSON.stringify({ password: ADMIN_PASSWORD, code: newCode, existingCode: backupCodes[1] }),
+			});
+			expect(confirmWithExisting.status).toBe(200);
 		} finally {
 			await stopServer(proc);
 			cleanupDir(dir);

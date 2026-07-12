@@ -177,18 +177,35 @@ export default router => {
 		return json({ enabled, pendingSetup: pendingEnrollment(), backupCodesRemaining: enabled ? backupCodesRemaining() : 0 });
 	});
 
-	declareRoutePolicy('POST', '/api/admin/mfa/setup', { auth: 'admin', csrf: true, rateLimit: 'admin-mfa-setup', audit: 'admin.mfa.setup_started' });
-	router.post('/api/admin/mfa/setup', ({ req, ip }) => {
+	// Requires the admin PASSWORD (not just the ambient cookie), same step-up
+	// gate as /disable below - a hijacked admin cookie alone must not be able to
+	// start enrolling a TOTP secret the attacker controls.
+	declareRoutePolicy('POST', '/api/admin/mfa/setup', { auth: 'admin', csrf: true, rateLimit: 'admin-mfa-setup', audit: 'admin.mfa.setup_failed|admin.mfa.setup_started' });
+	router.post('/api/admin/mfa/setup', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-mfa-setup', ip, 20, 60 * 60 * 1000);
 		if (limited) return limited;
+		const { body, response: bodyErr } = await readBody(req, LOGIN_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const { password } = body;
+		if (!checkAdminPassword(password)) {
+			audit('admin.mfa.setup_failed', { ip, detail: { reason: 'password' } });
+			return error(403, 'Invalid password');
+		}
 		const { secret, otpauth } = beginEnrollment();
 		audit('admin.mfa.setup_started', { ip, actor: 'admin' });
 		return json({ secret, otpauth });
 	});
 
+	// Requires the admin PASSWORD, and - when MFA is ALREADY enabled - also a
+	// valid code against the CURRENT confirmed factor (existingCode) before a
+	// new pending secret is allowed to overwrite it. Without this, a hijacked
+	// admin cookie could silently swap the enrolled authenticator/device out
+	// from under the real admin and lock them out; first-ever enrollment (no
+	// confirmed secret yet) has nothing to step up against, so existingCode is
+	// only required once mfaEnabled() is true - checked fresh here, not cached.
 	declareRoutePolicy('POST', '/api/admin/mfa/confirm', { auth: 'admin', csrf: true, rateLimit: 'admin-mfa-confirm', audit: 'admin.mfa.confirm_failed|admin.mfa.enabled' });
 	router.post('/api/admin/mfa/confirm', async ({ req, ip }) => {
 		const csrf = requireSameOrigin(req);
@@ -198,10 +215,18 @@ export default router => {
 		if (limited) return limited;
 		const { body, response: bodyErr } = await readBody(req, LOGIN_BODY_MAX);
 		if (bodyErr) return bodyErr;
-		const { code } = body;
+		const { password, code, existingCode } = body;
+		if (!checkAdminPassword(password)) {
+			audit('admin.mfa.confirm_failed', { ip, actor: 'admin', detail: { reason: 'password' } });
+			return error(403, 'Invalid password');
+		}
+		if (mfaEnabled() && !verifyMfaCode(existingCode)) {
+			audit('admin.mfa.confirm_failed', { ip, actor: 'admin', detail: { reason: 'existingCode' } });
+			return error(403, 'Invalid existing code');
+		}
 		const backupCodes = confirmEnrollment(code);
 		if (!backupCodes) {
-			audit('admin.mfa.confirm_failed', { ip, actor: 'admin' });
+			audit('admin.mfa.confirm_failed', { ip, actor: 'admin', detail: { reason: 'code' } });
 			return error(403, 'Invalid code');
 		}
 		audit('admin.mfa.enabled', { ip, actor: 'admin' });
