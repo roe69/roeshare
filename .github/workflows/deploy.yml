@@ -31,10 +31,10 @@ jobs:
     # Deploy after a successful publish, or on manual dispatch; skip when the
     # publish failed or was cancelled.
     if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
-    # Any self-hosted runner. To pin to one box, add a label here and to the
-    # runner, e.g. [self-hosted, roeshare]. Assumes a Linux runner with Docker
-    # Engine + the Compose v2 plugin already installed.
-    runs-on: [self-hosted]
+    # Pinned to the production runner box (labeled "roeshare"), not just any
+    # self-hosted runner ever registered to this repo. Assumes a Linux runner
+    # with Docker Engine + the Compose v2 plugin already installed.
+    runs-on: [self-hosted, roeshare]
     defaults:
       run:
         shell: bash
@@ -52,7 +52,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Preflight (Docker + secrets)
         run: |
