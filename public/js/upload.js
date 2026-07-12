@@ -811,14 +811,6 @@ function setUploading(on) {
 async function doUpload() {
 	if (uploading || !selected.length) return;
 
-	// Refresh config for current chunkSize / limits.
-	try {
-		config = await api.get('/api/config');
-	} catch (e) {
-		toastErr('Could not reach the server');
-		return;
-	}
-
 	// Validate options before showing the uploading state so a bad custom date
 	// or limit just surfaces a toast.
 	let opts;
