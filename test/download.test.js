@@ -205,3 +205,35 @@ describe('download route: split-Range bypass on controlled shares', () => {
 		}
 	});
 });
+
+// Regression test: every branch of rangeResponse() is documented (see the L-05
+// comment above it) to always be no-store, since a share's bytes are revocable
+// user content, never a deliberately public content-addressed object - but the
+// 416 (invalid Range) branch was missing Cache-Control entirely, breaking that
+// invariant. A response with no Cache-Control at all can fall back to a CDN's
+// own default caching heuristic (this is the same class of bug fixed for the
+// admin.js/upload.js access gate's 404 - see gatedNotFound() in src/server.js).
+describe('download route: every response branch stays no-store', () => {
+	test('an invalid Range request gets a 416 that is explicitly no-store', async () => {
+		const dir = freshDataDir('dl-416-nostore');
+		try {
+			const proc = await bootServer(dir, 3598);
+			try {
+				const base = 'http://127.0.0.1:3598';
+				const { id, fileId } = await makeShare(base, {});
+
+				// end < start is an invalid Range per parseRange()'s contract.
+				const res = await fetch(`${base}/api/shares/${id}/files/${fileId}/download`, {
+					headers: { Range: 'bytes=10-2' },
+				});
+				expect(res.status).toBe(416);
+				expect(res.headers.get('cache-control')).toBe('no-store');
+				await res.arrayBuffer();
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+});

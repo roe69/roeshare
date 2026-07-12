@@ -112,7 +112,7 @@ async function resolveFile(shareId, fileId) {
 function renamePendingResponse() {
 	return new Response(JSON.stringify({ error: 'Share temporarily unavailable, retry shortly' }), {
 		status: 503,
-		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': '1', ...SECURITY_HEADERS },
+		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': '1', 'Cache-Control': 'no-store', ...SECURITY_HEADERS },
 	});
 }
 
@@ -286,7 +286,7 @@ function rangeResponse(share, file, req, opts = {}) {
 	if (range?.invalid) {
 		return new Response(null, {
 			status: 416,
-			headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', ...FILE_SECURITY_HEADERS },
+			headers: { 'Content-Range': `bytes */${size}`, 'Accept-Ranges': 'bytes', 'Cache-Control': 'no-store', ...FILE_SECURITY_HEADERS },
 		});
 	}
 	const start = range ? range.start : 0;
