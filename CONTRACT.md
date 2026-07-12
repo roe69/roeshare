@@ -60,11 +60,16 @@ routes with `router.get/post/patch/delete(pattern, handler)`. Handlers are
 
 - **Admin**: signed cookie `ADMIN_COOKIE`. Guard with `isAdmin(req)`.
 - **Share owner**: `editToken` returned at creation, sent back as the
-  `X-Edit-Token` request header. Compare against `shares.edit_token`.
+  `X-Edit-Token` request header. Compare against `shares.edit_token`. (M-05)
+  A browser may instead exchange that header once, via
+  `POST /api/shares/:id/owner-session`, for an HttpOnly, per-share, "__Host-"
+  (over https) cookie - every owner-gated route accepts either credential;
+  the header path is unaffected and needs no same-origin proof, the cookie
+  path does (`requireSameOrigin()`).
 - **Share visitor (password-gated)**: access token from
   `readAccessToken(req, url)` (Authorization: Bearer OR `?access=` query),
-  validated with `hasAccessToken(token, shareId)`. A valid `editToken` also
-  grants access.
+  validated with `hasAccessToken(token, shareId)`. A valid `editToken` (header
+  or owner-session cookie) also grants access.
 
 ## HTTP API (build these)
 
@@ -171,11 +176,11 @@ slug/password scope, is `403`; the key's `maxExpiry` clamps the share's expiry.
 - `POST /api/v1/upload` one-shot: request body IS the file bytes; filename via the
   `X-Filename` header (or `?filename=`); options as query params (`title`, `slug`,
   `expiresIn`, `maxDownloads`, `oneTime`, `mime`). Password via the `X-Upload-Password`
-  header (preferred - keeps it out of proxy logs/history/Referer); `?password=` still
-  works for one release for backwards compatibility but is deprecated. Creates +
-  finalizes a single-file share. -> `201 { id, url, fileId, name, size }`. Bounded by
-  the server's max request body size (so for files beyond that, use the resumable flow
-  above).
+  header ONLY (keeps it out of proxy logs/history/Referer) - a `?password=` query param
+  is rejected with `400` rather than silently ignored, so a stale client fails loud
+  instead of publishing an unprotected share. Creates + finalizes a single-file share.
+  -> `201 { id, url, fileId, name, size }`. Bounded by the server's max request body
+  size (so for files beyond that, use the resumable flow above).
 
 Manage / restore (for backup clients). A key can only see and act on the shares it
 created (others 404):
@@ -228,12 +233,15 @@ formatBytes, formatDate, timeUntil, copyText, fileGlyph, previewKind`.
   per-file resumable chunked upload (create share -> register files -> PATCH
   chunks of `config.chunkSize` -> finalize), live progress bars, share options
   (password, expiry, max downloads, one-time, title). On finish: show the share
-  link + copy button + QR. Persist `editToken` to `localStorage` keyed by id.
+  link + copy button + QR. (M-05) Exchange `editToken` for an owner-session
+  cookie via `POST /api/shares/:id/owner-session`; persist only the share id
+  (not the token) to `localStorage`, in the owned-ids list `shared.js` exposes.
 - **`public/view.html` + `public/js/view.js`**: fetch metadata; if `401 protected`,
   show a password form -> `unlock` -> store accessToken in memory and append
   `?access=` to media URLs. List files with inline preview (image/video/audio/
   pdf/text via `previewKind`), per-file download, and "Download all (zip)".
-  If owner (has editToken for this id), show delete controls.
+  If owner (`share.owner`, resolved server-side from the owner-session cookie),
+  show delete controls.
 - **`public/admin.html` + `public/js/admin.js`**: login form (if `me.admin` is
   false) -> stats cards -> searchable/sortable table of shares with per-row open
   link, copy link, and delete (with confirm modal); bulk delete; per-file delete

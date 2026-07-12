@@ -180,9 +180,11 @@ cd roeshare
 - **Single binary**: `bun build --compile src/server.js --outfile roeshare`,
   then ship the binary next to the `public/` directory.
 
-`GET /health` returns `{ ok, uptime }` for load balancers and the container
-healthcheck. [DEPLOY.md](DEPLOY.md) has an optional GitHub Actions setup that
-publishes the image and redeploys a server on every push.
+`GET /health` is a minimal, unauthenticated liveness probe (fixed `204 No
+Content`, no body) for load balancers and the container healthcheck - it
+deliberately discloses no uptime/version/internal state. [DEPLOY.md](DEPLOY.md)
+has an optional GitHub Actions setup that publishes the image and redeploys a
+server on every push.
 
 ## API
 
