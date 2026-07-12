@@ -74,7 +74,22 @@ const STATIC_TYPES = {
 // effect WITHOUT a server restart (no more stale assets from a long-lived cache).
 const staticCache = new Map();
 
-async function staticEntry(full, type) {
+// The upload portal and admin dashboard bundles are gated per-request in
+// serveStatic() (hasUploadAccess/isAdmin, below) *before* this function or
+// staticResponse() ever run - but that gate only re-runs on a request that
+// actually reaches this origin. A `no-cache` response is still a *cacheable*
+// response (a CDN, or the browser's own disk cache, is allowed to store the
+// body; it's only forbidden from *serving* it without revalidating first) -
+// and we cannot assume every CDN's "revalidate" implementation replays the
+// original request's cookies to the origin rather than serving straight from
+// its edge on a bare If-None-Match match. Since the whole point of these two
+// files' gating is that an unauthorized visitor must never see the source,
+// they stay on the stricter `no-store` (never stored anywhere, so there is no
+// cached copy any misbehaving revalidation path could ever hand out) - the
+// same policy the rest of static JS/CSS used to use for a different reason.
+const NO_STORE_PATHS = new Set(['/js/upload.js', '/js/admin.js']);
+
+async function staticEntry(full, type, rel) {
 	let mtime = 0;
 	try { mtime = statSync(full).mtimeMs; } catch { /* fall through to a fresh read */ }
 	const cached = staticCache.get(full);
@@ -82,12 +97,19 @@ async function staticEntry(full, type) {
 
 	const identity = Buffer.from(await Bun.file(full).arrayBuffer());
 	const etag = '"' + createHash('sha1').update(identity).digest('base64url').slice(0, 20) + '"';
-	// JS/CSS are served `no-store`: never cached by the browser, so an ES module
-	// can never load a fresh file next to a stale import (the bug behind "I have
-	// to hard-refresh"). Other assets (images, fonts) use `no-cache` - cacheable
-	// but revalidated via the ETag, with cheap 304s when unchanged.
-	const ext = full.slice(full.lastIndexOf('.'));
-	const cacheControl = ext === '.js' || ext === '.mjs' || ext === '.css' ? 'no-store' : 'no-cache';
+	// Every other static asset - JS/CSS included - is served `no-cache`:
+	// cacheable by the browser (and by a CDN in front of us) but always
+	// revalidated via the ETag before use, with a cheap 304 when unchanged.
+	// This is NOT the same as letting a stale copy be served: `no-cache`
+	// (unlike a bare max-age) forbids using any stored response without a
+	// successful conditional GET first, so an ES module can still never load
+	// next to a stale sibling import - the "I have to hard-refresh" bug this
+	// used to guard against by sending `no-store` is prevented the same way
+	// images/fonts already prevent it here, just without also forcing every
+	// single request all the way to the origin (a `no-store` response is
+	// never cacheable at all, so a CDN like Cloudflare bypasses its edge
+	// cache for it entirely).
+	const cacheControl = NO_STORE_PATHS.has(rel) ? 'no-store' : 'no-cache';
 	const e = { type, etag, identity, enc: {}, mtime, cacheControl };
 	staticCache.set(full, e);
 	return e;
@@ -135,7 +157,7 @@ async function serveStatic(req, pathname) {
 	if (!(await Bun.file(full).exists())) return null;
 	const ext = full.slice(full.lastIndexOf('.'));
 	const type = STATIC_TYPES[ext] || 'application/octet-stream';
-	return staticResponse(req, await staticEntry(full, type));
+	return staticResponse(req, await staticEntry(full, type, rel));
 }
 
 // ---- Expired-share sweeper -------------------------------------------------
