@@ -219,18 +219,37 @@ function warnIfUntrustedProxyPeer(req, peer) {
 
 const MAX_FORWARDED_ENTRIES = 20;
 
+// Security-audit finding (2026-07, "X-Forwarded-For overflow poisons rate
+// limiting/audit"): a sentinel distinct from `null` (a plain "too few
+// entries" shape, still safe to fall back to the socket peer for - see
+// below). Returned when a trusted peer's X-Forwarded-For cannot represent a
+// real proxy chain in this topology at all: absurdly long (far beyond any
+// plausible hop count - MAX_FORWARDED_ENTRIES is already generous), or the
+// candidate at the computed hop position isn't a parseable IP. Falling back
+// to the raw socket peer for either of THESE shapes would be actively unsafe
+// in a deployment where that peer is a single shared NAT/ingress address for
+// every real client (see clientIp()'s comment) - every such request would
+// silently collide onto one shared identity, handing an attacker a fresh,
+// unkeyed rate-limit budget and corrupting audit-log IP attribution for
+// unrelated real clients. clientIp() rejects the request outright instead.
+export const FORWARDED_FOR_INVALID = Symbol('forwarded-for-invalid');
+
 // Walk an X-Forwarded-For chain from the right, skipping exactly `hops`
 // trusted-proxy-appended entries, and return the next one - the address the
 // nearest trusted proxy reported as the client. Returns null (caller falls
-// back to the socket peer) when the header has too few entries for that many
-// hops, is implausibly long, or the resulting entry isn't a parseable IP -
-// rather than trying to fully parse an attacker-sized/malformed header.
+// back to the socket peer - a plausible topology/hop-count mismatch, not
+// necessarily attacker shaping) when the header has too few entries for that
+// many hops; returns FORWARDED_FOR_INVALID (caller must fail closed - see
+// above) when it is implausibly long or the resulting entry isn't a
+// parseable IP at all - neither of which a real proxy in this topology could
+// ever produce.
 function clientFromForwardedFor(header, hops) {
 	const parts = header.split(',').map(s => s.trim()).filter(Boolean);
-	if (parts.length === 0 || parts.length > MAX_FORWARDED_ENTRIES) return null;
+	if (parts.length === 0) return null;
+	if (parts.length > MAX_FORWARDED_ENTRIES) return FORWARDED_FOR_INVALID;
 	if (parts.length <= hops) return null;
 	const candidate = parts[parts.length - 1 - hops];
-	return parseIp(candidate) ? candidate : null;
+	return parseIp(candidate) ? candidate : FORWARDED_FOR_INVALID;
 }
 
 // Client IP used for rate-limit and audit keys. Client-supplied forwarding
@@ -238,14 +257,17 @@ function clientFromForwardedFor(header, hops) {
 // directly-exposed server, so they are only honored when the direct socket
 // peer is itself inside config.trustedProxyCidrs (i.e. the deployment really
 // sits behind a trusted reverse proxy at that address). Otherwise - or if the
-// header is missing/malformed - we always use the real socket peer, which a
-// client cannot spoof.
+// header is missing/a plausible-shape mismatch (too few entries) - we always
+// use the real socket peer, which a client cannot spoof. May also return
+// FORWARDED_FOR_INVALID (see clientFromForwardedFor above) - the caller
+// (server.js) must reject the request rather than treat that as an IP.
 export function clientIp(req, server) {
 	const socket = socketPeer(req, server);
 	if (isTrustedPeer(socket)) {
 		const fwd = req.headers.get('x-forwarded-for');
 		if (fwd) {
 			const client = clientFromForwardedFor(fwd, config.trustedProxyHops);
+			if (client === FORWARDED_FOR_INVALID) return FORWARDED_FOR_INVALID;
 			if (client) return client;
 		} else {
 			const real = req.headers.get('x-real-ip')?.trim();

@@ -11,7 +11,7 @@ import { Router, RouterError } from './router.js';
 import { registerRoutes } from './routes/index.js';
 import { assertRouteCoverage } from './lib/routePolicy.js';
 import { servePage } from './routes/pages.js';
-import { clientIp, error, noContent, SECURITY_HEADERS } from './lib/http.js';
+import { clientIp, error, noContent, SECURITY_HEADERS, FORWARDED_FOR_INVALID } from './lib/http.js';
 import { hasUploadAccess, isAdmin } from './lib/auth.js';
 import { deleteShareFiles } from './lib/storage.js';
 import { pickEncoding, compressBytes, isCompressibleType, compressResponse } from './lib/compress.js';
@@ -298,8 +298,23 @@ const server = Bun.serve({
 			} else {
 				const matched = router.match(method, url.pathname);
 				if (matched) {
-					const ctx = { req, url, params: matched.params, server, ip: clientIp(req, server), query: url.searchParams };
-					res = await matched.handler(ctx);
+					const ip = clientIp(req, server);
+					// Security-audit finding (2026-07, "X-Forwarded-For overflow poisons
+					// rate limiting/audit"): a trusted peer forwarded a header that
+					// cannot represent a real proxy chain in this topology (see
+					// lib/http.js's FORWARDED_FOR_INVALID comment) - falling back to the
+					// raw socket peer here would silently collide every such request
+					// onto one shared identity (in a single-shared-proxy/NAT topology,
+					// that peer is the SAME address for every real client), escaping
+					// per-client rate-limit buckets and corrupting audit-log IP
+					// attribution. Reject outright instead of routing the request.
+					if (ip === FORWARDED_FOR_INVALID) {
+						audit('proxy.forwarded_for_invalid', { detail: { path: url.pathname } });
+						res = error(400, 'Invalid X-Forwarded-For header');
+					} else {
+						const ctx = { req, url, params: matched.params, server, ip, query: url.searchParams };
+						res = await matched.handler(ctx);
+					}
 				} else if (method === 'GET' || method === 'HEAD') {
 					res = await serveStatic(req, url.pathname);
 					// Root-level custom slug (e.g. /my-files): serve the view page, which

@@ -232,7 +232,7 @@ describe('trusted-proxy client IP resolution', () => {
 		}
 	});
 
-	test('malformed or oversized X-Forwarded-For falls back safely to the socket peer, no crash', async () => {
+	test('too few entries for the configured hop count falls back safely to the socket peer, no crash', async () => {
 		const dir = freshDataDir('malformed-header');
 		const proc = await bootServer(dir, 3914, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '1' });
 		try {
@@ -241,24 +241,54 @@ describe('trusted-proxy client IP resolution', () => {
 
 			const baseline = await createShareAndReadCreatorIp(base, cookie);
 
-			// Not a parseable IP at the target position.
-			const garbage = await createShareAndReadCreatorIp(base, cookie, {
-				'X-Forwarded-For': 'not-an-ip, 127.0.0.1',
-			});
-			expect(garbage).toBe(baseline);
-
-			// Oversized: more than the 20-entry cap.
-			const oversized = Array.from({ length: 25 }, (_, i) => `10.0.0.${i}`).join(', ');
-			const tooLong = await createShareAndReadCreatorIp(base, cookie, {
-				'X-Forwarded-For': oversized,
-			});
-			expect(tooLong).toBe(baseline);
-
-			// Fewer entries than the configured hop count.
+			// A plausible topology/hop-count mismatch (not necessarily attacker
+			// shaping) - unchanged behavior, still falls back safely.
 			const tooFewEntries = await createShareAndReadCreatorIp(base, cookie, {
 				'X-Forwarded-For': '127.0.0.1',
 			});
 			expect(tooFewEntries).toBe(baseline);
+		} finally {
+			await stopServer(proc);
+			cleanupDir(dir);
+		}
+	});
+
+	// Security-audit finding (2026-07, "X-Forwarded-For overflow poisons rate
+	// limiting/audit"): a header shape that can NEVER represent a real proxy
+	// chain in this topology (implausibly long, or an unparseable candidate at
+	// the computed hop position) must not silently fall back to the shared
+	// socket-peer identity - see lib/http.js's FORWARDED_FOR_INVALID. The
+	// request is rejected outright (400) instead, and no share is created.
+	test('oversized or unparseable X-Forwarded-For is rejected (400), never falls back to the shared socket peer', async () => {
+		const dir = freshDataDir('invalid-xff');
+		const proc = await bootServer(dir, 3916, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '1' });
+		try {
+			const base = 'http://127.0.0.1:3916';
+
+			// Not a parseable IP at the target position.
+			const garbageRes = await fetch(`${base}/api/shares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': 'not-an-ip, 127.0.0.1' },
+				body: JSON.stringify({ e2e: false }),
+			});
+			expect(garbageRes.status).toBe(400);
+			await garbageRes.json();
+
+			// Oversized: more than the 20-entry cap.
+			const oversized = Array.from({ length: 25 }, (_, i) => `10.0.0.${i}`).join(', ');
+			const oversizedRes = await fetch(`${base}/api/shares`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': oversized },
+				body: JSON.stringify({ e2e: false }),
+			});
+			expect(oversizedRes.status).toBe(400);
+			await oversizedRes.json();
+
+			// Confirm no shares were created by either rejected request.
+			const cookie = await adminCookie(base);
+			const list = await fetch(`${base}/api/admin/shares`, { headers: { Cookie: cookie } });
+			const { total } = await list.json();
+			expect(total).toBe(0);
 		} finally {
 			await stopServer(proc);
 			cleanupDir(dir);
