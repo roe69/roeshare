@@ -255,12 +255,11 @@ async function loadStats() {
 
 async function loadInstance(block) {
 	try {
-		const [settings, health] = await Promise.all([
-			api.get('/api/admin/settings'),
-			fetch('/health', { cache: 'no-store' }).then(r => r.ok ? r.json() : null).catch(() => null),
-		]);
+		const settings = await api.get('/api/admin/settings');
 		const ro = settings.readOnly || {};
-		const up = health && Number.isFinite(health.uptime) ? formatUptime(health.uptime) : '-';
+		// Uptime comes from the authenticated settings endpoint, not the public
+		// /health probe - /health is a fixed no-body liveness check (see L-07).
+		const up = Number.isFinite(settings.uptime) ? formatUptime(settings.uptime) : '-';
 		const dataDir = ro.DATA_DIR || '-';
 		const line = el('p', { class: 'rl-dim', style: 'font-size:var(--rl-text-sm);margin:0' },
 			`Online - up ${up} - `,
@@ -1517,7 +1516,7 @@ function renderApiDocs() {
 					el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2)' },
 						paramList([
 							['X-Filename', 'header (or ?filename=) - required, the file name'],
-							['X-Upload-Password', 'header - optional share password (preferred over ?password=, which is deprecated)'],
+							['X-Upload-Password', 'header - optional share password (the only way to send it - a ?password= query param is rejected with 400)'],
 							['?title ?slug', 'optional share options (query params)'],
 							['?expiresIn ?maxDownloads ?oneTime ?mime', 'optional share options (query params)'],
 						]),
@@ -1821,7 +1820,7 @@ function uploadLinkControl() {
 	const host = el('div', { class: 'rl-stack', style: 'gap:var(--rl-space-2);margin-top:var(--rl-space-2)' }, el('span', { class: 'rl-spinner' }));
 	(async () => {
 		try {
-			const r = await api.get('/api/admin/upload-link');
+			const r = await api.post('/api/admin/upload-link');
 			if (r && r.enabled) {
 				const btn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', type: 'button' }, 'Copy quick-access link');
 				btn.addEventListener('click', () => copyText(r.url));

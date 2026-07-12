@@ -47,3 +47,61 @@ export function overloaded(retryAfter = 3) {
 		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': String(retryAfter), ...SECURITY_HEADERS },
 	});
 }
+
+// M-04: request-count limits (ratelimit.js) and concurrency slots (acquire()
+// above) do not bound bytes/second - a client can stay under both by sending
+// fewer, larger requests. This is a simple in-memory token bucket (byte-rate
+// resets on restart are low severity compared to the SQLite-persisted
+// credential/download-count buckets in ratelimit.js, so no persistence here -
+// see ratelimit.js's file header) keyed with the exact same `${name}\0${key}`
+// convention as acquire()/acquireAll() above, reusing whatever actor/resource
+// dimension the caller's neighboring acquire() call already uses for that
+// route.
+const byteBuckets = new Map(); // `${name}\0${key}` -> { tokens(bytes), last(ms) }
+const MAX_BYTE_BUCKETS = 20000; // same rationale as ratelimit.js's MAX_BUCKETS
+
+function reclaimByteBuckets() {
+	const over = byteBuckets.size - MAX_BYTE_BUCKETS;
+	let n = 0;
+	for (const k of byteBuckets.keys()) {
+		byteBuckets.delete(k);
+		if (++n >= over) break;
+	}
+}
+
+// Try to spend `cost` bytes of the named+keyed token bucket (capacity
+// `capacityBytes`, refilling at `refillBytesPerSec`). Returns null when
+// admitted, or a ready-to-return 429 Response (same shape as
+// ratelimit.enforce/enforceKey) when the actor currently has no budget left.
+//
+// A request costing more than the bucket can ever hold is still admitted
+// as long as SOME budget is available right now - it just spends the bucket
+// into debt (negative tokens), which throttles every subsequent request from
+// the same actor/resource until the debt is repaid by refill. This is what
+// makes a single very large download/upload still count fully against the
+// budget instead of either being rejected forever (if cost were capped to
+// capacity and never fit) or passing for free (if cost were capped and
+// admitted at zero marginal charge).
+export function takeBytes(name, key, cost, capacityBytes, refillBytesPerSec) {
+	const k = `${name}\0${key ?? 'global'}`;
+	const t = Date.now();
+	let b = byteBuckets.get(k);
+	if (!b) {
+		if (byteBuckets.size >= MAX_BYTE_BUCKETS) reclaimByteBuckets();
+		b = { tokens: capacityBytes, last: t };
+		byteBuckets.set(k, b);
+	} else {
+		const elapsedSec = Math.max(0, (t - b.last) / 1000);
+		b.tokens = Math.min(capacityBytes, b.tokens + elapsedSec * refillBytesPerSec);
+		b.last = t;
+	}
+	if (b.tokens <= 0) {
+		const retryAfter = Math.max(1, Math.ceil((-b.tokens + 1) / refillBytesPerSec));
+		return new Response(JSON.stringify({ error: 'Too many requests. Please slow down.', retryAfter }), {
+			status: 429,
+			headers: { 'Content-Type': 'application/json; charset=utf-8', 'Retry-After': String(retryAfter), ...SECURITY_HEADERS },
+		});
+	}
+	b.tokens -= cost;
+	return null;
+}

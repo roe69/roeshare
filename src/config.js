@@ -243,6 +243,16 @@ export const config = Object.freeze({
 	maxTotalSize: int('MAX_TOTAL_SIZE', 0),
 	chunkSize: int('CHUNK_SIZE', 8 * 1024 * 1024),
 
+	// M-04: per-actor byte-rate budgets (bytes/second) on top of the request-
+	// count and concurrency-slot controls above - see lib/semaphore.js's
+	// takeBytes(). Bucket capacity (the allowed burst) is a short multiple of
+	// the rate, not a separate knob, so a normal chunk/range request landing
+	// in the same second as the previous one is never throttled purely for
+	// that. 0 disables the byte-rate check entirely for that direction
+	// (request-count/concurrency limits still apply).
+	uploadBytesPerSec: int('UPLOAD_BYTES_PER_SEC', 50 * 1024 * 1024),
+	downloadBytesPerSec: int('DOWNLOAD_BYTES_PER_SEC', 50 * 1024 * 1024),
+
 	// Caps that bound per-share metadata growth and abusive inputs.
 	maxFilesPerShare: int('MAX_FILES_PER_SHARE', 10000),
 	maxPasswordLength: int('MAX_PASSWORD_LENGTH', 1024),

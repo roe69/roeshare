@@ -84,9 +84,11 @@ function cleanupDir(dir) {
 }
 
 async function adminCookie(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login is
+	// CSRF-checked (L-01: absent Origin/Sec-Fetch-Site now fails closed).
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	expect(res.status).toBe(200);
@@ -117,9 +119,9 @@ const LOOPBACK_CIDRS = '127.0.0.1/32,::1/128';
 describe('trusted-proxy client IP resolution', () => {
 	test('no trusted-proxy config: a forged X-Forwarded-For is ignored, socket peer is used', async () => {
 		const dir = freshDataDir('untrusted-default');
-		const proc = await bootServer(dir, 3610);
+		const proc = await bootServer(dir, 3910);
 		try {
-			const base = 'http://127.0.0.1:3610';
+			const base = 'http://127.0.0.1:3910';
 			const cookie = await adminCookie(base);
 
 			// Baseline: what the real socket peer resolves to with no forwarding
@@ -143,9 +145,9 @@ describe('trusted-proxy client IP resolution', () => {
 
 	test('trusted proxy (loopback) with a valid chain: the correct client is extracted', async () => {
 		const dir = freshDataDir('trusted-chain');
-		const proc = await bootServer(dir, 3611, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '1' });
+		const proc = await bootServer(dir, 3911, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '1' });
 		try {
-			const base = 'http://127.0.0.1:3611';
+			const base = 'http://127.0.0.1:3911';
 			const cookie = await adminCookie(base);
 
 			// Chain of 2: "<real client>, <this trusted proxy's own address>". With
@@ -162,9 +164,9 @@ describe('trusted-proxy client IP resolution', () => {
 
 	test('TRUST_PROXY=1 back-compat alias behaves like loopback-only trust', async () => {
 		const dir = freshDataDir('legacy-alias');
-		const proc = await bootServer(dir, 3612, { TRUST_PROXY: '1', TRUSTED_PROXY_CIDRS: '' });
+		const proc = await bootServer(dir, 3912, { TRUST_PROXY: '1', TRUSTED_PROXY_CIDRS: '' });
 		try {
-			const base = 'http://127.0.0.1:3612';
+			const base = 'http://127.0.0.1:3912';
 			const cookie = await adminCookie(base);
 
 			const ip = await createShareAndReadCreatorIp(base, cookie, {
@@ -182,9 +184,9 @@ describe('trusted-proxy client IP resolution', () => {
 		// A CIDR that does NOT cover the loopback address the test harness always
 		// connects from - so every request in this test arrives from an untrusted
 		// peer no matter what it claims via headers.
-		const proc = await bootServer(dir, 3613, { TRUSTED_PROXY_CIDRS: '10.99.99.0/24', TRUSTED_PROXY_HOPS: '1' });
+		const proc = await bootServer(dir, 3913, { TRUSTED_PROXY_CIDRS: '10.99.99.0/24', TRUSTED_PROXY_HOPS: '1' });
 		try {
-			const base = 'http://127.0.0.1:3613';
+			const base = 'http://127.0.0.1:3913';
 			const cookie = await adminCookie(base);
 
 			const baseline = await createShareAndReadCreatorIp(base, cookie);
@@ -202,9 +204,9 @@ describe('trusted-proxy client IP resolution', () => {
 
 	test('hops=0: a single trusted edge (e.g. a CDN with no local reverse proxy) is trusted directly, not skipped', async () => {
 		const dir = freshDataDir('hops-zero');
-		const proc = await bootServer(dir, 3615, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '0' });
+		const proc = await bootServer(dir, 3915, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '0' });
 		try {
-			const base = 'http://127.0.0.1:3615';
+			const base = 'http://127.0.0.1:3915';
 			const cookie = await adminCookie(base);
 
 			// Only ONE entry: the trusted edge set X-Forwarded-For to the real client
@@ -232,9 +234,9 @@ describe('trusted-proxy client IP resolution', () => {
 
 	test('malformed or oversized X-Forwarded-For falls back safely to the socket peer, no crash', async () => {
 		const dir = freshDataDir('malformed-header');
-		const proc = await bootServer(dir, 3614, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '1' });
+		const proc = await bootServer(dir, 3914, { TRUSTED_PROXY_CIDRS: LOOPBACK_CIDRS, TRUSTED_PROXY_HOPS: '1' });
 		try {
-			const base = 'http://127.0.0.1:3614';
+			const base = 'http://127.0.0.1:3914';
 			const cookie = await adminCookie(base);
 
 			const baseline = await createShareAndReadCreatorIp(base, cookie);

@@ -10,6 +10,7 @@
 // and drives it purely over HTTP - no mocking of the DB or rate limiter.
 
 import { test, expect, describe } from 'bun:test';
+import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -78,9 +79,12 @@ function cleanupDir(dir) {
 }
 
 async function wrongPasswordLogin(base) {
+	// Origin: base so this reaches enforce()/the password check (L-01's CSRF
+	// gate runs first in the handler) rather than being rejected as CSRF itself
+	// - the rate-limit counter this test exercises must actually increment.
 	return fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: 'definitely-not-the-password' }),
 	});
 }
@@ -136,7 +140,7 @@ describe('rate limiter SQLite persistence (F-08)', () => {
 			// A correct login forgives the counter (admin.js calls reset()).
 			const good = await fetch(`${base}/api/admin/login`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
+				headers: { 'Content-Type': 'application/json', Origin: base },
 				body: JSON.stringify({ password: 'RateLimitPersist-Pw-2026' }),
 			});
 			expect(good.status).toBe(200);
@@ -176,6 +180,114 @@ describe('rate limiter SQLite persistence (F-08)', () => {
 			expect(elapsed).toBeLessThan(3000); // generous smoke-test ceiling, not a benchmark
 		} finally {
 			await stopServer(proc);
+			cleanupDir(dir);
+		}
+	});
+});
+
+// Regression tests for M-03 GAP 2: enforce('dl:' + shareId, ...) was called
+// unconditionally at the top of both preview and download - a synchronous
+// SQLite UPSERT on EVERY request against EVERY share, not just a password-
+// protected or max_downloads-limited one. Fixed by picking between the
+// persisted 'dl:' bucket and a plain in-memory-only 'dlv:' bucket based on
+// whether the target share is actually protected (routes/download.js's
+// isRateLimitProtected()) - see ratelimit.js's PERSIST_PREFIXES comment.
+//
+// Stops the server (so the SQLite WAL is checkpointed/closed) and opens the
+// data dir's db file directly to check for a persisted 'dl:<shareId>:' row,
+// rather than relying on the restart-survival behavior already covered above.
+describe('M-03 GAP 2: dl: persistence is scoped to genuinely protected shares only', () => {
+	function countPersistedKeysLike(dbPath, likePattern) {
+		const db = new Database(dbPath, { readonly: true });
+		try {
+			return db.query('SELECT COUNT(*) AS c FROM rate_limits WHERE key LIKE ?').get(likePattern).c;
+		} finally {
+			db.close();
+		}
+	}
+
+	async function createShare(base, body) {
+		const res = await fetch(`${base}/api/shares`, {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ e2e: false, ...body }),
+		});
+		expect(res.status).toBe(201);
+		return res.json(); // { id, editToken }
+	}
+
+	test('an unprotected share\'s preview/download requests never persist a dl: row (stay in-memory only)', async () => {
+		const dir = freshDataDir('ratelimit-scope-plain');
+		let proc = await bootServer(dir, 3944);
+		try {
+			const base = 'http://127.0.0.1:3944';
+			const { id } = await createShare(base, {});
+
+			// No password, no maxDownloads: enforce() runs unconditionally before
+			// the file lookup, so the persisted-vs-volatile decision is already
+			// made by the time these come back 404 (file id does not exist).
+			const preview = await fetch(`${base}/api/shares/${id}/files/nonexistent/preview`);
+			expect(preview.status).toBe(404);
+			const download = await fetch(`${base}/api/shares/${id}/files/nonexistent/download`);
+			expect(download.status).toBe(404);
+
+			await stopServer(proc);
+			proc = null;
+
+			expect(countPersistedKeysLike(join(dir, 'roeshare.db'), `dl:${id}:%`)).toBe(0);
+		} finally {
+			if (proc) await stopServer(proc);
+			cleanupDir(dir);
+		}
+	});
+
+	test('a password-protected share\'s preview/download requests DO use the persisted dl: bucket', async () => {
+		const dir = freshDataDir('ratelimit-scope-pw');
+		let proc = await bootServer(dir, 3945);
+		try {
+			const base = 'http://127.0.0.1:3945';
+			const { id } = await createShare(base, { password: 'zip-gap2-pw' });
+
+			// No access token supplied - accessCheck rejects with 403, but that
+			// happens AFTER enforce(), so the persisted write has already landed.
+			const preview = await fetch(`${base}/api/shares/${id}/files/nonexistent/preview`);
+			expect(preview.status).toBe(403);
+			const download = await fetch(`${base}/api/shares/${id}/files/nonexistent/download`);
+			expect(download.status).toBe(403);
+
+			await stopServer(proc);
+			proc = null;
+
+			expect(countPersistedKeysLike(join(dir, 'roeshare.db'), `dl:${id}:%`)).toBeGreaterThan(0);
+		} finally {
+			if (proc) await stopServer(proc);
+			cleanupDir(dir);
+		}
+	});
+
+	test('a max-downloads-limited share\'s preview/download requests DO use the persisted dl: bucket', async () => {
+		const dir = freshDataDir('ratelimit-scope-maxdl');
+		let proc = await bootServer(dir, 3946);
+		try {
+			const base = 'http://127.0.0.1:3946';
+			const { id } = await createShare(base, { maxDownloads: 1 });
+
+			// No password, so accessCheck passes. Preview then hits the
+			// controlled-share guard (max_downloads-limited shares refuse preview
+			// entirely for a non-owner) before ever reaching the file lookup, while
+			// download has no such guard and 404s at the file lookup instead - both
+			// happen AFTER enforce(), so either way the persisted write has landed.
+			const preview = await fetch(`${base}/api/shares/${id}/files/nonexistent/preview`);
+			expect(preview.status).toBe(403);
+			const download = await fetch(`${base}/api/shares/${id}/files/nonexistent/download`);
+			expect(download.status).toBe(404);
+
+			await stopServer(proc);
+			proc = null;
+
+			expect(countPersistedKeysLike(join(dir, 'roeshare.db'), `dl:${id}:%`)).toBeGreaterThan(0);
+		} finally {
+			if (proc) await stopServer(proc);
 			cleanupDir(dir);
 		}
 	});

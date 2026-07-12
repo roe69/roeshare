@@ -85,9 +85,11 @@ function cleanupDir(dir) {
 }
 
 async function adminCookie(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login is
+	// CSRF-checked (L-01: absent Origin/Sec-Fetch-Site now fails closed).
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	expect(res.status).toBe(200);
@@ -106,7 +108,7 @@ describe('API key revocation reaches the upload-status endpoint', () => {
 
 				const keyRes = await fetch(`${base}/api/admin/api-keys`, {
 					method: 'POST',
-					headers: { 'Content-Type': 'application/json', Cookie: cookie },
+					headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 					body: JSON.stringify({ name: 'status-revoke-test-key' }),
 				});
 				expect(keyRes.status).toBe(201);
@@ -138,7 +140,7 @@ describe('API key revocation reaches the upload-status endpoint', () => {
 
 				const revokeRes = await fetch(`${base}/api/admin/api-keys/${key.id}/revoke`, {
 					method: 'POST',
-					headers: { Cookie: cookie },
+					headers: { Cookie: cookie, Origin: base },
 				});
 				expect(revokeRes.status).toBe(200);
 
@@ -171,9 +173,9 @@ describe('admin slug rename enforces case-insensitive uniqueness', () => {
 	test('renaming to a slug that case-insensitively collides with a different live share is refused', async () => {
 		const dir = freshDataDir('rename-collide');
 		try {
-			const proc = await bootServer(dir, 3599);
+			const proc = await bootServer(dir, 3920);
 			try {
-				const base = 'http://127.0.0.1:3599';
+				const base = 'http://127.0.0.1:3920';
 				const cookie = await adminCookie(base);
 
 				const shareA = await fetch(`${base}/api/shares`, {
@@ -192,7 +194,7 @@ describe('admin slug rename enforces case-insensitive uniqueness', () => {
 				// must be refused - not silently create a colliding directory.
 				const renameRes = await fetch(`${base}/api/admin/shares/${shareA.id}`, {
 					method: 'PATCH',
-					headers: { 'Content-Type': 'application/json', Cookie: cookie },
+					headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 					body: JSON.stringify({ slug: 'MyDocs' }),
 				});
 				expect(renameRes.status).toBe(409);
@@ -227,7 +229,7 @@ describe('admin slug rename enforces case-insensitive uniqueness', () => {
 				// itself.
 				const renameRes = await fetch(`${base}/api/admin/shares/${share.id}`, {
 					method: 'PATCH',
-					headers: { 'Content-Type': 'application/json', Cookie: cookie },
+					headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 					body: JSON.stringify({ slug: 'SelfRename' }),
 				});
 				expect(renameRes.status).toBe(200);

@@ -1,13 +1,17 @@
-// F-10: cookie-authenticated privileged mutations lack explicit CSRF defense.
+// F-10/L-01: cookie-authenticated privileged mutations lack explicit CSRF defense.
 //
 // Every ambient cookie in this app (roeshare_admin, roeshare_apikey,
 // roeshare_upload) is already SameSite=Lax + HttpOnly, which blocks cookie
 // attachment on cross-site non-GET requests in all evergreen browsers. The fix
 // (requireSameOrigin() in lib/http.js) is defense-in-depth on top of that: it
 // rejects a non-GET mutation carrying proof of a cross-site origin (Origin or
-// Sec-Fetch-Site), while a request with NEITHER header (a non-browser client -
-// curl, a backup script, server-to-server) is let through, since it carries no
-// ambient cookie an attacker's page could have ridden along.
+// Sec-Fetch-Site). A request carrying NEITHER header is *also* rejected
+// (fail closed, L-01): a real browser fetch/XHR/form submission always sends
+// at least one of them, so the absence of both is treated as forged/spoofed
+// rather than a trusted signal. Non-cookie clients (X-Edit-Token, X-API-Key,
+// Authorization bearer) never reach requireSameOrigin() at all - each call
+// site only invokes it on the ambient-cookie branch - so they are unaffected
+// by any of this regardless of which headers they send.
 //
 // Covers all three surfaces from the audit:
 //   - src/routes/admin.js: every non-GET route, gated on the isAdmin() cookie.
@@ -90,16 +94,19 @@ function cleanupDir(dir) {
 }
 
 // Plain fetch() (as used by every existing test in this repo) never sends
-// Origin or Sec-Fetch-Site itself, so it always exercises the "non-browser
-// client" pass-through path unless we add the headers explicitly below - that
-// is what makes it a faithful stand-in for a real cross-origin browser
-// request (which always carries at least one of them) vs. a legitimate
-// same-origin one (which we simulate with a matching Origin/Sec-Fetch-Site).
+// Origin or Sec-Fetch-Site itself. For cookie-authenticated mutations that
+// now means fail-closed rejection (L-01) unless we add a header explicitly -
+// that is what makes adding a matching Origin/Sec-Fetch-Site a faithful
+// stand-in for a legitimate same-origin browser request, and adding a
+// mismatched one a faithful stand-in for a cross-origin attack.
 
 async function adminCookie(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login
+	// itself is CSRF-checked (see the login-CSRF test below), so a helper used
+	// by every other test in this file needs to pass that gate too.
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	expect(res.status).toBe(200);
@@ -179,8 +186,8 @@ describe('F-10 CSRF: admin.js (ambient roeshare_admin cookie)', () => {
 		}
 	});
 
-	test('a non-browser admin client (no Origin, no Sec-Fetch-Site) is unaffected', async () => {
-		const dir = freshDataDir('csrf-admin-nonbrowser');
+	test('L-01: a cookie-authenticated request with neither Origin nor Sec-Fetch-Site is rejected (fail closed)', async () => {
+		const dir = freshDataDir('csrf-admin-noheaders');
 		const proc = await bootServer(dir, 3752);
 		try {
 			const base = 'http://127.0.0.1:3752';
@@ -191,7 +198,13 @@ describe('F-10 CSRF: admin.js (ambient roeshare_admin cookie)', () => {
 				method: 'DELETE',
 				headers: { Cookie: cookie },
 			});
-			expect(res.status).toBe(200);
+			expect(res.status).toBe(403);
+			const body = await res.json();
+			expect(body.error).toMatch(/cross-origin/i);
+
+			// The share must still exist - the delete never happened.
+			const check = await fetch(`${base}/api/admin/shares/${id}`, { headers: { Cookie: cookie } });
+			expect(check.status).toBe(200);
 		} finally {
 			await stopServer(proc);
 			cleanupDir(dir);
@@ -221,7 +234,7 @@ describe('F-10 CSRF: api.js DELETE /api/v1/shares/:id (cookie path only)', () =>
 	async function makeKeyAndSession(base, adminCk) {
 		const keyRes = await fetch(`${base}/api/admin/api-keys`, {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json', Cookie: adminCk },
+			headers: { 'Content-Type': 'application/json', Cookie: adminCk, Origin: base },
 			body: JSON.stringify({ name: 'csrf-test-key' }),
 		});
 		expect(keyRes.status).toBe(201);
@@ -229,7 +242,7 @@ describe('F-10 CSRF: api.js DELETE /api/v1/shares/:id (cookie path only)', () =>
 
 		const loginRes = await fetch(`${base}/api/v1/login`, {
 			method: 'POST',
-			headers: { 'Content-Type': 'application/json' },
+			headers: { 'Content-Type': 'application/json', Origin: base },
 			body: JSON.stringify({ token: key.token, name: key.name }),
 		});
 		expect(loginRes.status).toBe(200);

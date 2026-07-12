@@ -5,7 +5,7 @@
 //
 // No build step: plain ES module, imported by each page's script.
 
-import { el, $$ } from '/js/shared.js';
+import { el, $$, readOwnedShares } from '/js/shared.js';
 
 // ---- Icon registry ---------------------------------------------------------
 // Inline SVG line icons, one family (24x24, currentColor stroke). Sized to 18px
@@ -59,19 +59,12 @@ export const ADMIN_GROUPS = [
 	] },
 ];
 
-// Shares this browser owns are tracked by the edit tokens saved at upload time
-// (same prefix as myshares.js). The "My shares" nav item is only shown when at
-// least one exists, so a fresh visitor is not pointed at an empty page.
-const EDIT_PREFIX = 'roeshare:edit:';
+// Shares this browser owns are tracked by the owned-ids list (see shared.js's
+// readOwnedShares - same list myshares.js reads). The "My shares" nav item is
+// only shown when at least one exists, so a fresh visitor is not pointed at
+// an empty page.
 function hasOwnedShares() {
-	try {
-		for (let i = 0; i < localStorage.length; i++) {
-			if (localStorage.key(i)?.startsWith(EDIT_PREFIX)) return true;
-		}
-	} catch {
-		/* localStorage unavailable: treat as none */
-	}
-	return false;
+	return readOwnedShares().length > 0;
 }
 
 // Brand HTML (colour spans rendered from APP_NAME's <col=> tags, server-side) is

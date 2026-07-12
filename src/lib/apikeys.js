@@ -16,7 +16,7 @@ import { config } from '../config.js';
 import { db, now } from '../db.js';
 import { randomId } from './ids.js';
 import { signToken, verifyToken, credentialTag, safeEqual } from './crypto.js';
-import { parseCookies, error } from './http.js';
+import { readSessionCookie, error } from './http.js';
 
 const KEY_PREFIX = 'rsk';
 // Cookie holding a signed API-key web session, set after a name + token login so
@@ -46,18 +46,28 @@ function sha256(s) {
 }
 
 // The ten limit/scope column values, in the order both insert and update expect.
+//
+// M-07: this is the INTERNAL library default, one layer below sanitizeLimits -
+// it is deliberately deny-by-default (0) for every allow/scope field so that any
+// caller which forgets (or is never updated) to pass one explicitly mints a
+// no-permission key rather than a silently-full-access one. The admin-facing
+// "omitted means allowed" behavior lives ONLY in sanitizeLimits(), which always
+// hands this function fully-explicit 0/1 values - never relies on these
+// defaults - so the admin UI's create/update flow is unaffected. This does NOT
+// retroactively touch any key already stored; it only changes what a future
+// insert/update does when a field is left out.
 function limitColumns(limits = {}) {
 	return [
 		limits.max_file_size ?? null,
 		limits.max_share_size ?? null,
 		limits.max_shares ?? null,
 		limits.max_expiry ?? null,
-		limits.allow_slug ?? 1,
-		limits.allow_password ?? 1,
-		limits.scope_create ?? 1,
-		limits.scope_write ?? 1,
-		limits.scope_read ?? 1,
-		limits.scope_delete ?? 1,
+		limits.allow_slug ?? 0,
+		limits.allow_password ?? 0,
+		limits.scope_create ?? 0,
+		limits.scope_write ?? 0,
+		limits.scope_read ?? 0,
+		limits.scope_delete ?? 0,
 	];
 }
 
@@ -207,7 +217,7 @@ export function issueApiKeySession(key) {
 }
 
 export function readApiKeySession(req) {
-	const token = parseCookies(req)[APIKEY_COOKIE];
+	const token = readSessionCookie(req, APIKEY_COOKIE);
 	if (!token) return null;
 	const p = verifyToken(token);
 	if (!p || p.scope !== 'apikey' || !p.kid) return null;

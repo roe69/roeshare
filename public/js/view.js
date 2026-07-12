@@ -3,7 +3,7 @@
 
 import {
 	el, $, api, ApiError, toastErr, openModal, copyText,
-	formatBytes, timeUntil, fileGlyph, previewKind,
+	formatBytes, timeUntil, fileGlyph, previewKind, migrateLegacyOwnerTokens,
 } from './shared.js';
 import { importKey, decryptFile, decryptString } from './e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
@@ -20,10 +20,14 @@ const e2eKeyB64 = location.hash ? decodeURIComponent(location.hash.slice(1)) : '
 // Share id comes from the path /s/:id.
 const shareId = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
 
-// Access token (only set when a password share is unlocked). Kept in memory.
+// Access token: set once the share metadata loads, either because a visitor
+// unlocked a password-protected share, or - M-05 - because the server
+// recognized us as the owner via the ambient owner-session cookie (see
+// load() below; GET /api/shares/:id hands owners a fresh accessToken
+// regardless of password, so this alone drives every owner-only UI/URL below
+// once loaded - there is no separate editToken read from localStorage
+// anymore).
 let accessToken = null;
-// Edit token (owner) persisted by the upload page.
-const editToken = localStorage.getItem('roeshare:edit:' + shareId);
 
 // Append ?access= to URLs that auth via query (media element src, links).
 function withAccess(path) {
@@ -88,7 +92,11 @@ async function ensureE2eStream(file, count) {
 		if (!controller) return null;
 
 		const token = crypto.randomUUID();
-		const authHeaders = editToken ? { 'X-Edit-Token': editToken } : accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
+		// M-05: no X-Edit-Token here - the Service Worker's own fetch() to the
+		// real server is a normal same-origin request and so already carries the
+		// owner-session cookie automatically; an owner also always holds an
+		// accessToken (see load()) as a fallback/for password-protected shares.
+		const authHeaders = accessToken ? { Authorization: `Bearer ${accessToken}` } : {};
 		const ready = new Promise((resolve, reject) => {
 			const onMessage = e => {
 				const m = e.data;
@@ -249,7 +257,14 @@ function buildPreview(file, host) {
 	} else if (kind === 'audio') {
 		host.append(el('div', { class: 'rl-preview' }, el('audio', { src: previewUrl, controls: true, preload: 'metadata' })));
 	} else if (kind === 'pdf') {
-		host.append(el('div', { class: 'rl-preview' }, el('iframe', { src: previewUrl, title: file.name })));
+		// L-04: an empty sandbox lets the browser's built-in PDF viewer still
+		// render the framed document (that's native rendering, not script in the
+		// frame) while denying it script execution, form submission, popups, and
+		// top-level navigation - defense in depth against a MIME-confused or
+		// parser-exploited upload framed on our own origin.
+		const frame = el('iframe', { src: previewUrl, title: file.name });
+		frame.setAttribute('sandbox', '');
+		host.append(el('div', { class: 'rl-preview' }, frame));
 	} else if (kind === 'text') {
 		const pre = el('pre', { class: 'rl-preview-text' }, 'Loading...');
 		host.append(pre);
@@ -378,7 +393,11 @@ async function e2ePreview(file, host) {
 		if (kind === 'image') node = el('img', { src: url, alt: file.name, loading: 'lazy' });
 		else if (kind === 'video') node = el('video', { src: url, controls: true });
 		else if (kind === 'audio') node = el('audio', { src: url, controls: true });
-		else if (kind === 'pdf') node = el('iframe', { src: url, title: file.name });
+		else if (kind === 'pdf') {
+			// L-04: same empty-sandbox hardening as the non-E2E PDF preview above.
+			node = el('iframe', { src: url, title: file.name });
+			node.setAttribute('sandbox', '');
+		}
 		else node = el('p', { class: 'rl-dim' }, 'No preview for this type.');
 		host.replaceChildren(el('div', { class: 'rl-preview' }, node));
 		return node;
@@ -496,7 +515,11 @@ function ownerDeleteButton() {
 				{
 					label: 'Delete', variant: 'danger', onClick: async () => {
 						try {
-							await api.del(`/api/shares/${encodeURIComponent(shareId)}`, { headers: { 'X-Edit-Token': editToken } });
+							// M-05: no X-Edit-Token header - ownership is proven by the
+							// ambient owner-session cookie; this is a same-origin fetch
+							// from our own page, so the server's requireSameOrigin()
+							// check on the cookie path passes automatically.
+							await api.del(`/api/shares/${encodeURIComponent(shareId)}`);
 							location.href = '/';
 						} catch (err) {
 							toastErr(err);
@@ -547,10 +570,11 @@ function renderShare(share) {
 	const files = share.files || [];
 	const count = files.length;
 	// The server rejects non-owner preview requests on any controlled share (a
-	// one-time share, or one with a download cap). Owners (editToken) may always
-	// preview; hide the Preview toggle otherwise so we never show a control that
-	// would just 403.
-	const canPreview = !!editToken || !share.oneTime;
+	// one-time share, or one with a download cap). Owners may always preview
+	// (share.owner, resolved server-side from either the X-Edit-Token header
+	// or - M-05 - the owner-session cookie); hide the Preview toggle otherwise
+	// so we never show a control that would just 403.
+	const canPreview = share.owner || !share.oneTime;
 	const totalSize = share.totalSize != null ? share.totalSize : files.reduce((s, f) => s + (f.size || 0), 0);
 
 	const downloads = share.maxDownloads
@@ -565,7 +589,7 @@ function renderShare(share) {
 	// Top-right badges: encryption + ownership.
 	const badges = el('div', { class: 'rl-row rl-row-wrap', style: 'gap:var(--rl-space-2)' },
 		share.e2e ? el('span', { class: 'rl-badge rl-badge-gold' }, 'End-to-end encrypted') : null,
-		editToken ? el('span', { class: 'rl-badge rl-badge-success' }, 'You own this share') : null,
+		share.owner ? el('span', { class: 'rl-badge rl-badge-success' }, 'You own this share') : null,
 	);
 
 	const views = share.viewCount || 0;
@@ -584,8 +608,8 @@ function renderShare(share) {
 		count > 1 && !share.e2e
 			? el('a', { class: 'rl-btn rl-btn-accent rl-btn-sm', href: withAccess(`/api/shares/${encodeURIComponent(shareId)}/download-all`) }, 'Download all (zip)')
 			: null,
-		editToken ? el('span', { class: 'rl-spacer' }) : null,
-		editToken ? ownerDeleteButton() : null,
+		share.owner ? el('span', { class: 'rl-spacer' }) : null,
+		share.owner ? ownerDeleteButton() : null,
 	);
 
 	const summary = el('section', { class: 'rl-card' },
@@ -621,13 +645,12 @@ function renderShare(share) {
 
 async function load() {
 	try {
-		// Send both tokens: a valid edit token identifies the owner (so an owner of
-		// a protected share is not forced through the password gate), and the
-		// access token unlocks a password share for a visitor.
-		const headers = {};
-		if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
-		if (editToken) headers['X-Edit-Token'] = editToken;
-		const opts = Object.keys(headers).length ? { headers } : undefined;
+		// M-05: no X-Edit-Token header - ownership is now resolved server-side
+		// from the ambient owner-session cookie (sent automatically on this
+		// same-origin fetch), not a token read out of localStorage. The access
+		// token, once known (a visitor who just unlocked a password share),
+		// still needs to be sent explicitly since it is only ever held in memory.
+		const opts = accessToken ? { headers: { Authorization: `Bearer ${accessToken}` } } : undefined;
 		const share = await api.get(`/api/shares/${encodeURIComponent(shareId)}`, opts);
 		// Owners receive a read access token so element-src previews and download
 		// links work without unlocking.
@@ -671,5 +694,8 @@ async function load() {
 	}
 }
 
+// One-release migration (M-05): exchange any legacy `roeshare:edit:<id>` raw
+// token for the new owner-session cookie before the metadata fetch below, so
+// an owner who used this browser before the change is still recognized as one.
 if (!shareId) renderMissing();
-else load();
+else migrateLegacyOwnerTokens().then(load);

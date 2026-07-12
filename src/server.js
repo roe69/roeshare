@@ -7,15 +7,17 @@ import { statSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { config } from './config.js';
 import { db, now } from './db.js';
-import { Router } from './router.js';
+import { Router, RouterError } from './router.js';
 import { registerRoutes } from './routes/index.js';
+import { assertRouteCoverage } from './lib/routePolicy.js';
 import { servePage } from './routes/pages.js';
-import { clientIp, error, json, SECURITY_HEADERS } from './lib/http.js';
+import { clientIp, error, noContent, SECURITY_HEADERS } from './lib/http.js';
 import { hasUploadAccess, isAdmin } from './lib/auth.js';
 import { deleteShareFiles } from './lib/storage.js';
 import { pickEncoding, compressBytes, isCompressibleType, compressResponse } from './lib/compress.js';
 import * as quota from './lib/quota.js';
 import { reconcileShareRenames } from './lib/renames.js';
+import { reconcileMigrations, startMigrationSweep } from './lib/migrate.js';
 import { audit, AUDIT_RETENTION_SECONDS } from './lib/audit.js';
 
 // Authoritative recompute of the storage quota ledger (see lib/quota.js) -
@@ -32,10 +34,22 @@ quota.reconcile();
 // starts accepting requests, so no request can race a half-finished rename.
 await reconcileShareRenames();
 
+// M-06: roll forward any v1->v2 at-rest migration left mid-flight by a crash
+// (see lib/migrate.js's module comment for the state table) - also run once,
+// before the server accepts any request, so a request can never race a
+// half-finished migration swap.
+await reconcileMigrations();
+
 const PUBLIC_DIR = join(import.meta.dir, '..', 'public');
 
 const router = new Router();
 registerRoutes(router);
+// M-02: fail-closed route-policy coverage. Every in-scope registered route
+// must carry a declareRoutePolicy(...) declaration (and every declaration
+// must match a real route) - a gap throws here, before Bun.serve() binds a
+// port, so the server refuses to start rather than silently serving an
+// undeclared route.
+assertRouteCoverage(router.routes);
 
 // ---- Static assets ---------------------------------------------------------
 
@@ -200,7 +214,10 @@ const server = Bun.serve({
 			}
 			let res = null;
 			if (url.pathname === '/health') {
-				res = json({ ok: true, uptime: Math.floor(process.uptime()) });
+				// Public liveness probe only: fixed, cheap, no auth. Deliberately
+				// discloses nothing (no uptime/version/DB state) - see audit L-07.
+				// Handled before routing/rate-limiting so it stays near-zero cost.
+				res = noContent();
 			} else {
 				const matched = router.match(method, url.pathname);
 				if (matched) {
@@ -219,6 +236,11 @@ const server = Bun.serve({
 			// Compress text-like responses (brotli/gzip); file streams are skipped.
 			return await compressResponse(req, res);
 		} catch (e) {
+			// A malformed path segment (bad percent-encoding, or one decoding to a
+			// smuggled "/", "\" or NUL) is a client error, not a server fault - and
+			// must not fall through to serveStatic()/the custom-slug page above,
+			// which is why router.match() throws instead of returning null for it.
+			if (e instanceof RouterError) return error(e.status, e.message);
 			console.error(`${method} ${url.pathname} ->`, e);
 			return error(500, 'Internal server error');
 		}
@@ -228,6 +250,11 @@ const server = Bun.serve({
 // Periodic sweep (plus one on boot).
 sweep();
 setInterval(sweep, Math.max(60, config.sweepInterval) * 1000);
+
+// M-06: secondary v1->v2 at-rest migration trigger (plus one on boot), so a
+// file nobody ever reads again still converges to v2 without any admin
+// action - the primary trigger is lazy, on next read (see routes/download.js).
+startMigrationSweep();
 
 console.log(`\n  RoeShare running at ${config.baseUrls.join(', ')}`);
 console.log(`  Listening on http://${config.host}:${server.port}`);

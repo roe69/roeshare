@@ -7,8 +7,9 @@
 import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error } from '../lib/http.js';
+import { json, error, readJson, requireSameOrigin, METADATA_BODY_MAX } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
+import { hasOwnerCookie } from '../lib/auth.js';
 import { writeChunk, blobRangeStream, fileEnc } from '../lib/storage.js';
 import { newFileId } from '../lib/ids.js';
 import { newFileSalt } from '../lib/filecrypt.js';
@@ -17,7 +18,8 @@ import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { recordKeyUsage, apiKeyRow, effectiveCaps, keyValidForShare, scopeErrorForShare } from '../lib/apikeys.js';
 import { enforceKey } from '../lib/ratelimit.js';
 import { reserveInTx, commitInTx, touchInTx } from '../lib/quota.js';
-import { acquireAll, overloaded } from '../lib/semaphore.js';
+import { acquireAll, overloaded, takeBytes } from '../lib/semaphore.js';
+import { declareRoutePolicy } from '../lib/routePolicy.js';
 
 const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
@@ -40,8 +42,13 @@ function sanitizeName(name) {
 	return parts.join('/').slice(0, 1024) || 'file';
 }
 
-// Resolve the share and verify the edit token. Returns the share row, or a
+// Resolve the share and verify ownership (X-Edit-Token header, or - M-05 - the
+// per-share owner cookie). Returns { share, via: 'header'|'cookie' }, or a
 // Response to short-circuit on failure (404 missing/deleted, 403 bad token).
+// `via` lets the two write routes below require same-origin proof only for the
+// ambient-cookie path, exactly like every other owner-gated route in this app
+// (see shares.js's ownerVia + the F-10 convention) - the header path carries
+// no ambient credential and needs none.
 function authShare(req, id) {
 	const share = getShare.get(id);
 	// Reject missing, soft-deleted, and expired shares (mirrors the read-path
@@ -52,8 +59,9 @@ function authShare(req, id) {
 	// still in progress.
 	if (!share || (share.finalized && share.expires_at !== null && share.expires_at < now())) return { res: error(404, 'Share not found') };
 	const token = req.headers.get('x-edit-token');
-	if (!token || !verifySecretToken(token, share.edit_token)) return { res: error(403, 'Forbidden') };
-	return { share };
+	if (token && verifySecretToken(token, share.edit_token)) return { share, via: 'header' };
+	if (hasOwnerCookie(req, share)) return { share, via: 'cookie' };
+	return { res: error(403, 'Forbidden') };
 }
 
 // A finalized share is checked at the top of both write routes (registration and
@@ -96,9 +104,14 @@ function withFileLock(fileId, fn) {
 
 export default function uploads(router) {
 	// Register a file against a share before streaming its bytes.
+	declareRoutePolicy('POST', '/api/shares/:id/files', { auth: 'editTokenOrKey', csrf: true, rateLimit: 'file-reg', audit: null });
 	router.post('/api/shares/:id/files', async ({ req, params }) => {
-		const { share, res } = authShare(req, params.id);
+		const { share, res, via } = authShare(req, params.id);
 		if (res) return res;
+		if (via === 'cookie') {
+			const csrf = requireSameOrigin(req);
+			if (csrf) return csrf;
+		}
 		const finalizedErr = checkFinalized(share);
 		if (finalizedErr) return finalizedErr;
 		const keyErr = checkKeyValid(share);
@@ -113,12 +126,9 @@ export default function uploads(router) {
 		const limited = enforceKey('file-reg', share.id, 300, 60_000);
 		if (limited) return limited;
 
-		let body;
-		try {
-			body = await req.json();
-		} catch {
-			return error(400, 'Invalid JSON body');
-		}
+		const { value, response: bodyErr } = await readJson(req, METADATA_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const body = value || {};
 
 		const name = sanitizeName(body?.name);
 		const size = Number(body?.size);
@@ -170,6 +180,7 @@ export default function uploads(router) {
 	});
 
 	// Report how many bytes are on disk so a client can resume.
+	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/status', { auth: 'editTokenOrKey', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/shares/:id/files/:fileId/status', ({ req, params }) => {
 		const { share, res } = authShare(req, params.id);
 		if (res) return res;
@@ -183,9 +194,14 @@ export default function uploads(router) {
 	});
 
 	// Append a chunk of raw bytes at the given offset.
+	declareRoutePolicy('PATCH', '/api/shares/:id/files/:fileId', { auth: 'editTokenOrKey', csrf: true, rateLimit: 'chunk-patch', audit: null });
 	router.patch('/api/shares/:id/files/:fileId', async ({ req, params, query }) => {
-		const { share, res } = authShare(req, params.id);
+		const { share, res, via } = authShare(req, params.id);
 		if (res) return res;
+		if (via === 'cookie') {
+			const csrf = requireSameOrigin(req);
+			if (csrf) return csrf;
+		}
 		const finalizedErr = checkFinalized(share);
 		if (finalizedErr) return finalizedErr;
 		const keyErr = checkKeyValid(share);
@@ -232,6 +248,17 @@ export default function uploads(router) {
 				if (Number.isFinite(declaredLen) && declaredLen >= 0) {
 					if (declaredLen > config.chunkSize + 64) return error(413, 'Chunk exceeds the maximum chunk size');
 					if (offset + declaredLen > file.size) return error(413, 'Chunk exceeds declared file size');
+				}
+
+				// M-04: byte-rate budget, keyed the same as the 'chunk'/'chunk-global'
+				// admission-control slots just above (per share). Charged BEFORE
+				// buffering the body into memory, using the declared length when the
+				// client sent one, or the worst-case chunkSize otherwise, so an
+				// over-budget client is rejected without paying for the read first.
+				if (config.uploadBytesPerSec > 0) {
+					const rateCost = Number.isFinite(declaredLen) && declaredLen >= 0 ? declaredLen : config.chunkSize;
+					const rateLimited = takeBytes('chunk-bytes', share.id, rateCost, config.uploadBytesPerSec * 4, config.uploadBytesPerSec);
+					if (rateLimited) return rateLimited;
 				}
 
 				const buf = await req.arrayBuffer();

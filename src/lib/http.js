@@ -63,6 +63,42 @@ export function text(body, status = 200, headers = {}) {
 	return new Response(body, { status, headers: { 'Content-Type': 'text/plain; charset=utf-8', ...SECURITY_HEADERS, ...headers } });
 }
 
+// Route-class JSON body ceilings (L-03). The server's global maxRequestBodySize
+// (server.js) is sized for upload chunks (>=64 MiB) and applies to every
+// request - a login/metadata endpoint would otherwise buffer/parse a body far
+// larger than it ever needs before any semantic validation runs. These are
+// deliberately small relative to that ceiling.
+export const LOGIN_BODY_MAX = 16 * 1024; // login/MFA/password endpoints
+export const METADATA_BODY_MAX = 64 * 1024; // share/admin metadata endpoints
+
+// Parse a JSON request body capped at `maxBytes`. Rejects an oversized body
+// BEFORE buffering it, from a declared Content-Length (mirrors the
+// Content-Length precheck idiom used by the PATCH chunk-upload route in
+// routes/uploads.js) - and caps the actual bytes read too, since
+// Content-Length can be absent or dishonest (e.g. chunked transfer encoding).
+// Returns { value } with the parsed body (null for an empty body) on success,
+// or { response } with a ready-to-return 413/400 Response on failure. Never
+// throws, so every call site can do:
+//   const { value, response } = await readJson(req, MAX);
+//   if (response) return response;
+export async function readJson(req, maxBytes) {
+	const declaredLen = Number(req.headers.get('content-length'));
+	if (Number.isFinite(declaredLen) && declaredLen > maxBytes) return { response: error(413, 'Request body too large') };
+	let buf;
+	try {
+		buf = await req.arrayBuffer();
+	} catch {
+		return { response: error(400, 'Invalid request body') };
+	}
+	if (buf.byteLength > maxBytes) return { response: error(413, 'Request body too large') };
+	if (buf.byteLength === 0) return { value: null };
+	try {
+		return { value: JSON.parse(Buffer.from(buf).toString('utf8')) };
+	} catch {
+		return { response: error(400, 'Invalid JSON body') };
+	}
+}
+
 export function noContent(headers = {}) {
 	return new Response(null, { status: 204, headers: { ...SECURITY_HEADERS, ...headers } });
 }
@@ -98,7 +134,46 @@ export function cookie(name, value, { maxAge, httpOnly = true, sameSite = 'Lax',
 	return parts.join('; ');
 }
 
-export const clearCookie = name => cookie(name, '', { maxAge: 0 });
+export const clearCookie = (name, secure = false) => cookie(name, '', { maxAge: 0, secure });
+
+// L-08: every ambient session cookie in the app (admin, admin-mfa, upload,
+// apikey, and the per-share owner cookie - see lib/auth.js/lib/apikeys.js) is
+// named through this pair, keyed off the SAME per-request `secure` boolean
+// every cookie()-setting call site already computes via requestScheme() - not
+// a fixed boot-time choice, so a plain-http local/dev instance keeps the
+// unprefixed name (a browser silently refuses to store a "__Host-" cookie
+// without the Secure attribute, which would otherwise make dev logins
+// mysteriously not stick).
+//
+// "__Host-" is a browser-enforced guarantee on top of Secure/HttpOnly/
+// SameSite: the browser refuses to store (or forward to any other origin/
+// subdomain) a cookie with this prefix unless it ALSO carries Path=/, no
+// Domain attribute, and Secure - every cookie() call in this app already
+// satisfies all three, so opting in costs nothing but naming.
+export function sessionCookieName(base, secure) {
+	return secure ? `__Host-${base}` : base;
+}
+
+// Read a cookie set via sessionCookieName() above: try the "__Host-" name
+// first (what an https request actually carries), then the plain name (http/
+// dev). A single request only ever has one of the two in its Cookie header,
+// so this needs no knowledge of which scheme minted it.
+export function readSessionCookie(req, base) {
+	const cookies = parseCookies(req);
+	return cookies[`__Host-${base}`] ?? cookies[base] ?? null;
+}
+
+// Clear a cookie set via sessionCookieName() above, for every name
+// readSessionCookie() would accept - not just the one the current request's
+// scheme would mint. readSessionCookie() falls back to the legacy plain name
+// for migration compatibility, so a session issued before a http->https flip
+// (or before this cookie adopted the "__Host-" prefix) carries that plain
+// name - a logout that only clears sessionCookieName(base, secure) leaves
+// that cookie live and still authenticating. Returns both clear-cookie
+// header VALUES for the caller to append as separate Set-Cookie headers.
+export function clearSessionCookie(base, secure) {
+	return [clearCookie(sessionCookieName(base, secure), secure), clearCookie(base)];
+}
 
 // Direct socket peer address for this request, or null if unavailable.
 // This is the one value a client cannot spoof (unlike any header), so it is
@@ -228,8 +303,11 @@ export function contentDisposition(filename, inline = false) {
 
 // Reject a cookie-authenticated state change unless the request provably came
 // from our own origin. Browser cross-site requests always carry Sec-Fetch-Site
-// and/or Origin on non-GET; a request with neither header is a non-browser
-// client, which carries no ambient cookie an attacker can ride, so it passes.
+// and/or Origin on non-GET fetch/XHR/form submissions - a request with NEITHER
+// header is not a legitimate browser-issued cross-origin-relevant request, so
+// it is rejected too (fail closed). Callers that authenticate via a header
+// credential instead of an ambient cookie (X-Edit-Token, X-API-Key,
+// Authorization) never call this function at all - see each call site.
 export function requireSameOrigin(req) {
 	// No `ip` is available in this helper's signature (widening it across every
 	// call site is not worth it for an audit-only field) - the csrf.rejected
@@ -258,7 +336,11 @@ export function requireSameOrigin(req) {
 		} catch {}
 		return reject();
 	}
-	return null;
+	// Neither header present: a real browser fetch/XHR/form submission always
+	// sends at least one on a same-origin or cross-origin non-GET request, so a
+	// request with neither is treated as a forged/spoofed request, not a
+	// trusted non-browser client (L-01: fail closed instead of falling through).
+	return reject();
 }
 
 export { SECURITY_HEADERS };

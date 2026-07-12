@@ -13,9 +13,9 @@
 import { existsSync } from 'node:fs';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, cookie, clearCookie, requestScheme, requestOrigin, requireSameOrigin, SECURITY_HEADERS } from '../lib/http.js';
-import { ADMIN_COOKIE, ADMIN_MFA_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, uploadLinkToken, issueAdminMfaToken, checkAdminMfaToken } from '../lib/auth.js';
-import { deleteShareFiles, deleteBlob, totalUsage } from '../lib/storage.js';
+import { json, error, cookie, clearCookie, clearSessionCookie, sessionCookieName, requestScheme, requestOrigin, requireSameOrigin, SECURITY_HEADERS, readJson, LOGIN_BODY_MAX, METADATA_BODY_MAX } from '../lib/http.js';
+import { ADMIN_COOKIE, ADMIN_MFA_COOKIE, checkAdminPassword, issueAdminToken, isAdmin, mintUploadLink, issueAdminMfaToken, checkAdminMfaToken } from '../lib/auth.js';
+import { deleteShareFiles, deleteBlob, totalUsage, withFileLock } from '../lib/storage.js';
 import { enforce, reset } from '../lib/ratelimit.js';
 import { acquire, overloaded } from '../lib/semaphore.js';
 import { hashPassword } from '../lib/crypto.js';
@@ -59,12 +59,14 @@ const SORT_COLUMNS = {
 };
 const SORT_ORDERS = { asc: 'ASC', desc: 'DESC' };
 
-async function readBody(req) {
-	try {
-		return await req.json();
-	} catch {
-		return {};
-	}
+// L-03: every admin JSON body is read through this, capped at a route-
+// appropriate ceiling (LOGIN_BODY_MAX / METADATA_BODY_MAX) instead of the
+// server-wide upload-chunk-sized limit. `response` is a ready-to-return
+// 413/400 Response when the body was rejected; `body` is always an object
+// (never null) so existing destructuring call sites need no other change.
+async function readBody(req, maxBytes) {
+	const { value, response } = await readJson(req, maxBytes);
+	return { body: value || {}, response };
 }
 
 export default router => {
@@ -82,7 +84,9 @@ export default router => {
 		const limited = enforce('admin-login', ip, 8, 5 * 60 * 1000);
 		if (limited) return limited;
 
-		const { password } = await readBody(req);
+		const { body, response: bodyErr } = await readBody(req, LOGIN_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const { password } = body;
 		if (!checkAdminPassword(password)) {
 			audit('admin.login.failure', { ip });
 			return error(403, 'Invalid password');
@@ -93,14 +97,14 @@ export default router => {
 		if (!mfaEnabled()) {
 			reset('admin-login', ip);
 			audit('admin.login.success', { ip, actor: 'admin' });
-			const setCookie = cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure });
+			const setCookie = cookie(sessionCookieName(ADMIN_COOKIE, secure), issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure });
 			return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 		}
 
 		// MFA is enabled: the password alone is not enough. Issue a short-lived
 		// intermediate cookie (not the real admin session) and require a second
 		// step at /api/admin/login/mfa.
-		const setCookie = cookie(ADMIN_MFA_COOKIE, issueAdminMfaToken(), { maxAge: 5 * 60, httpOnly: true, sameSite: 'Lax', secure });
+		const setCookie = cookie(sessionCookieName(ADMIN_MFA_COOKIE, secure), issueAdminMfaToken(), { maxAge: 5 * 60, httpOnly: true, sameSite: 'Lax', secure });
 		return json({ ok: true, mfaRequired: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
@@ -117,7 +121,9 @@ export default router => {
 
 		if (!checkAdminMfaToken(req)) return error(403, 'Session expired, enter your password again');
 
-		const { code } = await readBody(req);
+		const { body, response: bodyErr } = await readBody(req, LOGIN_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const { code } = body;
 		const isTotpShaped = /^\d{6}$/.test(String(code ?? ''));
 		const ok = isTotpShaped ? verifyLoginCode(code) : consumeBackupCode(code);
 		if (!ok) {
@@ -136,19 +142,24 @@ export default router => {
 
 		const secure = requestScheme(req, url, server) === 'https';
 		const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
-		headers.append('Set-Cookie', cookie(ADMIN_COOKIE, issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure }));
-		headers.append('Set-Cookie', clearCookie(ADMIN_MFA_COOKIE));
+		headers.append('Set-Cookie', cookie(sessionCookieName(ADMIN_COOKIE, secure), issueAdminToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure }));
+		headers.append('Set-Cookie', clearCookie(sessionCookieName(ADMIN_MFA_COOKIE, secure), secure));
 		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
 	declareRoutePolicy('POST', '/api/admin/logout', { auth: 'public', csrf: true, rateLimit: null, audit: 'admin.logout' });
-	router.post('/api/admin/logout', async ({ req, ip }) => {
+	router.post('/api/admin/logout', async ({ req, ip, url, server }) => {
 		const csrf = requireSameOrigin(req);
 		if (csrf) return csrf;
 		if (isAdmin(req)) audit('admin.logout', { ip, actor: 'admin' });
+		const secure = requestScheme(req, url, server) === 'https';
 		const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
-		headers.append('Set-Cookie', clearCookie(ADMIN_COOKIE));
-		headers.append('Set-Cookie', clearCookie(ADMIN_MFA_COOKIE));
+		// Clears BOTH the current dynamic cookie name and the legacy plain name
+		// (see clearSessionCookie()) - readSessionCookie()'s migration fallback
+		// means a pre-existing session issued under the plain name must not
+		// survive logout just because this request's scheme now mints "__Host-".
+		for (const c of clearSessionCookie(ADMIN_COOKIE, secure)) headers.append('Set-Cookie', c);
+		for (const c of clearSessionCookie(ADMIN_MFA_COOKIE, secure)) headers.append('Set-Cookie', c);
 		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
@@ -185,7 +196,9 @@ export default router => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-mfa-confirm', ip, 10, 5 * 60 * 1000);
 		if (limited) return limited;
-		const { code } = await readBody(req);
+		const { body, response: bodyErr } = await readBody(req, LOGIN_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const { code } = body;
 		const backupCodes = confirmEnrollment(code);
 		if (!backupCodes) {
 			audit('admin.mfa.confirm_failed', { ip, actor: 'admin' });
@@ -205,7 +218,9 @@ export default router => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-mfa-disable', ip, 8, 5 * 60 * 1000);
 		if (limited) return limited;
-		const { password, code } = await readBody(req);
+		const { body, response: bodyErr } = await readBody(req, LOGIN_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const { password, code } = body;
 		if (!checkAdminPassword(password)) {
 			audit('admin.mfa.disable_failed', { ip, detail: { reason: 'password' } });
 			return error(403, 'Invalid password');
@@ -227,7 +242,9 @@ export default router => {
 		const limited = enforce('admin-mfa-backup-codes', ip, 20, 60 * 60 * 1000);
 		if (limited) return limited;
 		if (!mfaEnabled()) return error(400, 'MFA is not enabled');
-		const { code } = await readBody(req);
+		const { body, response: bodyErr } = await readBody(req, LOGIN_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const { code } = body;
 		if (!verifyLoginCode(code)) {
 			audit('admin.mfa.backup_codes_regen_failed', { ip, actor: 'admin' });
 			return error(403, 'Invalid code');
@@ -370,12 +387,9 @@ export default router => {
 		const share = db.query('SELECT id FROM shares WHERE id = ?').get(params.id);
 		if (!share) return error(404, 'Not found');
 
-		let body;
-		try {
-			body = (await req.json()) || {};
-		} catch {
-			return error(400, 'Invalid JSON body');
-		}
+		const { value, response: bodyErr } = await readJson(req, METADATA_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const body = value || {};
 
 		// Validate a slug (id) change up front, before any writes.
 		let newSlug = null;
@@ -503,11 +517,22 @@ export default router => {
 		const file = db.query('SELECT id FROM files WHERE id = ? AND share_id = ?').get(params.fileId, params.id);
 		if (!file) return error(404, 'Not found');
 
-		// Before removing the row: releases the file's committed usage (if it was
-		// complete) and/or its still-open reservation.
-		quota.releaseFile(params.fileId);
-		await deleteBlob(params.id, params.fileId);
-		db.query('DELETE FROM files WHERE id = ? AND share_id = ?').run(params.fileId, params.id);
+		// M-06 TOCTOU fix: held around the blob removal + row delete so this can
+		// never interleave with lib/migrate.js's migrateFile() swap for the same
+		// file id - see storage.js's withFileLock for what that closes.
+		await withFileLock(params.fileId, async () => {
+			// Re-check under the lock: a migration may have completed (or the file
+			// may have been deleted by a concurrent request) while this request was
+			// queued behind another lock holder.
+			const stillThere = db.query('SELECT id FROM files WHERE id = ? AND share_id = ?').get(params.fileId, params.id);
+			if (!stillThere) return;
+
+			// Before removing the row: releases the file's committed usage (if it
+			// was complete) and/or its still-open reservation.
+			quota.releaseFile(params.fileId);
+			await deleteBlob(params.id, params.fileId);
+			db.query('DELETE FROM files WHERE id = ? AND share_id = ?').run(params.fileId, params.id);
+		});
 
 		return json({ ok: true });
 	});
@@ -601,7 +626,8 @@ export default router => {
 		const limited = enforce('admin-apikey', ip, 30, 60 * 60 * 1000);
 		if (limited) return limited;
 
-		const body = await readBody(req);
+		const { body, response: bodyErr } = await readBody(req, METADATA_BODY_MAX);
+		if (bodyErr) return bodyErr;
 		const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
 		if (!name) return error(400, 'A name is required');
 
@@ -629,7 +655,8 @@ export default router => {
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		const limited = enforce('admin-apikey-edit', ip, 120, 60 * 1000);
 		if (limited) return limited;
-		const body = await readBody(req);
+		const { body, response: bodyErr } = await readBody(req, METADATA_BODY_MAX);
+		if (bodyErr) return bodyErr;
 		const name = typeof body.name === 'string' ? body.name.trim().slice(0, 100) : '';
 		if (!name) return error(400, 'A name is required');
 		const lim = sanitizeLimits(body.limits || {});
@@ -722,14 +749,20 @@ export default router => {
 
 	// ---- Server operations -------------------------------------------------
 
-	// Quick-access upload link (the HMAC-derived token, not the password). The
-	// admin needs no upload cookie, so this is a separate route from the
-	// upload-cookie-gated /api/upload/link.
-	declareRoutePolicy('GET', '/api/admin/upload-link', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
-	router.get('/api/admin/upload-link', ({ req, url, server }) => {
+	// Quick-access upload link (a single-use, 15-minute magic-link token - see
+	// lib/auth.js's mintUploadLink()). The admin needs no upload cookie, so this
+	// is a separate route from the upload-cookie-gated /api/upload/link. POST,
+	// not GET (M-01): minting now creates server-side state (a row in
+	// upload_link_tokens), so this is a state-creating action driven by the
+	// ambient admin cookie and needs the same requireSameOrigin() CSRF proof
+	// every other cookie-authenticated mutation in this file gets.
+	declareRoutePolicy('POST', '/api/admin/upload-link', { auth: 'admin', csrf: true, rateLimit: null, audit: null });
+	router.post('/api/admin/upload-link', ({ req, url, server }) => {
+		const csrf = requireSameOrigin(req);
+		if (csrf) return csrf;
 		if (!isAdmin(req)) return error(403, 'Forbidden');
 		if (!config.uploadPassword) return json({ enabled: false });
-		return json({ enabled: true, url: `${requestOrigin(req, url, server)}/?token=${encodeURIComponent(uploadLinkToken())}` });
+		return json({ enabled: true, url: `${requestOrigin(req, url, server)}/?token=${encodeURIComponent(mintUploadLink())}` });
 	});
 
 	// Current editable settings. Secret values are NEVER returned - only a
@@ -754,6 +787,9 @@ export default router => {
 			readOnly: { HOST: config.host, PORT: String(config.port), DATA_DIR: config.dataDir },
 			ephemeralSecret: config.ephemeralSecret,
 			uploadPasswordSet: !!config.uploadPassword,
+			// Process uptime: admin-only (see L-07 - the public /health probe
+			// deliberately discloses nothing).
+			uptime: Math.floor(process.uptime()),
 		});
 	});
 
@@ -766,12 +802,9 @@ export default router => {
 		const limited = enforce('admin-settings', ip, 30, 60 * 60 * 1000);
 		if (limited) return limited;
 
-		let body;
-		try {
-			body = (await req.json()) || {};
-		} catch {
-			return error(400, 'Invalid JSON body');
-		}
+		const { value, response: bodyErr } = await readJson(req, METADATA_BODY_MAX);
+		if (bodyErr) return bodyErr;
+		const body = value || {};
 		const r = validatePatch(body);
 		if (r.error) return error(400, r.error);
 

@@ -4,9 +4,12 @@
 
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, cookie, requestOrigin, requestScheme, requireSameOrigin } from '../lib/http.js';
+import { json, error, cookie, sessionCookieName, requestOrigin, requestScheme, requireSameOrigin, readJson, LOGIN_BODY_MAX, METADATA_BODY_MAX } from '../lib/http.js';
 import { hashPassword, verifyPassword, hashSecretToken, verifySecretToken } from '../lib/crypto.js';
-import { uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, uploadLinkToken, UPLOAD_COOKIE } from '../lib/auth.js';
+import {
+	uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, mintUploadLink, UPLOAD_COOKIE,
+	issueOwnerToken, hasOwnerCookie, ownerCookieBase,
+} from '../lib/auth.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { newShareId, newToken } from '../lib/ids.js';
 import { deleteShareFiles } from '../lib/storage.js';
@@ -16,6 +19,7 @@ import { slugError } from '../lib/slug.js';
 import { keyValidForShare, scopeErrorForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
 import { audit } from '../lib/audit.js';
+import { declareRoutePolicy } from '../lib/routePolicy.js';
 
 const getShare = db.query('SELECT * FROM shares WHERE id = ?');
 // Case-insensitive slug-conflict check: a soft-deleted share no longer holds
@@ -50,22 +54,31 @@ function liveShare(id) {
 // invalid token - otherwise "revoke" would only stop that key's own
 // bearer-token calls while the shares it already made keep accepting owner
 // actions via the edit token forever.
-function isOwner(req, share) {
+//
+// M-05: the header is checked FIRST and is completely unaffected by the owner
+// cookie's existence - an API-key/script caller that only ever sends
+// X-Edit-Token behaves byte-for-byte as before. The cookie is a second,
+// equally-gated way to prove ownership (same keyValidForShare check), used by
+// the browser once it has exchanged the edit token for a session (see POST
+// /api/shares/:id/owner-session below). Returns which credential matched (or
+// null) so callers that mutate state can require same-origin proof only for
+// the ambient-cookie path (header calls need no such proof - see the F-10
+// convention already established for the admin-vs-edit-token DELETE branch
+// below).
+function ownerVia(req, share) {
 	const token = req.headers.get('x-edit-token');
-	return !!token && verifySecretToken(token, share.edit_token) && keyValidForShare(share);
+	if (token && verifySecretToken(token, share.edit_token) && keyValidForShare(share)) return 'header';
+	if (hasOwnerCookie(req, share) && keyValidForShare(share)) return 'cookie';
+	return null;
 }
-
-async function readJson(req) {
-	try {
-		return await req.json();
-	} catch {
-		return null;
-	}
+function isOwner(req, share) {
+	return !!ownerVia(req, share);
 }
 
 export default function shares(router) {
 	// ---- Public config -----------------------------------------------------
 
+	declareRoutePolicy('GET', '/api/config', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/api/config', ctx =>
 		json({
 			chunkSize: config.chunkSize,
@@ -83,39 +96,53 @@ export default function shares(router) {
 	// Lets the upload page verify the upload password and reveal the portal
 	// before any file is chosen. The real enforcement is still on share create.
 
+	declareRoutePolicy('POST', '/api/upload/verify', { auth: 'public', csrf: false, rateLimit: 'upload-verify', audit: 'upload.verify.failure' });
 	router.post('/api/upload/verify', async ctx => {
 		const limited = enforce('upload-verify', ctx.ip, 20, 5 * 60 * 1000);
 		if (limited) return limited;
 		if (!config.uploadPassword) return json({ ok: true });
-		const body = (await readJson(ctx.req)) || {};
+		const { value, response } = await readJson(ctx.req, LOGIN_BODY_MAX);
+		if (response) return response;
+		const body = value || {};
 		if (!uploadAllowed(body.password)) {
 			audit('upload.verify.failure', { ip: ctx.ip });
 			return error(403, 'Incorrect upload password');
 		}
-		const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url, ctx.server) === 'https' });
+		const secure = requestScheme(ctx.req, ctx.url, ctx.server) === 'https';
+		const setCookie = cookie(sessionCookieName(UPLOAD_COOKIE, secure), issueUploadToken(), { maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure });
 		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
 	// ---- Quick-access link --------------------------------------------------
-	// Returns a shareable instant-login link for an already-authorized uploader.
-	// The token is derived from SECRET (not the password), so handing out the link
-	// never exposes the real upload password. Only available to a caller that
-	// already holds upload access, and only when an upload password is configured.
-
-	router.get('/api/upload/link', ctx => {
+	// Returns a shareable instant-login link (a single-use, 15-minute magic-link
+	// token - see lib/auth.js's mintUploadLink()) for an already-authorized
+	// uploader. The token is derived from SECRET (not the password), so handing
+	// out the link never exposes the real upload password. Only available to a
+	// caller that already holds upload access, and only when an upload password
+	// is configured. POST, not GET (M-01): minting now creates server-side state,
+	// so this is a state-creating action driven by the ambient upload cookie and
+	// needs requireSameOrigin() CSRF proof like every other cookie-authorized
+	// mutation.
+	declareRoutePolicy('POST', '/api/upload/link', { auth: 'uploadGate', csrf: true, rateLimit: null, audit: null });
+	router.post('/api/upload/link', ctx => {
+		const csrf = requireSameOrigin(ctx.req);
+		if (csrf) return csrf;
 		if (!config.uploadPassword) return json({ enabled: false });
 		if (!hasUploadAccess(ctx.req)) return error(403, 'Forbidden');
-		return json({ enabled: true, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/?token=${encodeURIComponent(uploadLinkToken())}` });
+		return json({ enabled: true, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/?token=${encodeURIComponent(mintUploadLink())}` });
 	});
 
 	// ---- Create draft ------------------------------------------------------
 
+	declareRoutePolicy('POST', '/api/shares', { auth: 'uploadGate', csrf: true, rateLimit: 'share-create', audit: 'share.created' });
 	router.post('/api/shares', async ctx => {
 		// Spam guard: cap new shares per IP (30 per 10 minutes).
 		const limited = enforce('share-create', ctx.ip, 30, 10 * 60 * 1000);
 		if (limited) return limited;
 
-		const body = (await readJson(ctx.req)) || {};
+		const { value, response } = await readJson(ctx.req, METADATA_BODY_MAX);
+		if (response) return response;
+		const body = value || {};
 
 		// Authorized by the upload cookie (the gate) or an explicit password in the body.
 		if (config.uploadPassword && !uploadAllowed(body.uploadPassword)) {
@@ -217,6 +244,7 @@ export default function shares(router) {
 
 	// ---- Unlock (password -> access token) ---------------------------------
 
+	declareRoutePolicy('POST', '/api/shares/:id/unlock', { auth: 'public', csrf: false, rateLimit: 'unlock', audit: 'share.unlock.failure' });
 	router.post('/api/shares/:id/unlock', async ctx => {
 		// Resolve the share first so attempts against random/nonexistent ids cannot
 		// mint a long-lived rate-limit bucket each (a memory-growth vector).
@@ -228,7 +256,9 @@ export default function shares(router) {
 		const limited = enforce(`unlock:${ctx.params.id}`, ctx.ip, 15, 5 * 60 * 1000);
 		if (limited) return limited;
 
-		const body = (await readJson(ctx.req)) || {};
+		const { value, response } = await readJson(ctx.req, LOGIN_BODY_MAX);
+		if (response) return response;
+		const body = value || {};
 		const password = body.password ?? '';
 		if (typeof password === 'string' && password.length > config.maxPasswordLength) return error(400, 'Password is too long');
 		const release = acquire('argon2', null, 4);
@@ -249,11 +279,25 @@ export default function shares(router) {
 
 	// ---- Visitor metadata --------------------------------------------------
 
+	// M-01: every response below is revocable, owner-scoped content (title,
+	// files, and - for an owner - a freshly minted accessToken/received
+	// offsets), not a deliberately public content-addressed object, so it must
+	// never be cached - same reasoning as download.js's L-05 note. The
+	// `?access=` query-token path (readAccessToken) makes this doubly true: a
+	// cached 401/200 keyed by URL alone could otherwise serve a stale gate
+	// result. noStore() wraps whatever json()/error() built, adding the header
+	// after the fact rather than threading it through every return point.
+	const noStore = res => {
+		res.headers.set('Cache-Control', 'no-store');
+		return res;
+	};
+
+	declareRoutePolicy('GET', '/api/shares/:id', { auth: 'shareAccess', csrf: false, rateLimit: 'meta', audit: null });
 	router.get('/api/shares/:id', ctx => {
 		const limited = enforce('meta', ctx.ip, 240, 60_000);
 		if (limited) return limited;
 		const share = liveShare(ctx.params.id);
-		if (!share) return error(404, 'Not found');
+		if (!share) return noStore(error(404, 'Not found'));
 
 		// A write/create-only key's edit token still authenticates as owner
 		// (isOwner), but read-elevation here degrades rather than errors: without
@@ -269,7 +313,7 @@ export default function shares(router) {
 				// No share metadata (title in particular, which for backup jobs may
 				// contain hostnames/customer names) before the visitor has proven
 				// they know the password.
-				return json({ protected: true }, 401);
+				return noStore(json({ protected: true }, 401));
 			}
 		}
 
@@ -284,7 +328,7 @@ export default function shares(router) {
 		const files = getFiles.all(share.id);
 		const totalSize = files.reduce((sum, f) => sum + f.size, 0);
 
-		return json({
+		return noStore(json({
 			id: share.id,
 			title: share.title,
 			createdAt: share.created_at,
@@ -297,9 +341,10 @@ export default function shares(router) {
 			finalized: !!share.finalized,
 			totalSize,
 			owner,
-			// Owners (validated via X-Edit-Token) get a read access token so their
-			// element-src previews and download links work without unlocking - the
-			// edit token itself is too sensitive to place in URLs.
+			// Owners (validated via X-Edit-Token or the owner cookie) get a read
+			// access token so their element-src previews and download links work
+			// without unlocking - the edit token itself is too sensitive to place
+			// in URLs.
 			...(owner ? { accessToken: issueAccessToken(share.id, share.password_hash) } : {}),
 			files: files.map(f => ({
 				id: f.id,
@@ -313,11 +358,41 @@ export default function shares(router) {
 				// upload page can continue an in-flight file. Not exposed to visitors.
 				...(owner ? { received: f.received } : {}),
 			})),
+		}));
+	});
+
+	// ---- Owner session (M-05) -----------------------------------------------
+	// Exchanges a proven X-Edit-Token (or owning API key) for an HttpOnly,
+	// per-share "owner" cookie (see lib/auth.js's issueOwnerToken/
+	// ownerCookieBase), so the browser can stop keeping the raw edit token in
+	// localStorage - readable by any script on the page, including an XSS
+	// payload - in favour of a cookie page script can never read. Called once,
+	// right after a share is created (see public/js/upload.js); the edit token
+	// itself keeps working exactly as before for API-key/script callers, this
+	// only adds a second, browser-only credential.
+	declareRoutePolicy('POST', '/api/shares/:id/owner-session', { auth: 'editTokenOrKey', csrf: true, rateLimit: 'owner-session', audit: null });
+	router.post('/api/shares/:id/owner-session', ctx => {
+		// requireSameOrigin() even though the caller proves ownership via a
+		// header (which never needs it elsewhere - see the F-10 convention): this
+		// endpoint's only legitimate caller is our own upload/resume pages, and
+		// the cost of asking for same-origin proof here is nothing.
+		const csrf = requireSameOrigin(ctx.req);
+		if (csrf) return csrf;
+		const share = liveShare(ctx.params.id);
+		if (!share) return error(404, 'Not found');
+		const limited = enforce(`owner-session:${ctx.params.id}`, ctx.ip, 30, 60_000);
+		if (limited) return limited;
+		if (!isOwner(ctx.req, share)) return error(403, 'Forbidden');
+		const secure = requestScheme(ctx.req, ctx.url, ctx.server) === 'https';
+		const setCookie = cookie(sessionCookieName(ownerCookieBase(share.id), secure), issueOwnerToken(share), {
+			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure,
 		});
+		return json({ ok: true }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
 	// ---- Finalize ----------------------------------------------------------
 
+	declareRoutePolicy('POST', '/api/shares/:id/finalize', { auth: 'editTokenOrKey', csrf: true, rateLimit: 'finalize', audit: null });
 	router.post('/api/shares/:id/finalize', ctx => {
 		// Resolve the share first so attempts against random/nonexistent ids cannot
 		// mint a long-lived rate-limit bucket each (a memory-growth vector).
@@ -325,7 +400,16 @@ export default function shares(router) {
 		if (!share) return error(404, 'Not found');
 		const limited = enforce(`finalize:${ctx.params.id}`, ctx.ip, 60, 60_000);
 		if (limited) return limited;
-		if (!isOwner(ctx.req, share)) return error(403, 'Forbidden');
+		const via = ownerVia(ctx.req, share);
+		if (!via) return error(403, 'Forbidden');
+		// M-05: the header path needs no same-origin proof (not an ambient
+		// credential - see the F-10 convention), but ownership proved via the
+		// ambient owner cookie does, exactly like the admin branch of DELETE
+		// below.
+		if (via === 'cookie') {
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
+		}
 		const scopeErr = scopeErrorForShare(share, 'write');
 		if (scopeErr) return scopeErr;
 
@@ -341,6 +425,7 @@ export default function shares(router) {
 
 	// ---- Delete (owner or admin) -------------------------------------------
 
+	declareRoutePolicy('DELETE', '/api/shares/:id', { auth: 'editTokenOrAdmin', csrf: true, rateLimit: 'delete', audit: 'share.deleted' });
 	router.delete('/api/shares/:id', async ctx => {
 		// Resolve the share first so attempts against random/nonexistent ids cannot
 		// mint a long-lived rate-limit bucket each (a memory-growth vector).
@@ -348,13 +433,20 @@ export default function shares(router) {
 		if (!share) return error(404, 'Not found');
 		const limited = enforce(`delete:${ctx.params.id}`, ctx.ip, 60, 60_000);
 		if (limited) return limited;
-		const owner = isOwner(ctx.req, share);
+		const via = ownerVia(ctx.req, share);
+		const owner = !!via;
 		if (!owner) {
 			if (!isAdmin(ctx.req)) return error(403, 'Forbidden');
 			// Admin authorization here is the ambient isAdmin() cookie, not the
 			// X-Edit-Token header - require same-origin proof (F-10 CSRF
 			// defense-in-depth). The edit-token path below is a header, not an
 			// ambient credential, so it needs no such proof.
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
+		} else if (via === 'cookie') {
+			// M-05: ownership proved via the ambient owner cookie needs the same
+			// same-origin proof the admin branch above already gets - the header
+			// path (an explicit X-Edit-Token) needs none, per the F-10 convention.
 			const csrf = requireSameOrigin(ctx.req);
 			if (csrf) return csrf;
 		}

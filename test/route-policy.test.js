@@ -25,25 +25,10 @@ process.env.TRUST_PROXY = '0';
 
 const { Router } = await import('../src/router.js');
 const { registerRoutes } = await import('../src/routes/index.js');
-const { allPolicies } = await import('../src/lib/routePolicy.js');
+const { allPolicies, inScope, assertRouteCoverage } = await import('../src/lib/routePolicy.js');
 
 const router = registerRoutes(new Router());
 const policies = allPolicies();
-
-// (2) inScope predicate, exactly as specified: every /api/v1/* route, every
-// non-GET /api/admin/* route, and the three retrieval routes from
-// routes/download.js.
-const EXTRA_IN_SCOPE = new Set([
-	'GET /api/shares/:id/files/:fileId/preview',
-	'GET /api/shares/:id/files/:fileId/download',
-	'GET /api/shares/:id/download-all',
-]);
-
-function inScope(route) {
-	if (route.pattern.startsWith('/api/v1/')) return true;
-	if (route.pattern.startsWith('/api/admin/') && route.method !== 'GET') return true;
-	return EXTRA_IN_SCOPE.has(`${route.method} ${route.pattern}`);
-}
 
 describe('F-20 route policy coverage gate', () => {
 	test('every in-scope registered route has a declared policy', () => {
@@ -69,10 +54,38 @@ describe('F-20 route policy coverage gate', () => {
 		// Guards against inScope()/the route table silently matching nothing (which
 		// would make the two tests above vacuously pass).
 		const inScopeCount = router.routes.filter(inScope).length;
-		expect(inScopeCount).toBeGreaterThan(20);
+		expect(inScopeCount).toBeGreaterThan(35);
 		expect(policies.get('POST /api/v1/upload')).toEqual({ auth: 'apiKeyOrSession', csrf: true, rateLimit: 'api-upload', audit: 'share.created' });
 		expect(policies.get('PATCH /api/admin/shares/:id')).toBeDefined();
 		expect(policies.get('GET /api/shares/:id/files/:fileId/download')).toBeDefined();
+		expect(policies.get('PATCH /api/shares/:id/files/:fileId')).toBeDefined();
+	});
+
+	test('assertRouteCoverage does not throw for the registered route table (the exact boot path)', () => {
+		expect(() => assertRouteCoverage(router.routes)).not.toThrow();
+	});
+
+	// Guards the inScope() carve-out itself: the only things allowed to sit
+	// outside the coverage gate are /health and static-asset serving, and
+	// those are exempt because they never become a registered route at all
+	// (server.js answers them before/after router.match() - see src/server.js
+	// and lib/routePolicy.js's module comment on inScope()). Every route that
+	// IS registered must be in scope, full stop - if a future change
+	// special-cases another prefix or method back out of inScope() (as a
+	// previous version did for GET /api/admin/*), this fails.
+	test('every registered route is in scope - only /health and static assets are exempt, and only by never reaching the router', () => {
+		const notInScope = router.routes.filter(r => !inScope(r)).map(r => `${r.method} ${r.pattern}`);
+		expect(notInScope).toEqual([]);
+	});
+
+	test('a new GET /api/admin/* route with no policy declaration fails the coverage gate', () => {
+		// Simulate a route registered without a matching declareRoutePolicy() call
+		// by appending a fake route object to the real, already-registered table -
+		// NOT by calling registerRoutes()/declareRoutePolicy() again, which would
+		// throw its own "duplicate declaration" error against the module-level
+		// registry populated at the top of this file.
+		const probeRoutes = [...router.routes, { method: 'GET', pattern: '/api/admin/__probe_undeclared', segments: ['api', 'admin', '__probe_undeclared'], handler: () => new Response('ok'), wildcard: false }];
+		expect(() => assertRouteCoverage(probeRoutes)).toThrow(/missing declaration: GET \/api\/admin\/__probe_undeclared/);
 	});
 });
 

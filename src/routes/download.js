@@ -8,13 +8,14 @@ import { db, now } from '../db.js';
 import { config } from '../config.js';
 import { error, parseRange, contentDisposition, FILE_SECURITY_HEADERS } from '../lib/http.js';
 import { verifySecretToken } from '../lib/crypto.js';
-import { readAccessToken, hasAccessToken } from '../lib/auth.js';
+import { readAccessToken, hasAccessToken, hasOwnerCookie } from '../lib/auth.js';
 import { verifyApiKey, readApiKey, readApiKeySession, keyValidForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
 import { blobPath, blobRangeStream, deleteShareFiles, fileEnc, plainSize } from '../lib/storage.js';
+import { scheduleMigration, awaitFileMigration } from '../lib/migrate.js';
 import { createZipStream } from '../lib/zip.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { enforce } from '../lib/ratelimit.js';
-import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
+import { acquire, acquireAll, overloaded, takeBytes } from '../lib/semaphore.js';
 import * as quota from '../lib/quota.js';
 import { audit } from '../lib/audit.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
@@ -76,6 +77,30 @@ const restoreShare = db.query('UPDATE shares SET deleted_at = NULL WHERE id = ?'
 const claimDownload = db.query('UPDATE shares SET download_count = download_count + 1 WHERE id = ? AND (max_downloads IS NULL OR download_count < max_downloads)');
 const releaseDownload = db.query('UPDATE shares SET download_count = download_count - 1 WHERE id = ?');
 
+// Resolve a file row for reading, first waiting out any in-flight v1->v2
+// at-rest migration swap for it (lib/migrate.js, M-06). That swap window
+// (two renames + one atomic UPDATE) is only ever held for a few filesystem
+// syscalls, but a caller that already fetched a stale v1 row must not open
+// the blob path - or decrypt it with the v1 IV - while, or right after, a
+// migration promotes it to v2 underneath: that would either 404 on the
+// momentarily-missing path or silently decrypt v2 ciphertext with the wrong
+// (v1 CTR) algorithm. Re-fetches the row only when a wait actually
+// happened, so the common (no migration in flight) case pays no extra query.
+async function resolveFile(shareId, fileId) {
+	let file = getFile.get(fileId, shareId);
+	if (file && fileEnc(file)?.version === 1 && (await awaitFileMigration(file.id))) {
+		// The wait means a migration swap for this exact file just finished (or a
+		// concurrent delete won the race and it never got one to finish - see
+		// lib/migrate.js's withFileLock recheck). Either way the row as fetched
+		// above is stale: re-fetch it fresh, and if it's gone now, say so - never
+		// silently fall back to the pre-migration object, which would let a
+		// caller that only null-checks `file` proceed against a row (and blob)
+		// that no longer exists.
+		file = getFile.get(fileId, shareId) || null;
+	}
+	return file;
+}
+
 // Resolve a share that is safe to serve: present, not soft-deleted, not expired.
 function liveShare(id) {
 	const share = getShare.get(id);
@@ -97,9 +122,16 @@ function accessCheck(share, req, url) {
 	// branch just below is already safe: verifyApiKey/readApiKeySession reject
 	// a revoked/expired key on their own.)
 	let owner = !!editToken && verifySecretToken(editToken, share.edit_token) && keyValidForShare(share);
-	// A valid edit token only grants read-owner access when the backing key
-	// still holds the shares:read scope - a write-only (e.g. drop-box) key's
-	// edit token must not unlock reading/downloading what it uploaded.
+	// M-05: the per-share owner cookie is a second way to prove the exact same
+	// ownership the edit token proves (same keyValidForShare gate, same
+	// downstream read-scope check just below) - read-only here, so no
+	// same-origin proof is needed (unlike the mutating routes in shares.js/
+	// uploads.js that also accept this cookie).
+	if (!owner && hasOwnerCookie(req, share) && keyValidForShare(share)) owner = true;
+	// A valid edit token (or owner cookie) only grants read-owner access when
+	// the backing key still holds the shares:read scope - a write-only (e.g.
+	// drop-box) key's edit token must not unlock reading/downloading what it
+	// uploaded.
 	if (owner && share.api_key_id && !hasScope(apiKeyRow(share.api_key_id), 'read')) owner = false;
 	if (!owner && share.api_key_id) {
 		const key = verifyApiKey(readApiKey(req)) || readApiKeySession(req);
@@ -127,6 +159,18 @@ function recordDownload(shareId, fileId, ip, ua, creatorIp, { countShare = true 
 
 function limitReached(share) {
 	return share.max_downloads !== null && share.download_count >= share.max_downloads;
+}
+
+// M-03 GAP 2: whether a share is genuinely protected in a way that makes its
+// request-count bucket worth surviving a restart - password-gated, or under
+// a download cap (see ratelimit.js's PERSIST_PREFIXES comment). Used below to
+// pick between the SQLite-persisted 'dl:' bucket and a plain in-memory-only
+// 'dlv:' bucket, so an ordinary public/unlimited share's preview/download
+// requests - the highest-volume, unauthenticated, publicly-reachable path in
+// the app - never pay a synchronous SQLite UPSERT. The zip bucket does not
+// use this split (see ratelimit.js's file-header comment).
+function isRateLimitProtected(share) {
+	return !!share.password_hash || share.max_downloads !== null;
 }
 
 // Disambiguate a zip entry name against ones already used in the same archive
@@ -260,7 +304,7 @@ export default function download(router) {
 	// a one-time burn. maxDownloads caps the Download action (a saved copy), not
 	// inline viewing, so a download-limited share still previews fine; one-time
 	// stays blocked because inline streaming would defeat burn-on-first-access.
-	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/preview', { auth: 'shareAccess', csrf: false, rateLimit: 'dl:<shareId>', audit: null });
+	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/preview', { auth: 'shareAccess', csrf: false, rateLimit: 'dl:<shareId>|dlv:<shareId>', audit: null });
 	router.get('/api/shares/:id/files/:fileId/preview', async ({ req, url, params, ip, server }) => {
 		server?.timeout?.(req, 0);
 		// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
@@ -268,7 +312,11 @@ export default function download(router) {
 		// rate-limit map at zero cost to the attacker.
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
-		const limited = enforce('dl:' + params.id, ip, 600, 60_000);
+		// GAP 2 fix: only a genuinely protected share (password-gated or under a
+		// download cap) uses the SQLite-persisted 'dl:' bucket; an ordinary share
+		// uses the plain in-memory-only 'dlv:' bucket instead (see
+		// isRateLimitProtected() and ratelimit.js's PERSIST_PREFIXES comment).
+		const limited = enforce((isRateLimitProtected(share) ? 'dl:' : 'dlv:') + params.id, ip, 600, 60_000);
 		if (limited) return limited;
 		const { ok, owner } = accessCheck(share, req, url);
 		if (!ok) return error(403, 'Password required');
@@ -279,7 +327,7 @@ export default function download(router) {
 		// a non-owner; otherwise the full file is retrievable inline with the
 		// counter never incremented, silently bypassing the control.
 		if (!owner && (share.one_time || share.max_downloads !== null)) return error(403, 'Preview is disabled for this share');
-		const file = getFile.get(params.fileId, share.id);
+		const file = await resolveFile(share.id, params.fileId);
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
 
@@ -290,16 +338,15 @@ export default function download(router) {
 		if (!release) return overloaded(3);
 
 		try {
-			// A password-protected share's bytes must never linger in a shared/browser
-			// cache keyed only by URL - a subsequent visitor (or the same browser after
-			// the password changes) could read cached content past the point where they
-			// should still be authorized. one_time/max_downloads-capped shares are
-			// already blocked above for non-owners, but the owner's own preview of such
-			// a share should not be cached long-term either. Only a fully public,
-			// uncontrolled share gets the long immutable cache.
-			const cacheControl = share.password_hash || share.one_time || share.max_downloads !== null
-				? 'no-store'
-				: 'private, max-age=31536000, immutable';
+			// L-05: every preview response is revocable user content - even an
+			// "uncontrolled" share (no password/one_time/max_downloads) can still be
+			// deleted, expired, or have a password/cap added to it after the fact by
+			// its owner or an admin, and its id is not a content digest, so a stale
+			// cached copy would keep serving bytes the visitor is no longer meant to
+			// have. A share's bytes are never a deliberately public, content-
+			// addressed, credential-free object, so no branch here gets long-lived
+			// caching - always no-store.
+			const cacheControl = 'no-store';
 			const offload = offloadHeaders(share, file);
 			if (offload) {
 				// Offload hands the bytes to the reverse proxy (or serves headers-only
@@ -329,17 +376,32 @@ export default function download(router) {
 					extraHeaders: { 'Content-Security-Policy': PREVIEW_CSP, 'Cache-Control': cacheControl, ETag: '"' + file.id + '"' },
 				});
 			}
+			// M-04: byte-rate budget, keyed by IP like the 'dl' admission-control
+			// slot just above. Sized from the actual Range (or the whole file when
+			// unranged) BEFORE the stream opens; an invalid range is left to
+			// rangeResponse's 416 below without spending any budget - it transfers
+			// zero bytes either way.
+			const size = plainSize(file, share.id);
+			const range = parseRange(req.headers.get('range'), size);
+			if (config.downloadBytesPerSec > 0 && !range?.invalid) {
+				const cost = range ? range.length : size;
+				const rateLimited = takeBytes('dl-bytes', ip, cost, config.downloadBytesPerSec * 4, config.downloadBytesPerSec);
+				if (rateLimited) { release(); return rateLimited; }
+			}
+			// M-06: lazy migration trigger - fire-and-forget, after the decision to
+			// actually stream this v1 file is made, so it adds no latency here.
+			if (fileEnc(file)?.version === 1) scheduleMigration(file.id);
 			const serving = previewServing(file.mime);
 			return rangeResponse(share, file, req, {
 				inline: serving.inline,
 				contentType: serving.type,
+				size,
+				range,
 				makeBody: src => trackedStream(src, { onEnd: release }),
 				extraHeaders: {
 					'Content-Security-Policy': PREVIEW_CSP,
-					// Previewed bytes are immutable content addressed by file id, so a
-					// scrub-back in the player can be served from the browser cache
-					// instead of re-requesting already-fetched ranges - but only for a
-					// fully public, uncontrolled share (see cacheControl above).
+					// no-store (see cacheControl above, L-05) - revocable content is
+					// never cached, even across a scrub-back seek in the player.
 					'Cache-Control': cacheControl,
 					ETag: '"' + file.id + '"',
 				},
@@ -357,7 +419,7 @@ export default function download(router) {
 	// dropped/paused/partial/tail-probe download never counts or burns, so a
 	// multi-GB video survives an interrupted transfer and can be resumed - and
 	// a Range request cannot be used to dodge a one-time burn or a download cap.
-	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/download', { auth: 'shareAccess', csrf: false, rateLimit: 'dl:<shareId>', audit: 'share.burned' });
+	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/download', { auth: 'shareAccess', csrf: false, rateLimit: 'dl:<shareId>|dlv:<shareId>', audit: 'share.burned' });
 	router.get('/api/shares/:id/files/:fileId/download', async ({ req, url, params, ip, server }) => {
 		// Long video downloads/pauses must not be killed by an idle timeout.
 		server?.timeout?.(req, 0);
@@ -371,11 +433,15 @@ export default function download(router) {
 		// rate-limit map at zero cost to the attacker.
 		const share = liveShare(params.id);
 		if (!share) return error(404, 'Share not found');
-		const limited = enforce('dl:' + params.id, ip, 600, 60_000);
+		// GAP 2 fix: only a genuinely protected share (password-gated or under a
+		// download cap) uses the SQLite-persisted 'dl:' bucket; an ordinary share
+		// uses the plain in-memory-only 'dlv:' bucket instead (see
+		// isRateLimitProtected() and ratelimit.js's PERSIST_PREFIXES comment).
+		const limited = enforce((isRateLimitProtected(share) ? 'dl:' : 'dlv:') + params.id, ip, 600, 60_000);
 		if (limited) return limited;
 		const { ok, owner } = accessCheck(share, req, url);
 		if (!ok) return error(403, 'Password required');
-		const file = getFile.get(params.fileId, share.id);
+		const file = await resolveFile(share.id, params.fileId);
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
 		// The owner's own reads (edit token or owning API key) never hit the cap.
@@ -419,6 +485,9 @@ export default function download(router) {
 				release();
 				return rangeResponse(share, file, req, { inline: false, size, range: effRange, head: true });
 			}
+			// M-06: lazy migration trigger - fire-and-forget, GET only (a HEAD
+			// probe never opens a stream, so it returns above without this).
+			if (fileEnc(file)?.version === 1) scheduleMigration(file.id);
 			// A "full" delivery is a non-owner GET whose range (or the absence of
 			// one) covers the entire file in one shot - i.e. draining the stream
 			// delivers every byte. Anything else (a partial range probe, a tail
@@ -426,6 +495,15 @@ export default function download(router) {
 			// burns.
 			const full = req.method === 'GET' && !owner && reachesEnd(effRange, size);
 			const ua = req.headers.get('user-agent');
+
+			// M-04: byte-rate budget, keyed by IP like the 'dl' admission-control
+			// slot just above. Sized from the actual (possibly range-forced-to-full)
+			// delivery BEFORE the stream opens.
+			if (config.downloadBytesPerSec > 0) {
+				const cost = effRange ? effRange.length : size;
+				const rateLimited = takeBytes('dl-bytes', ip, cost, config.downloadBytesPerSec * 4, config.downloadBytesPerSec);
+				if (rateLimited) { release(); return rateLimited; }
+			}
 
 			// One-time shares carry the full claim/burn machinery: track every read so
 			// a burn waits for in-flight reads, claim the share on a full delivery,
@@ -499,7 +577,13 @@ export default function download(router) {
 		server?.timeout?.(req, 0);
 		// A zip build is heavier per-request than a single-file stream, so it gets
 		// its own (lower) generous per-IP cap - still well above legitimate use,
-		// just enough to stop a bandwidth/CPU exhaustion loop.
+		// just enough to stop a bandwidth/CPU exhaustion loop. One unconditional
+		// per-IP key for every request (protected or not): a live share lookup
+		// before enforce() would spend a SQLite SELECT on every request in the
+		// exact flood scenario this limiter exists to reject at zero cost, and
+		// splitting the bucket by share protection would hand an attacker a
+		// second, independent 30/60s allowance by flooding a share they made
+		// password-protected themselves before moving on to an unprotected one.
 		const limited = enforce('zip', ip, 30, 60_000);
 		if (limited) return limited;
 		const share = liveShare(params.id);
@@ -512,7 +596,7 @@ export default function download(router) {
 		if (share.e2e) return error(409, 'Zip download is not available for end-to-end encrypted shares');
 		if (!owner && limitReached(share)) return error(410, 'Download limit reached');
 
-		const files = getCompleteFiles.all(share.id);
+		let files = getCompleteFiles.all(share.id);
 		// Nothing to deliver: do not count a download or burn a one-time share on
 		// an empty archive.
 		if (!files.length) return error(404, 'No files to download');
@@ -552,6 +636,25 @@ export default function download(router) {
 		if (!release) return overloaded(5);
 
 		try {
+			// M-06: wait out any in-flight migration swap for each v1 file before
+			// opening its blob stream (same reasoning as resolveFile() above). A
+			// file that disappears mid-await (same TOCTOU a concurrent delete can
+			// cause - see resolveFile()) is dropped from the archive entirely,
+			// never left in as the stale pre-migration object, which would have
+			// gone on to open a blob that no longer exists and broken the zip
+			// stream mid-build. Then fire-and-forget a lazy migration trigger for
+			// any that are still v1.
+			for (let i = 0; i < files.length; i++) {
+				if (fileEnc(files[i])?.version === 1 && (await awaitFileMigration(files[i].id))) {
+					files[i] = getFile.get(files[i].id, share.id) || null;
+				}
+			}
+			files = files.filter(Boolean);
+			if (!files.length) { release(); return error(404, 'No files to download'); }
+			for (const f of files) {
+				if (fileEnc(f)?.version === 1) scheduleMigration(f.id);
+			}
+
 			const usedZipNames = new Set();
 			const entries = files.map(f => ({
 				name: uniqueZipName(f.name, usedZipNames),
@@ -563,6 +666,21 @@ export default function download(router) {
 			// burn, and the owner is exempt entirely (their own restore never counts
 			// or burns).
 			const full = !owner && req.method === 'GET';
+
+			// M-04 GAP 1 fix: byte-rate budget, keyed by IP with the exact same
+			// 'dl-bytes' bucket already used by single-file preview/download (see
+			// the M-04 comments on those routes) - previously this route had no
+			// byte-rate cap at all, letting a client bypass the configured
+			// download-bytes-per-sec budget entirely by using the archive endpoint.
+			// Sized from the archive's total content bytes (the sum of every
+			// entry's plain size) before the stream opens, same as the single-file
+			// download's whole-file cost.
+			if (config.downloadBytesPerSec > 0) {
+				const zipCost = entries.reduce((sum, e) => sum + e.size, 0);
+				const rateLimited = takeBytes('dl-bytes', ip, zipCost, config.downloadBytesPerSec * 4, config.downloadBytesPerSec);
+				if (rateLimited) { release(); return rateLimited; }
+			}
+
 			if (full && share.one_time) {
 				const claimed = claimOneTime.run(now(), share.id).changes > 0;
 				if (!claimed) { release(); return error(410, 'This one-time share has already been taken'); }

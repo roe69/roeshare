@@ -231,6 +231,80 @@ export function fileGlyph(mime = '', name = '') {
 	return '\u{1F4E6}';
 }
 
+// ---- Owned shares (M-05) -----------------------------------------------------
+// Shares this browser created, tracked by id only - share ids are not secret,
+// unlike the raw edit token the old `roeshare:edit:<id>` localStorage map used
+// to hold. Ownership itself now lives in an HttpOnly, per-share cookie minted
+// by POST /api/shares/:id/owner-session, which page script (and so an XSS
+// payload) can never read - this list is only a "which ids might be mine"
+// index so my-shares/sidebar can enumerate what to ask the server about.
+
+const OWNED_KEY = 'roeshare:owned';
+
+export function readOwnedShares() {
+	try {
+		const ids = JSON.parse(localStorage.getItem(OWNED_KEY) || '[]');
+		return Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : [];
+	} catch {
+		return [];
+	}
+}
+
+export function addOwnedShare(id) {
+	try {
+		const ids = readOwnedShares();
+		if (!ids.includes(id)) {
+			ids.push(id);
+			localStorage.setItem(OWNED_KEY, JSON.stringify(ids));
+		}
+	} catch {
+		/* quota/private mode: the share still works, just won't list on this device */
+	}
+}
+
+export function removeOwnedShare(id) {
+	try {
+		localStorage.setItem(OWNED_KEY, JSON.stringify(readOwnedShares().filter(x => x !== id)));
+	} catch {
+		/* ignore */
+	}
+}
+
+// One-release migration from the pre-M-05 `roeshare:edit:<id>` -> raw edit
+// token localStorage entries to the owner-session cookie + owned-ids list
+// above. For each legacy entry: exchange the token once (best effort - an
+// expired/dead share's exchange simply fails and is dropped anyway), add the
+// id to the owned list, and remove the legacy entry regardless of outcome, so
+// a stale raw token never lingers in localStorage. Call once on page load
+// (view.js / myshares.js); delete this after one release.
+const LEGACY_EDIT_PREFIX = 'roeshare:edit:';
+export async function migrateLegacyOwnerTokens() {
+	let legacy = [];
+	try {
+		for (let i = 0; i < localStorage.length; i++) {
+			const k = localStorage.key(i);
+			if (k && k.startsWith(LEGACY_EDIT_PREFIX)) legacy.push({ id: k.slice(LEGACY_EDIT_PREFIX.length), key: k, token: localStorage.getItem(k) });
+		}
+	} catch {
+		return;
+	}
+	for (const { id, key, token } of legacy) {
+		if (token) {
+			try {
+				await fetch(`/api/shares/${encodeURIComponent(id)}/owner-session`, { method: 'POST', headers: { 'X-Edit-Token': token } });
+			} catch {
+				/* best effort - the id still gets carried forward below */
+			}
+		}
+		addOwnedShare(id);
+		try {
+			localStorage.removeItem(key);
+		} catch {
+			/* ignore */
+		}
+	}
+}
+
 // What kind of inline preview a file supports.
 export function previewKind(mime = '', name = '') {
 	const m = mime.toLowerCase();

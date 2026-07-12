@@ -8,12 +8,46 @@
 // F-08: the in-memory Map alone does not survive a restart (a redeploy wipes
 // every counter) and evicts oldest-first under a flood of unique keys (see
 // reclaim() below) - for most buckets that is an acceptable, deliberate
-// tradeoff (see MAX_BUCKETS' comment), but for the five credential
-// brute-force buckets it means a restart, or a flood of unrelated keys
-// crowding the Map, can silently reset an attacker's login/unlock counter.
-// Those five buckets get a synchronous SQLite write-through (see
-// PERSIST_PREFIXES) so their state survives both. Every other bucket is
-// unchanged: pure in-memory, zero disk I/O, zero behavior change.
+// tradeoff (see MAX_BUCKETS' comment), but for the credential brute-force
+// buckets it means a restart, or a flood of unrelated keys crowding the Map,
+// can silently reset an attacker's login/unlock counter. Those buckets get a
+// synchronous SQLite write-through (see PERSIST_PREFIXES) so their state
+// survives both. Every other bucket is unchanged: pure in-memory, zero disk
+// I/O, zero behavior change.
+//
+// M-03: the same reset-on-restart problem applies to the request-count
+// bucket that gates access to a maxDownloads-limited or password-protected
+// share's bytes (preview/download's shared 'dl:<shareId>' bucket) - a restart
+// mid-abuse would otherwise hand an attacker a fresh budget against those
+// controls too. It is persisted the same way, but is NOT a credential
+// bucket (no password/token is checked against it directly) so it is
+// deliberately excluded from CREDENTIAL_PREFIXES below and never triggers a
+// ratelimit.blocked audit entry - only the request-count signal is made
+// durable.
+//
+// GAP 2 fix: this only matters for a share that is ACTUALLY password-
+// protected or max_downloads-limited - those are the only two controls a
+// restart could hand an attacker a fresh budget against. routes/download.js
+// picks between the persisted 'dl:' bucket and a plain 'dlv:' bucket
+// (identical request-count limit, just never written to SQLite - the prefix
+// intentionally does not match PERSIST_PREFIXES below) based on the target
+// share's password_hash/max_downloads at request time. An ordinary
+// public/unlimited share - preview/download's highest-volume,
+// unauthenticated, publicly-reachable path - has no restart-survival need,
+// so it stays on the original zero-I/O in-memory path instead of paying a
+// synchronous SQLite UPSERT on every single request.
+//
+// The download-all 'zip' bucket does NOT get this protected-vs-unprotected
+// split: it is a single unconditional per-IP key regardless of the target
+// share, persisted unconditionally too. Splitting it by share protection
+// would (a) require resolving the share before enforce() can run, spending a
+// SQLite SELECT on every request in exactly the flood scenario the limiter
+// exists to reject at zero cost, and (b) hand an attacker a second,
+// independent 30/60s allowance by exhausting the bucket against a
+// password-protected share they made themselves before moving on to an
+// unprotected one. Its cap is already low (30/60s), so the write-amplification
+// concern that motivated the conditional split for the much higher-volume
+// 'dl:' bucket doesn't apply here.
 
 import { SECURITY_HEADERS } from './http.js';
 import { db } from '../db.js';
@@ -24,7 +58,17 @@ import { audit } from './audit.js';
 // routes/shares.js /api/upload/verify and /api/shares/:id/unlock) that get
 // persisted to SQLite in addition to living in memory. Keep in sync with
 // those call sites.
-const PERSIST_PREFIXES = ['admin-login:', 'apikey-login:', 'upload-verify:', 'unlock:', 'admin-mfa:'];
+const CREDENTIAL_PREFIXES = ['admin-login:', 'apikey-login:', 'upload-verify:', 'unlock:', 'admin-mfa:'];
+// M-03: also persist the request-count bucket gating a maxDownloads-limited
+// or password-protected share's byte-serving routes (routes/download.js's
+// preview/download 'dl:<shareId>' bucket) - see the file-header comment
+// above. Only a request against an actually-protected share ever mints a
+// 'dl:' key; routes/download.js sends an unprotected share's requests
+// through 'dlv:' instead, which deliberately does NOT match here (GAP 2
+// fix). The download-all 'zip' bucket is unconditional (no protected/
+// unprotected split - see the file-header comment above) and always
+// persisted.
+const PERSIST_PREFIXES = [...CREDENTIAL_PREFIXES, 'dl:', 'zip:'];
 const isPersisted = key => PERSIST_PREFIXES.some(p => key.startsWith(p));
 
 // Persisted (credential brute-force) buckets vs everything else. Splitting
@@ -102,12 +146,14 @@ export function enforce(bucket, ip, max, windowMs) {
 	const key = `${bucket}:${ip || 'unknown'}`;
 	const r = hit(key, max, windowMs);
 	if (r.allowed) return null;
-	// ratelimit.blocked is ONLY audited for the five credential-brute-force
-	// security buckets (PERSIST_PREFIXES) - the password-unlock-threshold
-	// signal. Every other (volatile) bucket is deliberately never audited:
-	// noise plus attacker-driven write amplification against a bucket that
-	// isn't a credential-guessing signal in the first place.
-	const prefix = PERSIST_PREFIXES.find(p => key.startsWith(p));
+	// ratelimit.blocked is ONLY audited for the credential-brute-force
+	// security buckets (CREDENTIAL_PREFIXES) - the password-unlock-threshold
+	// signal. Every other bucket - including the persisted-but-not-credential
+	// 'dl:'/'zip:' buckets - is deliberately never audited: noise plus
+	// attacker-driven write amplification against a bucket that isn't a
+	// credential-guessing signal in the first place (a legitimate visitor
+	// hammering a hot share's download link is not a security event).
+	const prefix = CREDENTIAL_PREFIXES.find(p => key.startsWith(p));
 	if (prefix) audit('ratelimit.blocked', { ip, detail: { bucket: prefix.slice(0, -1) } });
 	return new Response(JSON.stringify({ error: 'Too many requests. Please slow down.', retryAfter: r.retryAfter }), {
 		status: 429,

@@ -6,6 +6,17 @@
 // and return a Response (or a promise of one). Registration is order-independent
 // because matching is exact on the segment structure.
 
+// Thrown when a path segment can't be safely decoded/used as a route param -
+// the request is malformed, not merely "no route matched", so callers must
+// answer 400 instead of letting it fall through to the generic 500 handler
+// or to static-file/slug fallback matching (see server.js's fetch() catch).
+export class RouterError extends Error {
+	constructor(message) {
+		super(message);
+		this.status = 400;
+	}
+}
+
 export class Router {
 	constructor() {
 		this.routes = [];
@@ -47,6 +58,25 @@ export class Router {
 	}
 }
 
+// Decode a single ":param" path segment. Throws RouterError (not the raw
+// URIError) on malformed percent-encoding, and also rejects a decoded value
+// that contains an encoded "/", "\" or NUL byte - route params are meant to
+// be a single opaque segment (ids, filenames, etc.), so a smuggled separator
+// or NUL can only be an attempt to confuse downstream path/comparison logic,
+// never a legitimate value.
+function decodeSegment(raw) {
+	let decoded;
+	try {
+		decoded = decodeURIComponent(raw);
+	} catch {
+		throw new RouterError('Malformed URL encoding');
+	}
+	if (decoded.includes('/') || decoded.includes('\\') || decoded.includes('\0')) {
+		throw new RouterError('Malformed URL encoding');
+	}
+	return decoded;
+}
+
 function matchSegments(segments, parts) {
 	const params = {};
 	for (let i = 0; i < segments.length; i++) {
@@ -57,7 +87,7 @@ function matchSegments(segments, parts) {
 		}
 		if (i >= parts.length) return null;
 		if (seg.startsWith(':')) {
-			params[seg.slice(1)] = decodeURIComponent(parts[i]);
+			params[seg.slice(1)] = decodeSegment(parts[i]);
 		} else if (seg !== parts[i]) {
 			return null;
 		}

@@ -16,7 +16,7 @@
 import { createHash } from 'node:crypto';
 import { config } from '../config.js';
 import { db, now } from '../db.js';
-import { json, error, requestOrigin, cookie, clearCookie, requestScheme, requireSameOrigin } from '../lib/http.js';
+import { json, error, requestOrigin, cookie, clearSessionCookie, sessionCookieName, requestScheme, requireSameOrigin, readJson, LOGIN_BODY_MAX, METADATA_BODY_MAX, SECURITY_HEADERS } from '../lib/http.js';
 import { hashPassword, hashSecretToken } from '../lib/crypto.js';
 import { newShareId, newFileId, newToken } from '../lib/ids.js';
 import { writeChunk, deleteShareFiles, isCleanupPending } from '../lib/storage.js';
@@ -102,14 +102,6 @@ function sanitizeName(name) {
 		.map(s => s.replace(/[\x00-\x1f\x7f]/g, '').replace(/^[A-Za-z]:$/, '').trim())
 		.filter(s => s && s !== '.' && s !== '..');
 	return parts.join('/').slice(0, 1024) || 'file';
-}
-
-async function readJson(req) {
-	try {
-		return await req.json();
-	} catch {
-		return null;
-	}
 }
 
 // Normalize share options from either a JSON body or query params (values may be
@@ -261,7 +253,9 @@ export default function apiV1(router) {
 		if (csrf) return csrf;
 		const limited = enforce('apikey-login', ctx.ip, 10, 5 * 60 * 1000);
 		if (limited) return limited;
-		const body = (await readJson(ctx.req)) || {};
+		const { value, response } = await readJson(ctx.req, LOGIN_BODY_MAX);
+		if (response) return response;
+		const body = value || {};
 		const token = typeof body.token === 'string' ? body.token.trim() : '';
 		const name = typeof body.name === 'string' ? body.name.trim() : '';
 		const key = verifyApiKey(token);
@@ -273,8 +267,9 @@ export default function apiV1(router) {
 			return error(403, 'That name and token do not match an active key');
 		}
 		audit('apikey.login.success', { ip: ctx.ip, actor: `apikey:${key.id}` });
-		const setCookie = cookie(APIKEY_COOKIE, issueApiKeySession(key), {
-			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure: requestScheme(ctx.req, ctx.url, ctx.server) === 'https',
+		const secure = requestScheme(ctx.req, ctx.url, ctx.server) === 'https';
+		const setCookie = cookie(sessionCookieName(APIKEY_COOKIE, secure), issueApiKeySession(key), {
+			maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure,
 		});
 		return json({ id: key.id, name: key.name }, { headers: { 'Set-Cookie': setCookie } });
 	});
@@ -289,7 +284,14 @@ export default function apiV1(router) {
 	router.post('/api/v1/logout', ctx => {
 		const csrf = requireSameOrigin(ctx.req);
 		if (csrf) return csrf;
-		return json({ ok: true }, { headers: { 'Set-Cookie': clearCookie(APIKEY_COOKIE) } });
+		const secure = requestScheme(ctx.req, ctx.url, ctx.server) === 'https';
+		// Clears BOTH the current dynamic cookie name and the legacy plain name
+		// (see clearSessionCookie()) - readSessionCookie()'s migration fallback
+		// means a pre-existing session issued under the plain name must not
+		// survive logout just because this request's scheme now mints "__Host-".
+		const headers = new Headers({ 'Content-Type': 'application/json; charset=utf-8', ...SECURITY_HEADERS });
+		for (const c of clearSessionCookie(APIKEY_COOKIE, secure)) headers.append('Set-Cookie', c);
+		return new Response(JSON.stringify({ ok: true }), { headers });
 	});
 
 	// ---- Key check ---------------------------------------------------------
@@ -326,7 +328,9 @@ export default function apiV1(router) {
 		const limited = enforceKey('api-create', key.id, 120, 10 * 60 * 1000);
 		if (limited) return limited;
 
-		const body = (await readJson(ctx.req)) || {};
+		const { value, response } = await readJson(ctx.req, METADATA_BODY_MAX);
+		if (response) return response;
+		const body = value || {};
 		const parsed = parseOptions(body);
 		if (parsed.error) return error(400, parsed.error);
 
@@ -360,11 +364,13 @@ export default function apiV1(router) {
 	// finalized single-file share is returned. Larger or resumable uploads should
 	// use POST /api/v1/shares + the standard chunked endpoints instead.
 	//
-	// `password` is the one option that should NOT be passed as a query param
-	// (URLs end up in proxy logs, browser history, Referer headers): send it via
-	// the `X-Upload-Password` header instead. `?password=` still works for
-	// backwards compatibility for one release but is deprecated - remove it in a
-	// future release once clients have migrated.
+	// `password` is the one option that must NOT be passed as a query param (URLs
+	// end up in proxy logs, browser history, Referer headers) - send it via the
+	// `X-Upload-Password` header instead. M-01: the `?password=` back-compat
+	// fallback has been removed outright (it is no longer read at all, not even
+	// as a lower-precedence fallback) - a request that still sends `?password=`
+	// is rejected with 400 rather than silently proceeding without it, so a
+	// stale client fails loud instead of quietly publishing an unprotected share.
 	declareRoutePolicy('POST', '/api/v1/upload', { auth: 'apiKeyOrSession', csrf: true, rateLimit: 'api-upload', audit: 'share.created' });
 	router.post('/api/v1/upload', async ctx => {
 		const auth = authenticateSource(ctx.req);
@@ -387,15 +393,17 @@ export default function apiV1(router) {
 		const name = sanitizeName(rawName);
 		const mime = q.get('mime') || 'application/octet-stream';
 
-		// Prefer the password from the X-Upload-Password header: URLs (and thus
-		// query params) end up in proxy access logs, browser history, and the
-		// Referer header, none of which apply to headers. The `?password=` query
-		// form is kept for one release for backwards compatibility and should be
-		// removed once callers have migrated to the header.
+		// The password comes ONLY from the X-Upload-Password header now (M-01):
+		// URLs (and thus query params) end up in proxy access logs, browser
+		// history, and the Referer header, none of which apply to headers. A
+		// client still sending `?password=` is not silently ignored - that would
+		// leave it believing its share is protected when it is not - it is
+		// rejected outright so the caller notices and switches to the header.
+		if (q.get('password')) return error(400, 'Send the share password via the X-Upload-Password header');
 		const parsed = parseOptions({
 			title: q.get('title'),
 			slug: q.get('slug'),
-			password: ctx.req.headers.get('x-upload-password') || q.get('password'),
+			password: ctx.req.headers.get('x-upload-password'),
 			expiresIn: q.get('expiresIn'),
 			maxDownloads: q.get('maxDownloads'),
 			oneTime: q.get('oneTime'),

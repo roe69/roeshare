@@ -8,7 +8,10 @@
 //       releaseDownload the single-file path already used - a race that let
 //       N concurrent zip requests all succeed against a maxDownloads=1 share.
 // F-11: preview responses were cached for a year even for password/one-time/
-//       capped shares.
+//       capped shares. (Superseded by L-05, below: even an "uncontrolled"
+//       share is revocable - not a deliberately public, content-addressed
+//       object - so preview now always sends no-store, with no long-lived
+//       branch left at all.)
 // F-15: a malformed percent-encoded cookie value threw uncaught out of
 //       parseCookies, producing a generic 500 for the whole request.
 // F-16: the unauthorized-metadata response for a protected share leaked the
@@ -188,9 +191,9 @@ describe('F-02: zip download atomically enforces maxDownloads', () => {
 	});
 });
 
-describe('F-11: preview caching reflects protection state', () => {
-	test('an uncontrolled public share still gets a long immutable cache', async () => {
-		const dir = freshDataDir('f11-public');
+describe('L-05: preview is never cached, even for an uncontrolled share', () => {
+	test('an uncontrolled public share still gets no-store (it is revocable - deletable/expirable, and not content-addressed)', async () => {
+		const dir = freshDataDir('l05-public');
 		try {
 			const proc = await bootServer(dir, 3612);
 			try {
@@ -199,7 +202,7 @@ describe('F-11: preview caching reflects protection state', () => {
 
 				const res = await fetch(`${base}/api/shares/${id}/files/${fileId}/preview`);
 				expect(res.status).toBe(200);
-				expect(res.headers.get('cache-control')).toBe('private, max-age=31536000, immutable');
+				expect(res.headers.get('cache-control')).toBe('no-store');
 				await res.arrayBuffer();
 			} finally {
 				await stopServer(proc);

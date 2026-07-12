@@ -2,15 +2,19 @@
 // password as a URL query param (?password=), which ends up in proxy access
 // logs, browser history, and Referer headers - all things a password should
 // never appear in. Fixed by accepting the password via a dedicated
-// `X-Upload-Password` request header instead, while keeping `?password=` as a
-// deprecated back-compat fallback for one release.
+// `X-Upload-Password` request header instead. F-07 originally kept `?password=`
+// as a deprecated back-compat fallback for one release; M-01 removes that
+// fallback outright - a request that still sends `?password=` is now rejected
+// with 400 rather than silently proceeding without a password, so a stale
+// client fails loud instead of quietly publishing an unprotected share.
 //
 // Exercises the real server end to end:
 //   - a one-shot upload with X-Upload-Password succeeds and the resulting
 //     share is actually password-protected (unauthenticated metadata fetch is
 //     gated with { protected: true }, and the correct password unlocks it)
-//   - the old ?password= query form still works too (back-compat)
-//   - when both are sent, the header wins over the query param
+//   - a lone ?password= query param is rejected with 400 (M-01)
+//   - ?password= is rejected with 400 even when a valid X-Upload-Password
+//     header is also sent (M-01: never silently ignored)
 
 import { test, expect, describe } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -81,9 +85,11 @@ function cleanupDir(dir) {
 }
 
 async function adminCookie(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login is
+	// CSRF-checked (L-01: absent Origin/Sec-Fetch-Site now fails closed).
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	expect(res.status).toBe(200);
@@ -95,7 +101,7 @@ async function adminCookie(base) {
 async function makeKey(base, cookie, name) {
 	const res = await fetch(`${base}/api/admin/api-keys`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json', Cookie: cookie },
+		headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 		body: JSON.stringify({ name }),
 	});
 	expect(res.status).toBe(201);
@@ -153,7 +159,7 @@ describe('one-shot upload password (F-07)', () => {
 		}
 	});
 
-	test('legacy ?password= query param still works (back-compat)', async () => {
+	test('?password= alone is rejected with 400 (M-01: no more silent back-compat fallback)', async () => {
 		const dir = freshDataDir('upload-pw-query');
 		try {
 			const proc = await bootServer(dir, 3731);
@@ -168,18 +174,9 @@ describe('one-shot upload password (F-07)', () => {
 					headers: { ...auth, 'X-Filename': 'secret.txt' },
 					body: new Uint8Array([5, 6, 7, 8]),
 				});
-				expect(res.status).toBe(201);
-				const made = await res.json();
-
-				const gatedRes = await fetch(`${base}/api/shares/${made.id}`);
-				expect(gatedRes.status).toBe(401);
-
-				const unlockRes = await fetch(`${base}/api/shares/${made.id}/unlock`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ password: 'query-secret-456' }),
-				});
-				expect(unlockRes.status).toBe(200);
+				expect(res.status).toBe(400);
+				const body = await res.json();
+				expect(body.error).toMatch(/X-Upload-Password/);
 			} finally {
 				await stopServer(proc);
 			}
@@ -188,7 +185,7 @@ describe('one-shot upload password (F-07)', () => {
 		}
 	});
 
-	test('when both are sent, the X-Upload-Password header wins over ?password=', async () => {
+	test('?password= is rejected with 400 even alongside a valid X-Upload-Password header', async () => {
 		const dir = freshDataDir('upload-pw-precedence');
 		try {
 			const proc = await bootServer(dir, 3732);
@@ -203,24 +200,7 @@ describe('one-shot upload password (F-07)', () => {
 					headers: { ...auth, 'X-Filename': 'secret.txt', 'X-Upload-Password': 'header-value' },
 					body: new Uint8Array([9, 9]),
 				});
-				expect(res.status).toBe(201);
-				const made = await res.json();
-
-				// The query-param password must NOT unlock it.
-				const queryUnlock = await fetch(`${base}/api/shares/${made.id}/unlock`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ password: 'query-value' }),
-				});
-				expect(queryUnlock.status).toBe(403);
-
-				// The header password unlocks it.
-				const headerUnlock = await fetch(`${base}/api/shares/${made.id}/unlock`, {
-					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
-					body: JSON.stringify({ password: 'header-value' }),
-				});
-				expect(headerUnlock.status).toBe(200);
+				expect(res.status).toBe(400);
 			} finally {
 				await stopServer(proc);
 			}

@@ -88,9 +88,11 @@ function cleanupDir(dir) {
 }
 
 async function adminCookie(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login is
+	// CSRF-checked (L-01: absent Origin/Sec-Fetch-Site now fails closed).
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	expect(res.status).toBe(200);
@@ -102,7 +104,7 @@ async function adminCookie(base) {
 async function makeScopedKey(base, cookie, name, scopes) {
 	const res = await fetch(`${base}/api/admin/api-keys`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json', Cookie: cookie },
+		headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 		body: JSON.stringify({ name, limits: { scopes } }),
 	});
 	expect(res.status).toBe(201);
@@ -318,7 +320,7 @@ describe('API key operation scopes (F-06)', () => {
 				// request used) must still default to full access.
 				const res = await fetch(`${base}/api/admin/api-keys`, {
 					method: 'POST',
-					headers: { 'Content-Type': 'application/json', Cookie: cookie },
+					headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 					body: JSON.stringify({ name: 'default-full' }),
 				});
 				expect(res.status).toBe(201);

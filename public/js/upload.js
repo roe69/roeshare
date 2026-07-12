@@ -1,7 +1,7 @@
 // Upload page: drag-and-drop, resumable chunked uploads, share options, result
 // card with link, copy, and QR. Uses shared helpers and the rl-* design system.
 
-import { el, $, api, ApiError, toast, toastOk, toastErr, copyText, formatBytes, fileGlyph } from '/js/shared.js';
+import { el, $, api, ApiError, toast, toastOk, toastErr, copyText, formatBytes, fileGlyph, addOwnedShare } from '/js/shared.js';
 import { generateKey, importKey, encryptBytes, encryptString, ENC_OVERHEAD } from '/js/e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
 
@@ -10,7 +10,6 @@ import { mountSidebar } from '/js/sidebar.js';
 // the upload page does not surface it.
 mountSidebar({ active: 'upload' });
 
-const EDIT_KEY = id => `roeshare:edit:${id}`;
 const MAX_CHUNK_RETRIES = 3;
 // Consecutive non-409 chunk failures at the same offset before giving up outright
 // (rather than relying solely on the large maxGuard to eventually bail out).
@@ -21,11 +20,20 @@ const SLUG_BAD_CHARS = /[^A-Za-z0-9_-]/g;
 // ---- Resume drafts (tus-style) --------------------------------------------
 // A refresh or a return-after-disconnect drops the in-memory File objects, so a
 // mid-flight upload cannot continue on its own. We persist a small draft to
-// localStorage (share id, edit token, chunk size, the E2E key, and a fingerprint
-// per file) as the upload runs; on load we offer to resume it once the user
-// re-selects the same files. The server stays the source of truth for how many
-// bytes each file already holds (its `received` count), so the draft never
-// stores per-chunk progress. Cleared on finalize or discard.
+// localStorage (share id, chunk size, and a fingerprint per file) as the
+// upload runs; on load we offer to resume it once the user re-selects the same
+// files. The server stays the source of truth for how many bytes each file
+// already holds (its `received` count), so the draft never stores per-chunk
+// progress. Cleared on finalize or discard.
+//
+// M-05: the edit token is deliberately NOT in this draft (v2, was v1) - the
+// owner-session cookie (set right after share creation, see doUpload below)
+// is what a resumed upload authenticates with instead, so a plain-text bearer
+// credential is no longer sitting in localStorage. The E2E key is likewise
+// moved out to sessionStorage (see draftKey* below) rather than dropped
+// entirely, so E2E resume-after-refresh still works - just not across a
+// closed tab, which is an accepted tradeoff for keeping the key out of
+// long-lived storage.
 const DRAFT_KEY = 'roeshare:draft';
 const DRAFT_MAX_AGE_MS = 24 * 3600 * 1000; // aligns with the server's abandoned-upload sweep
 
@@ -36,7 +44,7 @@ const fingerprint = f => `${f.name}::${f.size}::${f.lastModified}::${f.type || '
 function readDraft() {
 	try {
 		const d = JSON.parse(localStorage.getItem(DRAFT_KEY) || 'null');
-		if (!d || d.v !== 1 || !d.id || !d.token || !Array.isArray(d.files)) return null;
+		if (!d || d.v !== 2 || !d.id || !Array.isArray(d.files)) return null;
 		if (Date.now() - (d.createdAt || 0) > DRAFT_MAX_AGE_MS) return null;
 		return d;
 	} catch { return null; }
@@ -47,6 +55,25 @@ function writeDraft(d) {
 function clearDraft() {
 	try { localStorage.removeItem(DRAFT_KEY); } catch { /* ignore */ }
 }
+
+// The E2E key for an in-progress draft, kept in sessionStorage (survives a
+// refresh, not a closed tab) rather than the localStorage draft itself.
+const draftKeyName = id => `roeshare:draftkey:${id}`;
+function writeDraftKey(id, keyB64) {
+	try { sessionStorage.setItem(draftKeyName(id), keyB64); } catch { /* ignore */ }
+}
+function readDraftKey(id) {
+	try { return sessionStorage.getItem(draftKeyName(id)); } catch { return null; }
+}
+function clearDraftKey(id) {
+	try { sessionStorage.removeItem(draftKeyName(id)); } catch { /* ignore */ }
+}
+
+// X-Edit-Token headers, omitted entirely when `token` is absent (the resume
+// path after a refresh, which has no in-memory token) - the browser then
+// relies on the owner-session cookie set at share creation, sent
+// automatically on same-origin fetches.
+const editTokenHeaders = (token, extra = {}) => (token ? { 'X-Edit-Token': token, ...extra } : { ...extra });
 
 // Exponential backoff with jitter between chunk-retry attempts, so a persistent
 // server/network error does not hammer the server back-to-back on a large upload.
@@ -511,14 +538,14 @@ async function uploadFile(id, token, file, chunkSize, onProgress, name, existing
 		received = existing.received || 0;
 	} else {
 		const mime = file.type || 'application/octet-stream';
-		const reg = await api.post(`/api/shares/${id}/files`, { name: name || file.name, size: file.size, mime }, { headers: { 'X-Edit-Token': token } });
+		const reg = await api.post(`/api/shares/${id}/files`, { name: name || file.name, size: file.size, mime }, { headers: editTokenHeaders(token) });
 		fileId = reg.fileId;
 		received = typeof reg.received === 'number' ? reg.received : 0;
 		if (onRegister) onRegister(fileId);
 	}
 	onProgress(received, file.size);
 
-	const headers = { 'X-Edit-Token': token, 'Content-Type': 'application/octet-stream' };
+	const headers = editTokenHeaders(token, { 'Content-Type': 'application/octet-stream' });
 
 	// Zero-byte file: a single empty chunk completes it (skip if already written).
 	if (file.size === 0) {
@@ -576,7 +603,7 @@ async function uploadFile(id, token, file, chunkSize, onProgress, name, existing
 				if (attempt === MAX_CHUNK_RETRIES - 1) {
 					// Final failure for this round: ask the server where it is and resume.
 					try {
-						const st = await api.get(`/api/shares/${id}/files/${fileId}/status`, { headers: { 'X-Edit-Token': token } });
+						const st = await api.get(`/api/shares/${id}/files/${fileId}/status`, { headers: editTokenHeaders(token) });
 						if (typeof st.received === 'number') {
 							received = st.received;
 							onProgress(received, file.size);
@@ -614,11 +641,11 @@ async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name, 
 		// Encrypted metadata: real name (incl. folder path), mime, and the plaintext
 		// chunk size so the recipient can frame the records for decryption.
 		const meta = await encryptString(key, JSON.stringify({ name: name || file.name, mime: file.type || 'application/octet-stream', cs: chunkSize }));
-		const reg = await api.post(`/api/shares/${id}/files`, { name: meta, size: cipherSize, mime: 'application/octet-stream' }, { headers: { 'X-Edit-Token': token } });
+		const reg = await api.post(`/api/shares/${id}/files`, { name: meta, size: cipherSize, mime: 'application/octet-stream' }, { headers: editTokenHeaders(token) });
 		fileId = reg.fileId;
 		if (onRegister) onRegister(fileId);
 	}
-	const headers = { 'X-Edit-Token': token, 'Content-Type': 'application/octet-stream' };
+	const headers = editTokenHeaders(token, { 'Content-Type': 'application/octet-stream' });
 
 	let cipherOff = existing && existing.fileId ? (existing.received || 0) : 0;
 	onProgress(cipherOff, cipherSize);
@@ -671,7 +698,7 @@ async function uploadFileE2E(id, token, file, key, chunkSize, onProgress, name, 
 				if (attempt === MAX_CHUNK_RETRIES - 1) {
 					// Final failure for this round: ask the server where it is and resume.
 					try {
-						const st = await api.get(`/api/shares/${id}/files/${fileId}/status`, { headers: { 'X-Edit-Token': token } });
+						const st = await api.get(`/api/shares/${id}/files/${fileId}/status`, { headers: editTokenHeaders(token) });
 						if (typeof st.received === 'number') cipherOff = st.received;
 					} catch (e2) {
 						if (e2 instanceof ApiError && e2.status === 404) {
@@ -821,9 +848,16 @@ async function doUpload() {
 	const id = share.id;
 	const token = share.editToken;
 	const chunkSize = share.chunkSize || (config && config.chunkSize) || 1024 * 1024;
+
+	// M-05: exchange the edit token for an HttpOnly owner-session cookie right
+	// away, so a resumed upload (after a refresh, once the in-memory token is
+	// gone) can still authenticate. The live upload below keeps using the
+	// in-memory token directly regardless of whether this succeeds - it is not
+	// on the critical path, just best-effort setup for a possible resume.
 	try {
-		localStorage.setItem(EDIT_KEY(id), token);
-	} catch (_) {}
+		await api.post(`/api/shares/${id}/owner-session`, undefined, { headers: { 'X-Edit-Token': token } });
+	} catch (_) { /* resume-after-refresh just won't be offered if this failed */ }
+	addOwnedShare(id);
 
 	// End-to-end mode: generate the key in the browser. It is never sent to the
 	// server - only appended to the final share link (#key).
@@ -842,16 +876,18 @@ async function doUpload() {
 	}
 
 	// Persist a resume draft before any bytes go up, so a refresh mid-upload can
-	// continue. The E2E key is stored too (a deliberate tradeoff: it lets an E2E
-	// upload resume, and lives only until finalize/discard). fileIds fill in as
-	// each file registers.
+	// continue. The E2E key is kept separately in sessionStorage (see
+	// writeDraftKey) rather than in this draft - resume then authenticates via
+	// the owner-session cookie above, not a token in the draft. fileIds fill in
+	// as each file registers.
 	draft = {
-		v: 1, id, token, chunkSize,
-		e2e: !!e2eKey, key: e2eKeyB64 || null,
+		v: 2, id, chunkSize,
+		e2e: !!e2eKey,
 		createdAt: Date.now(),
 		files: selected.map(item => ({ fp: fingerprint(item.file), path: item.path, size: item.file.size, fileId: null })),
 	};
 	writeDraft(draft);
+	if (e2eKeyB64) writeDraftKey(id, e2eKeyB64);
 	for (const item of selected) item._resume = null; // a fresh upload, nothing to resume
 
 	await runUpload({ id, token, chunkSize, e2eKey, e2eKeyB64 });
@@ -901,8 +937,9 @@ async function runUpload({ id, token, chunkSize, e2eKey, e2eKeyB64 }) {
 	}
 
 	try {
-		const fin = await api.post(`/api/shares/${id}/finalize`, undefined, { headers: { 'X-Edit-Token': token } });
+		const fin = await api.post(`/api/shares/${id}/finalize`, undefined, { headers: editTokenHeaders(token) });
 		clearDraft();
+		clearDraftKey(id);
 		draft = null;
 		removeResumeBanner();
 		setUploading(false);
@@ -938,19 +975,25 @@ function pendingFiles(d, meta) {
 
 // On load: if a valid unfinished draft exists and its share is still live and
 // unfinalized, offer to resume it. A share that has vanished (expired, deleted,
-// or swept) or already finished quietly clears the stale draft.
+// or swept) or already finished quietly clears the stale draft. M-05: no
+// X-Edit-Token header here - the draft no longer carries one, so this relies
+// entirely on the owner-session cookie set at creation time. `meta.owner`
+// coming back false (cookie expired, or never got set) is treated exactly
+// like a dead share: the draft is unresumable, so it is cleared.
 async function maybeOfferResume() {
 	const d = readDraft();
 	if (!d) return;
 	let meta;
 	try {
-		meta = await api.get(`/api/shares/${d.id}`, { headers: { 'X-Edit-Token': d.token } });
+		meta = await api.get(`/api/shares/${d.id}`);
 	} catch (e) {
 		clearDraft();
+		clearDraftKey(d.id);
 		return;
 	}
 	if (!meta || !meta.owner || meta.finalized || !pendingFiles(d, meta).length) {
 		clearDraft();
+		clearDraftKey(d.id);
 		return;
 	}
 	renderResumeBanner(d, meta);
@@ -1041,9 +1084,20 @@ async function startResume(d, meta, files) {
 
 	draft = d;
 	let e2eKey = null;
+	let e2eKeyB64 = '';
 	if (d.e2e) {
+		// M-05: the key lives in sessionStorage (see writeDraftKey), not the
+		// draft itself - absent means either it was never written (quota/private
+		// mode) or the tab was closed and reopened (sessionStorage does not
+		// survive that), both unresumable the same way a wrong key is.
+		e2eKeyB64 = readDraftKey(d.id) || '';
+		if (!e2eKeyB64) {
+			toastErr('The encryption key for this upload is no longer available; discarding it.');
+			await discardDraft(d);
+			return;
+		}
 		try {
-			e2eKey = await importKey(d.key);
+			e2eKey = await importKey(e2eKeyB64);
 		} catch (e) {
 			toastErr('Could not restore the encryption key; discarding this upload.');
 			await discardDraft(d);
@@ -1054,17 +1108,22 @@ async function startResume(d, meta, files) {
 	setUploading(true);
 	resultEl.classList.add('rl-hidden');
 	// Resume always uses the draft's chunk size so E2E records line up with the
-	// server's stored offset.
-	await runUpload({ id: d.id, token: d.token, chunkSize: d.chunkSize, e2eKey, e2eKeyB64: d.key || '' });
+	// server's stored offset. No token: the in-memory one is gone after a
+	// refresh, so this authenticates via the owner-session cookie instead
+	// (see editTokenHeaders).
+	await runUpload({ id: d.id, token: null, chunkSize: d.chunkSize, e2eKey, e2eKeyB64 });
 }
 
+// M-05: no X-Edit-Token header - a resumed draft has no in-memory token, so
+// this relies on the owner-session cookie exactly like the rest of the resume
+// path.
 async function discardDraft(d) {
 	try {
-		await api.del(`/api/shares/${d.id}`, { headers: { 'X-Edit-Token': d.token } });
+		await api.del(`/api/shares/${d.id}`);
 	} catch (e) {
 		/* already gone - fine */
 	}
-	try { localStorage.removeItem(EDIT_KEY(d.id)); } catch (_) {}
+	clearDraftKey(d.id);
 	clearDraft();
 	draft = null;
 	removeResumeBanner();

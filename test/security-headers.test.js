@@ -120,14 +120,17 @@ async function makeShare(base, body) {
 }
 
 describe('F-12: Cross-Origin-Opener-Policy / Cross-Origin-Resource-Policy', () => {
-	test('an ordinary JSON API response gets COOP:same-origin and CORP:same-origin', async () => {
+	test('the public /health liveness response gets COOP:same-origin and CORP:same-origin', async () => {
 		const dir = freshDataDir('coop-json');
 		try {
 			const proc = await bootServer(dir, 3760);
 			try {
 				const base = 'http://127.0.0.1:3760';
 				const res = await fetch(`${base}/health`);
-				expect(res.status).toBe(200);
+				// L-07: /health is a fixed, no-body liveness probe (no uptime/version
+				// disclosure), but it must still carry the same security headers as
+				// every other response.
+				expect(res.status).toBe(204);
 				expect(res.headers.get('cross-origin-opener-policy')).toBe('same-origin');
 				expect(res.headers.get('cross-origin-resource-policy')).toBe('same-origin');
 				// Pre-existing headers must still be present alongside the new ones.

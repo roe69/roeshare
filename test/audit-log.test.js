@@ -78,9 +78,11 @@ function cleanupDir(dir) {
 }
 
 async function adminCookie(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login is
+	// CSRF-checked (L-01: absent Origin/Sec-Fetch-Site now fails closed).
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	expect(res.status).toBe(200);
@@ -91,16 +93,18 @@ async function adminCookie(base) {
 describe('audit log', () => {
 	test('a failed admin login, an API key revoke, and a CSRF rejection each produce exactly one correctly-shaped, secret-free row', async () => {
 		const dir = freshDataDir('audit-log');
-		const port = 3800;
+		const port = 3940;
 		try {
 			const proc = await bootServer(dir, port);
 			try {
 				const base = `http://127.0.0.1:${port}`;
 
 				// 1. A failed admin login (wrong password) -> admin.login.failure.
+				// Origin: base so this reaches the password check (L-01 CSRF gate runs
+				// first) instead of being rejected as a CSRF failure itself.
 				const badLogin = await fetch(`${base}/api/admin/login`, {
 					method: 'POST',
-					headers: { 'Content-Type': 'application/json' },
+					headers: { 'Content-Type': 'application/json', Origin: base },
 					body: JSON.stringify({ password: 'definitely-wrong' }),
 				});
 				expect(badLogin.status).toBe(403);
@@ -111,7 +115,7 @@ describe('audit log', () => {
 				// 2. Create then revoke an API key -> apikey.created, apikey.revoked.
 				const createRes = await fetch(`${base}/api/admin/api-keys`, {
 					method: 'POST',
-					headers: { 'Content-Type': 'application/json', Cookie: cookie },
+					headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 					body: JSON.stringify({ name: 'audit-log-test-key' }),
 				});
 				expect(createRes.status).toBe(201);
@@ -120,7 +124,7 @@ describe('audit log', () => {
 
 				const revokeRes = await fetch(`${base}/api/admin/api-keys/${key.id}/revoke`, {
 					method: 'POST',
-					headers: { Cookie: cookie },
+					headers: { Cookie: cookie, Origin: base },
 				});
 				expect(revokeRes.status).toBe(200);
 

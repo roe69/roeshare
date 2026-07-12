@@ -128,9 +128,11 @@ function cookieNamed(cookies, name) {
 }
 
 async function passwordLogin(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login is
+	// CSRF-checked (L-01: absent Origin/Sec-Fetch-Site now fails closed).
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: ADMIN_PASSWORD }),
 	});
 	return res;
@@ -148,7 +150,7 @@ async function fullAdminCookie(base) {
 async function enrollMfa(base, adminCookie) {
 	const setupRes = await fetch(`${base}/api/admin/mfa/setup`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+		headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
 		body: '{}',
 	});
 	expect(setupRes.status).toBe(200);
@@ -159,7 +161,7 @@ async function enrollMfa(base, adminCookie) {
 	const code = totpCodeIndependent(secret);
 	const confirmRes = await fetch(`${base}/api/admin/mfa/confirm`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json', Cookie: adminCookie },
+		headers: { 'Content-Type': 'application/json', Cookie: adminCookie, Origin: base },
 		body: JSON.stringify({ code }),
 	});
 	expect(confirmRes.status).toBe(200);
@@ -211,7 +213,7 @@ describe('F-13 admin TOTP MFA', () => {
 			const code = totpCodeIndependent(secret, 1);
 			const mfaRes = await fetch(`${base}/api/admin/login/mfa`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: mfaCookieHeader },
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookieHeader, Origin: base },
 				body: JSON.stringify({ code }),
 			});
 			expect(mfaRes.status).toBe(200);
@@ -246,7 +248,7 @@ describe('F-13 admin TOTP MFA', () => {
 
 			const wrong = await fetch(`${base}/api/admin/login/mfa`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie },
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie, Origin: base },
 				body: JSON.stringify({ code: '000000' }),
 			});
 			expect(wrong.status).toBe(403);
@@ -254,7 +256,7 @@ describe('F-13 admin TOTP MFA', () => {
 
 			const missing = await fetch(`${base}/api/admin/login/mfa`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie },
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie, Origin: base },
 				body: JSON.stringify({}),
 			});
 			expect(missing.status).toBe(403);
@@ -308,7 +310,7 @@ describe('F-13 admin TOTP MFA', () => {
 			const mfaCookie = cookieNamed(getSetCookies(loginRes), 'roeshare_admin_mfa').split(';')[0];
 			const mfaLoginRes = await fetch(`${base}/api/admin/login/mfa`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie },
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie, Origin: base },
 				// Offset +1 for the same replay-guard reason as the enroll/login test.
 				body: JSON.stringify({ code: totpCodeIndependent(secret, 1) }),
 			});
@@ -322,7 +324,7 @@ describe('F-13 admin TOTP MFA', () => {
 			// login above, which the server's replay guard would reject.
 			const disableRes = await fetch(`${base}/api/admin/mfa/disable`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: workingAdminCookie },
+				headers: { 'Content-Type': 'application/json', Cookie: workingAdminCookie, Origin: base },
 				body: JSON.stringify({ password: ADMIN_PASSWORD, code: backupCodes[0] }),
 			});
 			expect(disableRes.status).toBe(200);
@@ -355,7 +357,7 @@ describe('F-13 admin TOTP MFA', () => {
 
 			const first = await fetch(`${base}/api/admin/login/mfa`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie },
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie, Origin: base },
 				body: JSON.stringify({ code: backupCode }),
 			});
 			expect(first.status).toBe(200);
@@ -366,7 +368,7 @@ describe('F-13 admin TOTP MFA', () => {
 			const mfaCookie2 = cookieNamed(getSetCookies(loginRes2), 'roeshare_admin_mfa').split(';')[0];
 			const second = await fetch(`${base}/api/admin/login/mfa`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie2 },
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie2, Origin: base },
 				body: JSON.stringify({ code: backupCode }),
 			});
 			expect(second.status).toBe(403);
@@ -379,7 +381,7 @@ describe('F-13 admin TOTP MFA', () => {
 			const mfaCookie3 = cookieNamed(getSetCookies(loginRes3), 'roeshare_admin_mfa').split(';')[0];
 			const third = await fetch(`${base}/api/admin/login/mfa`, {
 				method: 'POST',
-				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie3 },
+				headers: { 'Content-Type': 'application/json', Cookie: mfaCookie3, Origin: base },
 				body: JSON.stringify({ code: secondCode.replace('-', '').toLowerCase() }),
 			});
 			expect(third.status).toBe(200);

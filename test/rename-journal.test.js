@@ -91,9 +91,11 @@ function cleanupDir(dir) {
 }
 
 async function adminCookie(base) {
+	// Origin: base simulates a legitimate same-origin browser request - login is
+	// CSRF-checked (L-01: absent Origin/Sec-Fetch-Site now fails closed).
 	const res = await fetch(`${base}/api/admin/login`, {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: { 'Content-Type': 'application/json', Origin: base },
 		body: JSON.stringify({ password: 'RenameJournalTest-Pw-2026' }),
 	});
 	expect(res.status).toBe(200);
@@ -117,7 +119,7 @@ function insertShareAndFile(db, { shareId, fileId, rawEditToken, content }) {
 describe('share rename journal (F-19)', () => {
 	test('a crash between the DB commit and the filesystem move is repaired on the next boot', async () => {
 		const dir = freshDataDir('rename-crash');
-		const port = 3720;
+		const port = 3930;
 		try {
 			// Boot once just to let db.js create the current schema (including
 			// share_renames), then stop - the rest of this test manipulates the
@@ -168,7 +170,7 @@ describe('share rename journal (F-19)', () => {
 
 	test("a 'requested' journal row (DB transaction never committed) is just dropped on reconcile", async () => {
 		const dir = freshDataDir('rename-requested');
-		const port = 3721;
+		const port = 3931;
 		try {
 			const boot1 = await bootServer(dir, port);
 			await stopServer(boot1);
@@ -211,7 +213,7 @@ describe('share rename journal (F-19)', () => {
 
 	test('an ordinary, uninterrupted admin rename still works end to end and leaves an empty journal', async () => {
 		const dir = freshDataDir('rename-happy');
-		const port = 3722;
+		const port = 3932;
 		try {
 			const proc = await bootServer(dir, port);
 			try {
@@ -249,7 +251,7 @@ describe('share rename journal (F-19)', () => {
 
 				const patchRes = await fetch(`${base}/api/admin/shares/${id}`, {
 					method: 'PATCH',
-					headers: { 'Content-Type': 'application/json', Cookie: cookie },
+					headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
 					body: JSON.stringify({ slug: 'happy-new-slug' }),
 				});
 				expect(patchRes.status).toBe(200);

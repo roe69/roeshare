@@ -13,21 +13,24 @@
 // served, not per-request. A duplicate key or a malformed policy throws
 // there, so a mistake fails the boot, never silently.
 //
-// FOLLOW-UP (not implemented in this batch): src/routes/shares.js,
-// src/routes/uploads.js, and src/routes/pages.js have no declarations yet and
-// are outside test/route-policy.test.js's inScope() predicate. Extending
-// coverage to them needs zero changes to this mechanism - only new
-// declareRoutePolicy(...) lines in those files and a widened inScope()
-// predicate in the test.
+// M-02: boot-enforced fail-closed. assertRouteCoverage() (below) is called
+// from server.js right after registerRoutes(), before Bun.serve() binds a
+// port - a gap between the registered route table and this registry throws
+// there too, so the process never starts serving traffic with an undeclared
+// in-scope route. test/route-policy.test.js calls the exact same function
+// (imported, not reimplemented) as a fast pre-deploy signal, so the test and
+// the boot gate can never disagree.
 
 const AUTH_MODES = new Set([
-	'public',           // no credential required to reach the handler
-	'admin',            // requires the roeshare_admin cookie (isAdmin())
-	'adminIntermediate',// requires the short-lived MFA intermediate cookie only
-	'apiKey',           // requires a bearer/X-Api-Key token (verifyApiKey())
-	'apiKeyOrSession',  // bearer/X-Api-Key token OR the apikey portal-session cookie
-	'shareAccess',       // per-share access token, edit token, or owning API key
-	'editTokenOrKey',    // X-Edit-Token header or the owning API key, no session/cookie
+	'public',            // no credential required to reach the handler
+	'admin',             // requires the roeshare_admin cookie (isAdmin())
+	'adminIntermediate', // requires the short-lived MFA intermediate cookie only
+	'apiKey',            // requires a bearer/X-Api-Key token (verifyApiKey())
+	'apiKeyOrSession',   // bearer/X-Api-Key token OR the apikey portal-session cookie
+	'shareAccess',       // per-share access token, edit token, owning API key, or the per-share owner cookie (M-05)
+	'editTokenOrKey',    // X-Edit-Token header, the owning API key, or the per-share owner cookie (M-05) - the header/key paths carry no ambient credential and so need no CSRF proof; the cookie path does (see the handler's ownerVia()/CSRF branch)
+	'uploadGate',        // upload password in body OR the upload cookie (hasUploadAccess); public when no UPLOAD_PASSWORD is configured
+	'editTokenOrAdmin',  // X-Edit-Token (with keyValidForShare), the per-share owner cookie (M-05), OR the admin cookie
 ]);
 
 const registry = new Map();
@@ -58,4 +61,69 @@ export function policyFor(method, pattern) {
 // The full registry (consumed by test/route-policy.test.js's coverage gate).
 export function allPolicies() {
 	return registry;
+}
+
+// Page routes (src/routes/pages.js): no common prefix worth generalizing, so
+// each is listed literally.
+const EXTRA_IN_SCOPE = new Set([
+	'GET /',
+	'GET /s/:id',
+	'GET /mine',
+	'GET /api',
+	'GET /login',
+	'GET /admin',
+	'GET /site.webmanifest',
+]);
+
+// Which registered routes must carry a declared policy. Every route the
+// Router actually dispatches to (router.routes) is in scope - GET
+// /api/admin/* routes are NOT excluded (a prior version carved them out,
+// which meant a new GET /api/admin/* route could boot silently instead of
+// throwing when it lacked a declaration - exactly the silent-bypass risk
+// M-02 exists to close). The only things exempt from this gate are /health
+// and static-asset serving, and they are exempt by CONSTRUCTION, not by a
+// predicate here: server.js answers /health and serves public/ before/after
+// router.match() ever runs, so neither one is ever a member of router.routes
+// in the first place - see test/route-policy.test.js's assertion that
+// EVERY registered route is in scope, which would fail the moment this
+// function special-cased anything out again.
+export function inScope(route) {
+	if (route.pattern.startsWith('/api/v1/')) return true;
+	if (route.pattern.startsWith('/api/admin/')) return true;
+	// shares.js (create/unlock/meta/finalize/delete), uploads.js (register/
+	// status/chunk), and download.js (preview/download/download-all) all share
+	// this prefix.
+	if (route.pattern.startsWith('/api/shares')) return true;
+	if (route.pattern.startsWith('/api/upload/')) return true;
+	if (route.method === 'GET' && route.pattern === '/api/config') return true;
+	return EXTRA_IN_SCOPE.has(`${route.method} ${route.pattern}`);
+}
+
+// Boot-time (and test-time) fail-closed coverage gate: every in-scope
+// registered route must have a declared policy, and every declared policy
+// must correspond to a registered route (no stale/typo declarations). Throws
+// an Error listing every offending "METHOD pattern" key so a gap is
+// unmissable, rather than returning a boolean a caller could ignore.
+export function assertRouteCoverage(routes) {
+	const registered = new Set(routes.map(r => `${r.method} ${r.pattern}`));
+
+	const missing = [];
+	for (const route of routes) {
+		if (!inScope(route)) continue;
+		const key = `${route.method} ${route.pattern}`;
+		if (!registry.has(key)) missing.push(key);
+	}
+
+	const stale = [];
+	for (const key of registry.keys()) {
+		if (!registered.has(key)) stale.push(key);
+	}
+
+	if (missing.length || stale.length) {
+		const lines = [
+			...missing.map(k => `  missing declaration: ${k}`),
+			...stale.map(k => `  stale declaration (no matching route): ${k}`),
+		];
+		throw new Error(`Route policy coverage gap:\n${lines.join('\n')}`);
+	}
 }

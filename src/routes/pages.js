@@ -5,17 +5,30 @@
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { config } from '../config.js';
-import { error, cookie, requestScheme, SECURITY_HEADERS } from '../lib/http.js';
-import { hasUploadAccess, isAdmin, checkUploadLink, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
+import { error, cookie, sessionCookieName, requestScheme, SECURITY_HEADERS } from '../lib/http.js';
+import { hasUploadAccess, isAdmin, redeemUploadLink, issueUploadToken, UPLOAD_COOKIE } from '../lib/auth.js';
 import { enforce } from '../lib/ratelimit.js';
+import { audit } from '../lib/audit.js';
+import { declareRoutePolicy } from '../lib/routePolicy.js';
 
 const PAGES_DIR = join(import.meta.dir, '..', '..', 'public');
 
 // App pages only load same-origin module scripts and the design-system CSS, plus
 // same-origin media for previews. Inline styles (style="..." attributes) need
 // 'unsafe-inline' for style-src; there are no inline scripts.
+//
+// L-04: object-src is 'none' - nothing in this app ever renders an <object>/
+// <embed>, so there is nothing for it to be load-bearing for; a same-origin/
+// blob object embed was needless attack surface for a MIME-confused or
+// parser-exploited upload. frame-src keeps 'self' (PDF preview iframes at
+// public/js/view.js load the same-origin /preview URL) and 'blob:' (the E2E
+// preview path decrypts client-side and frames the plaintext via a blob: URL,
+// see e2ePreview in view.js) - both are genuinely load-bearing for PDF
+// preview, so they stay, but every iframe RoeShare creates for a preview is
+// additionally given an empty sandbox (see view.js) so framed content can
+// never script, submit forms, or navigate the top-level page.
 const PAGE_CSP =
-	"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'self' blob:; frame-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'";
+	"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; object-src 'none'; frame-src 'self' blob:; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'self'";
 
 // Templated files are rendered once and memoised per file: the tokens
 // ({{APP_NAME}} / {{APP_TITLE}}) resolve from config, which is frozen at boot, so
@@ -53,22 +66,28 @@ export function servePage(file, extraHeaders) {
 export default function pages(router) {
 	// When an upload password is set, an unauthorized visitor gets only the lock
 	// page - the upload portal's markup is never served without the cookie.
+	// The route itself needs no credential (it branches to lock.html for an
+	// unauthorized visitor internally); the magic-link query param is what the
+	// 'magic-link' rate-limit bucket below guards against brute-forcing.
+	declareRoutePolicy('GET', '/', { auth: 'public', csrf: false, rateLimit: 'magic-link', audit: 'upload.link.redeemed' });
 	router.get('/', ctx => {
 		const { req, url, ip, server } = ctx;
 
-		// Magic-link login: ?token=<upload password | quick-access token> grants
-		// the upload cookie and redirects to a clean URL (so the token does not
-		// linger in the address bar/history). Rate-limited and constant-time so the
-		// query string cannot be brute-forced; an invalid token silently falls
-		// through to the lock page, revealing nothing.
+		// Magic-link login: ?token=<quick-access token> grants the upload cookie
+		// and redirects to a clean URL (so the token does not linger in the
+		// address bar/history). M-01: the token is now single-use and short-lived
+		// (see lib/auth.js's redeemUploadLink) - a second visit with the same
+		// token falls through to the lock page exactly like an invalid one.
+		// Rate-limited so the token space cannot be brute-forced.
 		if (config.uploadPassword && !hasUploadAccess(req)) {
 			const token = url.searchParams.get('token');
 			if (token) {
 				const limited = enforce('magic-link', ip, 20, 5 * 60 * 1000);
-				if (!limited && checkUploadLink(token)) {
-					const setCookie = cookie(UPLOAD_COOKIE, issueUploadToken(), {
-						maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax',
-						secure: requestScheme(req, url, server) === 'https',
+				if (!limited && redeemUploadLink(token)) {
+					audit('upload.link.redeemed', { ip });
+					const secure = requestScheme(req, url, server) === 'https';
+					const setCookie = cookie(sessionCookieName(UPLOAD_COOKIE, secure), issueUploadToken(), {
+						maxAge: config.adminSessionTtl, httpOnly: true, sameSite: 'Lax', secure,
 					});
 					return new Response(null, { status: 302, headers: { Location: '/', 'Set-Cookie': setCookie, 'Cache-Control': 'no-store' } });
 				}
@@ -78,9 +97,12 @@ export default function pages(router) {
 		const file = config.uploadPassword && !hasUploadAccess(req) ? 'lock.html' : 'upload.html';
 		return servePage(file, { 'Cache-Control': 'no-store' });
 	});
+	declareRoutePolicy('GET', '/s/:id', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/s/:id', () => servePage('view.html'));
+	declareRoutePolicy('GET', '/mine', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/mine', () => servePage('myshares.html'));
 	// API-key portal: sign in with a key name + token to manage that key's shares.
+	declareRoutePolicy('GET', '/api', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/api', () => servePage('apikey.html'));
 
 	// Admin auth is an explicit two-route flow:
@@ -90,12 +112,17 @@ export default function pages(router) {
 	//            matching /js/admin.js is gated the same way in the static handler,
 	//            so the management markup/code never leaves the server unauthorized.
 	const redirect = to => new Response(null, { status: 302, headers: { Location: to, 'Cache-Control': 'no-store' } });
+	declareRoutePolicy('GET', '/login', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/login', ({ req }) => (isAdmin(req) ? redirect('/admin') : servePage('login.html', { 'Cache-Control': 'no-store' })));
+	// The dashboard shell is only ever served past isAdmin() - the redirect-to-
+	// /login fallback is the deny path, not a public serve.
+	declareRoutePolicy('GET', '/admin', { auth: 'admin', csrf: false, rateLimit: null, audit: null });
 	router.get('/admin', ({ req }) => (isAdmin(req) ? servePage('admin.html', { 'Cache-Control': 'no-store' }) : redirect('/login')));
 
 	// The web app manifest is templated too, so the PWA/install name follows
 	// APP_TITLE. Registered as a route (runs before the static handler) so the
 	// {{APP_TITLE}} token is substituted rather than served verbatim.
+	declareRoutePolicy('GET', '/site.webmanifest', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/site.webmanifest', () => {
 		const body = renderPage('site.webmanifest');
 		if (body === null) return error(404, 'Not found');
