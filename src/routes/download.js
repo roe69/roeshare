@@ -259,6 +259,189 @@ function readEnd(id) {
 	else activeReads.set(id, n);
 }
 
+// Security-audit finding (2026-07, "cancelled downloads still burn shares"):
+// a reverse proxy/CDN in front of this process (production sits behind
+// Cloudflare - see DEPLOY.md) can itself fully absorb a streamed response -
+// so trackedStream's onComplete fires exactly as though the delivery fully
+// drained - even when the real visitor's connection was dropped after only a
+// few bytes: the proxy, not this process, is the party that actually
+// observed the failure, and Bun's own socket-close/cancel signal only ever
+// fires for ITS immediate peer (the proxy), never the browser two hops away.
+// Since burning a one-time share's blobs, or permanently spending a
+// maxDownloads slot, is irreversible, a "full" delivery's apparent
+// completion is held PENDING for a short grace window (config.downloadGraceMs)
+// instead of being finalized the instant onComplete fires. While pending, a
+// fresh "full" request against the exact same (already-claimed) share can be
+// treated as a retry of that SAME delivery, not a new grant - the only
+// authorization boundary a one-time/capped link ever had was "whoever holds
+// the link", so redelivering it once more before finalizing hands out
+// nothing the holder was not already entitled to.
+//
+// Follow-up finding (2026-07, "grace window itself defeats maxDownloads"):
+// the first cut of this mechanism keyed pending state by shareId alone (a
+// single boolean-ish slot per share, set the instant ANY claim completed).
+// That let ANY full request landing while ANY grace window was open take the
+// redelivery branch - which skips limitReached()/claimDownload() entirely -
+// regardless of whether it was really a retry of the claim that just
+// completed, or a brand new full request against an already-fully-spent
+// link. Since each redelivery also re-armed the SAME window, plain,
+// non-malicious-looking sequential GETs could ride it to an effectively
+// unbounded number of full 200 deliveries - a complete defeat of
+// maxDownloads/one-time. Fixed with two independent bounds, both keyed to
+// the COMPLETED CLAIM rather than the share:
+//
+//   1. pendingDelivery holds an ARRAY of claim entries per share, not a
+//      single slot - one entry per real, atomically-successful
+//      claimOneTime()/claimDownload() call that has completed but not yet
+//      finalized. A maxDownloads=N share can have up to N of these pending
+//      at once, each with its own independent grace window, so redelivering
+//      one claim's retry can never be confused with, or steal the window
+//      from, a different claim.
+//   2. Every request against a controlled share tries the REAL atomic claim
+//      FIRST, exactly as if no grace mechanism existed. Only when that
+//      fails - i.e. only when the request would otherwise be rejected right
+//      now by limitReached()/"already taken", meaning the cap is genuinely
+//      exhausted - does tryClaimRetry() below look for a pending claim to
+//      redeliver against, and even then only if THAT claim has not already
+//      used up its own small, fixed retry budget
+//      (config.downloadGraceMaxRetries, default 1: one legitimate
+//      completion's worth of retries, not an open-ended allowance). So a
+//      share can never accumulate more genuinely-claimed slots than
+//      maxDownloads allows - claimDownload/claimOneTime's own atomic
+//      counters are the single source of truth for that - and each of those
+//      slots can only ever be redelivered a small, bounded number of extra
+//      times, never indefinitely, no matter how many requests arrive or how
+//      long the window stays open.
+//
+// Each entry's own grace deadline still extends on every retry granted
+// against it (bounded overall at config.downloadGraceMaxMs from THAT
+// claim's own first completion, same as before), so a claim can never be
+// held pending forever - but now "pending" additionally requires spare
+// retry budget on some real, already-completed claim, not merely "some
+// timer somewhere for this share hasn't fired yet".
+//
+// Known, accepted trade-off: two genuinely concurrent retries against the
+// SAME pending claim, landing in the same JS turn, could both pass the
+// retriesUsed check before either one's increment is observed by the other
+// (this process is otherwise single-threaded JS, so this requires two
+// connections whose synchronous claim-decision code happens to interleave
+// around the same microtask boundary). This is a narrow, low-probability
+// race whose worst case is one extra duplicate delivery, not an unbounded
+// one - far lower severity than the bug being fixed, and consistent with
+// the existing trust model (the link itself, not a per-recipient identity,
+// is the only credential a one-time/capped share ever had).
+const pendingDelivery = new Map(); // shareId -> Array<{ firstAt, retriesUsed, timer, finalize }>
+
+// shareIds whose one-time blobs have already been (or are being) burned -
+// guards finalizeOneTimeShare() against ever running twice for the same
+// share (quota.releaseShare()'s documented contract requires exactly ONE
+// call per share - see lib/quota.js's IDEMPOTENCY RULE comment). Self-
+// cleaning: an entry is only ever needed to guard against a LATE retry
+// racing the original grace expiry, a window already bounded by
+// config.downloadGraceMaxMs, so it is dropped after the same interval
+// rather than retained forever.
+const finalizedOneTime = new Set();
+
+function finalizeOneTimeShare(shareId) {
+	if (finalizedOneTime.has(shareId)) return;
+	finalizedOneTime.add(shareId);
+	const t = setTimeout(() => finalizedOneTime.delete(shareId), config.downloadGraceMaxMs);
+	t.unref?.();
+	// Reuses the existing in-flight-read-safe burn path: if some OTHER read (a
+	// fresh retry that started just as this timer fired) is still active for
+	// this share, defer the actual burn to readEnd() above instead of racing
+	// rm -rf against it.
+	burnPending.add(shareId);
+	if ((activeReads.get(shareId) || 0) === 0) { burnPending.delete(shareId); burnBlobs(shareId); }
+}
+
+function pendingEntries(shareId) {
+	return pendingDelivery.get(shareId) || [];
+}
+
+// Whether this share has ANY claim still inside its post-completion grace
+// window - regardless of whether that claim has spare retry budget left.
+// Used to decide whether a share is still resolvable at all (liveOrPendingShare
+// below) and whether the top-level limitReached() gate should let a request
+// through to the real per-claim retry check instead of refusing it outright.
+function hasPendingDelivery(shareId) {
+	return pendingDelivery.has(shareId);
+}
+
+function removePendingEntry(shareId, entry) {
+	const list = pendingDelivery.get(shareId);
+	if (!list) return;
+	const i = list.indexOf(entry);
+	if (i !== -1) list.splice(i, 1);
+	if (list.length === 0) pendingDelivery.delete(shareId);
+}
+
+// (Re)schedules `entry`'s own finalize timer, extending its deadline without
+// ever pushing it past config.downloadGraceMaxMs from ITS OWN firstAt.
+function scheduleFinalize(shareId, entry) {
+	if (entry.timer) clearTimeout(entry.timer);
+	const delay = Math.max(0, Math.min(config.downloadGraceMs, config.downloadGraceMaxMs - (Date.now() - entry.firstAt)));
+	const timer = setTimeout(() => { removePendingEntry(shareId, entry); entry.finalize(); }, delay);
+	timer.unref?.();
+	entry.timer = timer;
+}
+
+// Opens a FRESH, independently-tracked grace window for a genuinely NEW
+// claim (a real claimOneTime()/claimDownload() success) whose delivery has
+// just finished draining. `finalize` runs once THIS claim's own window
+// elapses with no further redelivery of it.
+function armDeliveryGrace(shareId, finalize) {
+	const entry = { firstAt: Date.now(), retriesUsed: 0, timer: null, finalize };
+	const list = pendingDelivery.get(shareId);
+	if (list) list.push(entry);
+	else pendingDelivery.set(shareId, [entry]);
+	scheduleFinalize(shareId, entry);
+	return entry;
+}
+
+// Extends the grace deadline of an EXISTING pending claim (one that
+// tryClaimRetry() below already granted a redelivery against) once that
+// retry's own stream finishes draining. Does NOT touch retriesUsed again -
+// that budget was already spent synchronously at grant time, in
+// tryClaimRetry, so a retry that itself stalls or gets cancelled cannot be
+// used to accumulate extra budget by never completing.
+function extendDeliveryGrace(shareId, entry) {
+	if (pendingDelivery.get(shareId)?.includes(entry)) scheduleFinalize(shareId, entry);
+}
+
+// Grants a redelivery retry against whichever still-pending claim for this
+// share has spare retry budget, consuming one unit of THAT claim's budget
+// (synchronously, before any await - see the header comment's race
+// trade-off) and returning the entry so the caller can extend precisely
+// that claim's own window once the retry completes - or null if every
+// pending claim for this share has already used its full budget, meaning
+// the request must be refused exactly as if no grace mechanism existed.
+function tryClaimRetry(shareId) {
+	for (const entry of pendingEntries(shareId)) {
+		if (entry.retriesUsed < config.downloadGraceMaxRetries) {
+			entry.retriesUsed++;
+			return entry;
+		}
+	}
+	return null;
+}
+
+// A share that is either genuinely live, or a one-time share that is
+// soft-deleted but still has at least one claim within its post-completion
+// grace window above - i.e. still eligible for a same-link redelivery retry.
+// Only this file's single-file and zip GET handlers use this (the ones with
+// claim/burn machinery); every other read path (preview, shares.js's
+// metadata endpoint) intentionally keeps using the plain liveShare() and
+// sees a pending one-time share as gone, exactly like before this fix.
+function liveOrPendingShare(id) {
+	const live = liveShare(id);
+	if (live) return live;
+	if (!hasPendingDelivery(id)) return null;
+	const raw = getShare.get(id);
+	if (!raw || !raw.one_time || raw.deleted_at === null) return null;
+	return raw;
+}
+
 // When an offload mode is configured and the file needs no server-side
 // decryption (E2E, or any file when at-rest encryption is off), return the
 // headers that tell the reverse proxy to serve the raw blob itself via
@@ -448,8 +631,11 @@ export default function download(router) {
 		// same IP.
 		// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
 		// of nonexistent ids would each mint their own bucket in the process-wide
-		// rate-limit map at zero cost to the attacker.
-		const share = liveShare(params.id);
+		// rate-limit map at zero cost to the attacker. liveOrPendingShare (not
+		// plain liveShare) also accepts a one-time share that is soft-deleted but
+		// still inside its post-completion grace window - see the PENDING
+		// comment above pendingDelivery.
+		const share = liveOrPendingShare(params.id);
 		if (!share) return error(404, 'Share not found');
 		// F-19 follow-up: refuse before any storage.js call while this share's
 		// admin rename is mid-flight (see lib/renames.js's isRenamePending()).
@@ -466,7 +652,10 @@ export default function download(router) {
 		if (!file) return error(404, 'File not found');
 		if (!file.complete) return error(409, 'File is not ready');
 		// The owner's own reads (edit token or owning API key) never hit the cap.
-		if (!owner && limitReached(share)) return error(410, 'Download limit reached');
+		// A share with an outstanding pending-grace redelivery (see above) is
+		// exempted here too - its slot was already claimed by the original
+		// request; the retry paths below decide whether to actually redeliver.
+		if (!owner && limitReached(share) && !hasPendingDelivery(share.id)) return error(410, 'Download limit reached');
 
 		// Admission control: bound concurrent streaming download/preview responses
 		// per client IP (bandwidth/fd exhaustion). Acquired after the access/limit
@@ -528,13 +717,27 @@ export default function download(router) {
 
 			// One-time shares carry the full claim/burn machinery: track every read so
 			// a burn waits for in-flight reads, claim the share on a full delivery,
-			// count and burn only once that delivery drains, and restore it if the
+			// count and hold (not burn - see the PENDING comment above
+			// pendingDelivery) only once that delivery drains, and restore it if the
 			// delivery is cancelled so the recipient can retry.
 			if (share.one_time) {
+				// Always try the REAL atomic claim first, exactly as if no grace
+				// mechanism existed. Only when that fails - the share is already
+				// taken - do we look for a pending claim with spare retry budget to
+				// redeliver against, instead of an outright refusal. See the
+				// FOLLOW-UP FINDING comment above pendingDelivery for why this
+				// ordering (and the per-claim retry budget) both matter.
+				let isRetry = false;
+				let retryClaim = null;
 				if (full) {
 					const claimed = claimOneTime.run(now(), share.id).changes > 0;
-					if (!claimed) { release(); return error(410, 'This one-time share has already been taken'); }
-					audit('share.burned', { ip, target: share.id });
+					if (claimed) {
+						audit('share.burned', { ip, target: share.id });
+					} else {
+						retryClaim = tryClaimRetry(share.id);
+						if (!retryClaim) { release(); return error(410, 'This one-time share has already been taken'); }
+						isRetry = true;
+					}
 				}
 				readStart(share.id);
 				let completed = false;
@@ -543,12 +746,22 @@ export default function download(router) {
 						onComplete: full
 							? () => {
 									completed = true;
-									recordDownload(share.id, file.id, ip, ua, share.creator_ip);
-									burnPending.add(share.id);
+									// Only tally the public counters once per share - a
+									// grace-window retry redelivers the SAME entitlement,
+									// not a second one.
+									if (!isRetry) {
+										recordDownload(share.id, file.id, ip, ua, share.creator_ip);
+										armDeliveryGrace(share.id, () => finalizeOneTimeShare(share.id));
+									} else {
+										extendDeliveryGrace(share.id, retryClaim);
+									}
 								}
 							: undefined,
 						onEnd: () => {
-							if (full && !completed) restoreShare.run(share.id);
+							// A retry's own failure to complete does nothing extra here -
+							// the underlying claim stays exactly as claimed as it was; only
+							// the ORIGINAL (non-retry) claim's own cancel restores it.
+							if (full && !completed && !isRetry) restoreShare.run(share.id);
 							readEnd(share.id);
 							release();
 						},
@@ -560,18 +773,36 @@ export default function download(router) {
 			// cancelled/paused transfer never consumes the cap - wrap just that stream.
 			// The slot is claimed atomically up front (not check-then-increment) so N
 			// concurrent requests against a maxDownloads=1 share cannot all pass; a lost
-			// claim race means the cap was reached by a racing request.
+			// claim race means the cap was reached by a racing request. As with the
+			// one-time branch above, a request landing while an earlier delivery is
+			// still pending-grace redelivers against that SAME claim instead of
+			// re-claiming or 410ing.
 			if (full && share.max_downloads !== null) {
+				// Always try the REAL atomic claim first (see the one-time branch
+				// above and the FOLLOW-UP FINDING comment for why) - only a request
+				// that would otherwise be rejected right now falls back to a
+				// bounded grace retry against an already-pending claim.
+				let isRetry = false;
+				let retryClaim = null;
 				const claimed = claimDownload.run(share.id).changes > 0;
-				if (!claimed) { release(); return error(410, 'Download limit reached'); }
+				if (!claimed) {
+					retryClaim = tryClaimRetry(share.id);
+					if (!retryClaim) { release(); return error(410, 'Download limit reached'); }
+					isRetry = true;
+				}
 				let completed = false;
 				const makeBody = src =>
 					trackedStream(src, {
 						onComplete: () => {
 							completed = true;
-							recordDownload(share.id, file.id, ip, ua, share.creator_ip, { countShare: false });
+							if (!isRetry) {
+								recordDownload(share.id, file.id, ip, ua, share.creator_ip, { countShare: false });
+								armDeliveryGrace(share.id, () => {});
+							} else {
+								extendDeliveryGrace(share.id, retryClaim);
+							}
 						},
-						onEnd: () => { if (!completed) releaseDownload.run(share.id); release(); },
+						onEnd: () => { if (!completed && !isRetry) releaseDownload.run(share.id); release(); },
 					});
 				return rangeResponse(share, file, req, { inline: false, makeBody, size, range: effRange });
 			}
@@ -607,7 +838,10 @@ export default function download(router) {
 		// password-protected themselves before moving on to an unprotected one.
 		const limited = enforce('zip', ip, 30, 60_000);
 		if (limited) return limited;
-		const share = liveShare(params.id);
+		// liveOrPendingShare (not plain liveShare) also accepts a one-time share
+		// that is soft-deleted but still inside its post-completion grace window
+		// - see the PENDING comment above pendingDelivery.
+		const share = liveOrPendingShare(params.id);
 		if (!share) return error(404, 'Share not found');
 		// F-19 follow-up: refuse before any storage.js call while this share's
 		// admin rename is mid-flight (see lib/renames.js's isRenamePending()).
@@ -618,7 +852,10 @@ export default function download(router) {
 		// has neither the key nor the real filenames). The client downloads each
 		// encrypted file and decrypts it instead.
 		if (share.e2e) return error(409, 'Zip download is not available for end-to-end encrypted shares');
-		if (!owner && limitReached(share)) return error(410, 'Download limit reached');
+		// A share with an outstanding pending-grace redelivery (see above) is
+		// exempted here too - its slot was already claimed by the original
+		// request; the claim blocks below decide whether to actually redeliver.
+		if (!owner && limitReached(share) && !hasPendingDelivery(share.id)) return error(410, 'Download limit reached');
 
 		let files = getCompleteFiles.all(share.id);
 		// Nothing to deliver: do not count a download or burn a one-time share on
@@ -721,6 +958,12 @@ export default function download(router) {
 			// burn, and the owner is exempt entirely (their own restore never counts
 			// or burns).
 			const full = !owner && req.method === 'GET';
+			// Always try the REAL atomic claim first for a controlled share (see the
+			// single-file download handler's FOLLOW-UP FINDING comment for why) -
+			// only a request that would otherwise be rejected right now falls back
+			// to a bounded grace retry against an already-pending claim.
+			let isRetry = false;
+			let retryClaim = null;
 
 			// M-04 GAP 1 fix: byte-rate budget, keyed by IP with the exact same
 			// 'dl-bytes' bucket already used by single-file preview/download (see
@@ -738,8 +981,13 @@ export default function download(router) {
 
 			if (full && share.one_time) {
 				const claimed = claimOneTime.run(now(), share.id).changes > 0;
-				if (!claimed) { release(); return error(410, 'This one-time share has already been taken'); }
-				audit('share.burned', { ip, target: share.id });
+				if (claimed) {
+					audit('share.burned', { ip, target: share.id });
+				} else {
+					retryClaim = tryClaimRetry(share.id);
+					if (!retryClaim) { release(); return error(410, 'This one-time share has already been taken'); }
+					isRetry = true;
+				}
 			}
 			// A download-capped (non-one-time) share must count only a COMPLETED full
 			// zip delivery, so a cancelled/failed archive never consumes the cap. The
@@ -751,7 +999,11 @@ export default function download(router) {
 			const capped = full && !share.one_time && share.max_downloads !== null;
 			if (capped) {
 				const claimed = claimDownload.run(share.id).changes > 0;
-				if (!claimed) { release(); return error(410, 'Download limit reached'); }
+				if (!claimed) {
+					retryClaim = tryClaimRetry(share.id);
+					if (!retryClaim) { release(); return error(410, 'Download limit reached'); }
+					isRetry = true;
+				}
 			}
 
 			let body = createZipStream(entries);
@@ -761,12 +1013,25 @@ export default function download(router) {
 				body = trackedStream(body, {
 					onComplete: () => {
 						completed = true;
-						recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip, { countShare: !capped });
-						if (share.one_time) burnPending.add(share.id);
+						// Only tally the public counters once per share - a
+						// grace-window retry redelivers the SAME entitlement, not a
+						// second one.
+						if (!isRetry) {
+							recordDownload(share.id, null, ip, req.headers.get('user-agent'), share.creator_ip, { countShare: !capped });
+							if (share.one_time) armDeliveryGrace(share.id, () => finalizeOneTimeShare(share.id));
+							else if (capped) armDeliveryGrace(share.id, () => {});
+						} else {
+							extendDeliveryGrace(share.id, retryClaim);
+						}
 					},
 					onEnd: () => {
-						if (share.one_time && !completed) restoreShare.run(share.id);
-						if (capped && !completed) releaseDownload.run(share.id);
+						// A retry's own failure to complete does nothing extra here -
+						// the underlying claim stays exactly as claimed as it was; only
+						// the ORIGINAL (non-retry) claim's own cancel restores it.
+						if (!completed && !isRetry) {
+							if (share.one_time) restoreShare.run(share.id);
+							if (capped) releaseDownload.run(share.id);
+						}
 						readEnd(share.id);
 						release();
 					},

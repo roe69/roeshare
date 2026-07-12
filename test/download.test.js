@@ -7,6 +7,20 @@
 // 200) for a non-owner request against a controlled share - see the
 // `effRange` guard in the GET .../download handler.
 //
+// Since the pending-grace-redelivery fix (see download-grace.test.js), a
+// second full-equivalent request landing inside the short post-completion
+// grace window is answered too - but critically, it is ALWAYS the complete
+// file again (the effRange forcing above is untouched by that fix), never
+// just the "half" bytes its own Range header asked for - so the split-Range
+// attack this file exists to guard against still cannot reconstruct the file
+// out of two half-sized, individually-uncounted reads: both halves it might
+// get are actually full, counted (or grace-redelivered) deliveries of the
+// WHOLE file. This test drives the grace window down to near-zero via env so
+// it can also assert the share is truly, permanently gone once that window
+// elapses - closing the loop on "was this ever a real bypass" (no - full
+// bytes both times) and "does the control still eventually hold for real"
+// (yes).
+//
 // Boots the real server as a child process (mirrors migrations.test.js)
 // since this is an HTTP-surface behavior, not a unit-testable function.
 
@@ -34,6 +48,10 @@ async function bootServer(dataDir, port) {
 			SECRET: `download-test-secret-${port}`,
 			UPLOAD_PASSWORD: '',
 			TRUST_PROXY: '0',
+			// Fast, deterministic pending-grace window (see download-grace.test.js)
+			// so this file's own tests can assert the eventual, permanent block.
+			DOWNLOAD_GRACE_MS: '500',
+			DOWNLOAD_GRACE_MAX_MS: '1000',
 			BASE_URL: `http://127.0.0.1:${port}`,
 		},
 		stdout: 'pipe',
@@ -132,8 +150,7 @@ describe('download route: split-Range bypass on controlled shares', () => {
 
 				// First half of a split Range pair: a one-time share must not honor
 				// a partial range for a non-owner - it is forced to a full delivery
-				// instead, so this single request already claims (and, once
-				// drained, burns) the share.
+				// instead, so this single request already claims the share.
 				const r1 = await fetch(`${base}/api/shares/${id}/files/${fileId}/download`, {
 					headers: { Range: `bytes=0-${half - 1}` },
 				});
@@ -141,18 +158,30 @@ describe('download route: split-Range bypass on controlled shares', () => {
 				const b1 = new Uint8Array(await r1.arrayBuffer());
 				expect(b1).toEqual(bytes); // delivered whole, not just the requested half
 
-				// The second half of the split pair must now find the share already
-				// burned. Before the fix, this second (still-partial-looking)
-				// request slipped past the claim/burn machinery entirely and handed
-				// over the rest of the file for free.
+				// The second half of the split pair, inside the (short, test-
+				// configured) pending-grace window: still forced to a full delivery
+				// (never honored as a genuine 206 partial), and still redelivers the
+				// COMPLETE file, not just the "second half" bytes its own Range
+				// header asked for - so this is a grace-window redelivery of the
+				// same entitlement, never a successful reconstruction of the file
+				// out of two individually-uncounted half-reads.
 				const r2 = await fetch(`${base}/api/shares/${id}/files/${fileId}/download`, {
 					headers: { Range: `bytes=${half}-${bytes.length - 1}` },
 				});
-				expect(r2.status).toBe(404); // share row is soft-deleted the instant it is claimed
+				expect(r2.status).toBe(200); // NOT 206
+				const b2 = new Uint8Array(await r2.arrayBuffer());
+				expect(b2).toEqual(bytes); // the WHOLE file again, not just the second half
 
-				// A plain full GET (no Range at all) is refused too.
+				// Once the grace window genuinely elapses, the share is truly and
+				// permanently gone - a plain full GET, and a further split attempt,
+				// are both refused for good.
+				await new Promise(r => setTimeout(r, 1500));
 				const r3 = await fetch(`${base}/api/shares/${id}/files/${fileId}/download`);
 				expect(r3.status).toBe(404);
+				const r4 = await fetch(`${base}/api/shares/${id}/files/${fileId}/download`, {
+					headers: { Range: `bytes=0-${half - 1}` },
+				});
+				expect(r4.status).toBe(404);
 			} finally {
 				await stopServer(proc);
 			}
@@ -179,24 +208,32 @@ describe('download route: split-Range bypass on controlled shares', () => {
 				const b1 = new Uint8Array(await r1.arrayBuffer());
 				expect(b1).toEqual(bytes);
 
-				// Second half: the cap is already spent, so this must be refused.
-				// Before the fix, this uncounted partial read would have handed
-				// over the rest of the file for free.
+				// Second half, inside the (short, test-configured) pending-grace
+				// window: still forced to a full delivery and still redelivers the
+				// COMPLETE file, not just the "second half" bytes its own Range
+				// header asked for - a grace-window redelivery of the same
+				// entitlement, never a successful reconstruction out of two
+				// individually-uncounted half-reads.
 				const r2 = await fetch(`${base}/api/shares/${id}/files/${fileId}/download`, {
 					headers: { Range: `bytes=${half}-${bytes.length - 1}` },
 				});
-				expect(r2.status).toBe(410);
+				expect(r2.status).toBe(200); // NOT 206, NOT 410
+				const b2 = new Uint8Array(await r2.arrayBuffer());
+				expect(b2).toEqual(bytes);
 
-				// A further split attempt is refused outright too.
+				// The cap must still reflect exactly one counted download, never
+				// more - the grace-window redelivery above must not double-count.
+				const metaRes = await fetch(`${base}/api/shares/${id}`, { headers: { 'X-Edit-Token': editToken } });
+				const meta = await metaRes.json();
+				expect(meta.downloadCount).toBe(1);
+
+				// Once the grace window genuinely elapses, the cap holds for real -
+				// a further split attempt is refused outright.
+				await new Promise(r => setTimeout(r, 1500));
 				const r3 = await fetch(`${base}/api/shares/${id}/files/${fileId}/download`, {
 					headers: { Range: `bytes=0-${half - 1}` },
 				});
 				expect(r3.status).toBe(410);
-
-				// The cap must reflect exactly one counted download, never more.
-				const metaRes = await fetch(`${base}/api/shares/${id}`, { headers: { 'X-Edit-Token': editToken } });
-				const meta = await metaRes.json();
-				expect(meta.downloadCount).toBe(1);
 			} finally {
 				await stopServer(proc);
 			}

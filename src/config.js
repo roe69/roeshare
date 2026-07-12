@@ -266,6 +266,32 @@ export const config = Object.freeze({
 	// Non-finalized (abandoned) uploads are swept after this many seconds.
 	abandonedUploadTtl: int('ABANDONED_UPLOAD_TTL', 24 * 3600),
 
+	// Security-audit finding (2026-07): how long a one-time/maxDownloads-capped
+	// share's "full" delivery stays in a redeliverable PENDING state after its
+	// stream first appears to drain server-side, before the destructive step
+	// (burning a one-time share's blobs, or treating a maxDownloads slot as
+	// permanently spent) is actually committed - see download.js's
+	// pendingDelivery/armDeliveryGrace. A reverse proxy/CDN in front of this
+	// process can itself fully absorb a streamed response even when the real
+	// client's connection was dropped after only a few bytes, so a single
+	// "stream drained" observation is not reliable enough on its own to justify
+	// an irreversible action. downloadGraceMaxMs bounds the TOTAL time from the
+	// FIRST apparent completion, regardless of how many retries extend the
+	// window.
+	downloadGraceMs: int('DOWNLOAD_GRACE_MS', 20_000),
+	downloadGraceMaxMs: int('DOWNLOAD_GRACE_MAX_MS', 3 * 60_000),
+	// Security-audit follow-up (2026-07, "grace window itself defeats
+	// maxDownloads"): the number of extra redelivery retries a SINGLE
+	// completed claim (see download.js's pendingDelivery/tryClaimRetry) may be
+	// granted during its grace window, on top of its own original delivery.
+	// Bounds the mechanism above by COUNT, not just by time - the grace
+	// window's time bound alone still allows an unbounded number of full
+	// redeliveries for as long as each one keeps re-arming it before the
+	// window expires; this caps that at a small, fixed number (default 1: one
+	// legitimate completion's worth of retries) regardless of how many
+	// requests arrive or how long the window stays open.
+	downloadGraceMaxRetries: Math.max(0, int('DOWNLOAD_GRACE_MAX_RETRIES', 1)),
+
 	// Security-audit finding (2026-07): floor bytes/sec a chunk-upload PATCH's
 	// body read must sustain before its admission-control slot (see
 	// routes/uploads.js's acquireAll()) is forcibly released - bounds the
