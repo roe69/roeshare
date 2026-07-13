@@ -36,6 +36,10 @@ function withAccess(path) {
 
 const fileBase = id => `/api/shares/${encodeURIComponent(shareId)}/files/${encodeURIComponent(id)}`;
 
+// Single-text-file shares up to this plaintext size get an auto-loaded note
+// card instead of the normal file row (design doc section 5).
+const NOTE_CAP = 256 * 1024;
+
 // ---- Streamed E2E playback/download (Service Worker) -----------------------
 // A whole-file fetch+decrypt (e2eFetch below) OOMs on multi-GB video and can't
 // seek. Instead we hand the file's key + location to a Service Worker, which
@@ -425,38 +429,10 @@ function e2ePlainSize(file) {
 	return file.size - 28 * Math.ceil(file.size / recordSize);
 }
 
-function e2eFileCard(file, canPreview) {
-	const kind = previewKind(file.mime, file.name);
-	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
+// A "Download" button that decrypts an E2E file client-side, preferring the
+// streamed Service Worker path. Shared by e2eFileCard and the E2E note card.
+function e2eDownloadButton(file) {
 	const base = file.name.split('/').pop() || file.name;
-	const sizeText = formatBytes(e2ePlainSize(file));
-	const sub = el('div', { class: 'rl-file-sub' }, sizeText);
-
-	let toggle = null;
-	if (kind !== 'none' && canPreview) {
-		let shown = false;
-		toggle = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
-		toggle.addEventListener('click', async () => {
-			shown = !shown;
-			toggle.textContent = shown ? 'Hide' : 'Preview';
-			previewHost.classList.toggle('rl-hidden', !shown);
-			if (shown) {
-				const media = await e2ePreview(file, previewHost);
-				// Nice-to-have: once the browser has read the container, show the
-				// duration alongside the size.
-				if (media && (kind === 'video' || kind === 'audio')) {
-					media.addEventListener('loadedmetadata', () => {
-						if (Number.isFinite(media.duration) && media.duration > 0) {
-							const mm = Math.floor(media.duration / 60);
-							const ss = Math.floor(media.duration % 60).toString().padStart(2, '0');
-							sub.textContent = `${sizeText} · ${mm}:${ss}`;
-						}
-					}, { once: true });
-				}
-			} else previewHost.replaceChildren();
-		});
-	}
-
 	const download = el('button', { class: 'rl-btn rl-btn-primary rl-btn-sm' }, 'Download');
 	download.addEventListener('click', async () => {
 		const label = download.textContent;
@@ -497,6 +473,41 @@ function e2eFileCard(file, canPreview) {
 		download.disabled = false;
 		download.textContent = label;
 	});
+	return download;
+}
+
+function e2eFileCard(file, canPreview) {
+	const kind = previewKind(file.mime, file.name);
+	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
+	const sizeText = formatBytes(e2ePlainSize(file));
+	const sub = el('div', { class: 'rl-file-sub' }, sizeText);
+
+	let toggle = null;
+	if (kind !== 'none' && canPreview) {
+		let shown = false;
+		toggle = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
+		toggle.addEventListener('click', async () => {
+			shown = !shown;
+			toggle.textContent = shown ? 'Hide' : 'Preview';
+			previewHost.classList.toggle('rl-hidden', !shown);
+			if (shown) {
+				const media = await e2ePreview(file, previewHost);
+				// Nice-to-have: once the browser has read the container, show the
+				// duration alongside the size.
+				if (media && (kind === 'video' || kind === 'audio')) {
+					media.addEventListener('loadedmetadata', () => {
+						if (Number.isFinite(media.duration) && media.duration > 0) {
+							const mm = Math.floor(media.duration / 60);
+							const ss = Math.floor(media.duration % 60).toString().padStart(2, '0');
+							sub.textContent = `${sizeText} · ${mm}:${ss}`;
+						}
+					}, { once: true });
+				}
+			} else previewHost.replaceChildren();
+		});
+	}
+
+	const download = e2eDownloadButton(file);
 
 	return el('div', { class: 'rl-file' },
 		el('div', { class: 'rl-file-main' },
@@ -509,6 +520,107 @@ function e2eFileCard(file, canPreview) {
 		),
 		previewHost,
 	);
+}
+
+// ---- Note card (single small text-file share) ------------------------------
+
+// Fetches a note's full plaintext directly (mirrors loadText/e2eFetch) rather
+// than via api.get(): request() runs res.json() whenever the response's
+// content-type includes application/json, and the preview/download routes
+// serve the file's registered mime verbatim - a .json/.geojson note would get
+// parsed into an object instead of returned as text. Preserves the ApiError
+// status mapping (e.g. 410) callers rely on.
+async function fetchNoteText(file, count) {
+	const headers = {};
+	if (accessToken) headers.Authorization = `Bearer ${accessToken}`;
+	const res = await fetch(`${fileBase(file.id)}/${count ? 'download' : 'preview'}`, { headers });
+	if (!res.ok && res.status !== 206) throw new ApiError(res.status, 'fetch failed');
+	return res.text();
+}
+
+// Loads the full plaintext for an auto-expanded note (preview endpoint, does
+// not count as a download) and hands it to `onLoaded` once rendered.
+async function loadNoteText(file, pre, onLoaded) {
+	try {
+		const text = e2eKey
+			? new TextDecoder().decode(await e2eFetch(file, false))
+			: await fetchNoteText(file, false);
+		pre.textContent = text;
+		onLoaded(text);
+	} catch {
+		pre.textContent = 'Could not load preview.';
+	}
+}
+
+// A single-text-file share (<= NOTE_CAP) replaces the normal file row with a
+// prominent, auto-expanded note. R1: a non-owner on a one-time or download-
+// capped share can't preview at all (the server 403s /preview - see
+// download.js:530), so that case shows a "Reveal note" button that fetches
+// /download instead, spending the same download/one-time budget as a file
+// download would.
+function noteCard(file, share) {
+	const inline = share.owner || (!share.oneTime && share.maxDownloads == null);
+	const sizeText = formatBytes(e2eKey ? e2ePlainSize(file) : file.size);
+	const pre = el('pre', { class: 'rl-preview-text', style: 'unicode-bidi: isolate;' }, 'Loading...');
+	let cachedText = null;
+
+	const copyBtn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Copy text');
+	copyBtn.disabled = true;
+	copyBtn.addEventListener('click', () => cachedText != null && copyText(cachedText));
+
+	const actions = el('div', { class: 'rl-file-actions' });
+	const previewHost = el('div', { class: 'rl-file-preview' });
+	const card = el('div', { class: 'rl-file' },
+		el('div', { class: 'rl-file-main' },
+			el('div', { class: 'rl-file-icon' }, fileGlyph(file.mime, file.name)),
+			el('div', { class: 'rl-file-info' }, fileNameNode(file.name), el('div', { class: 'rl-file-sub' }, sizeText)),
+			actions,
+		),
+		previewHost,
+	);
+
+	if (inline) {
+		const download = e2eKey
+			? e2eDownloadButton(file)
+			: el('a', { class: 'rl-btn rl-btn-primary rl-btn-sm', href: withAccess(`${fileBase(file.id)}/download`) }, 'Download');
+		actions.append(copyBtn, download);
+		previewHost.append(pre);
+		loadNoteText(file, pre, text => {
+			cachedText = text;
+			copyBtn.disabled = false;
+		});
+		return card;
+	}
+
+	const warn = el('div', { class: 'rl-alert rl-alert-warning' },
+		share.oneTime
+			? 'This is a one-time share. Revealing the note deletes it for everyone.'
+			: 'Revealing the note counts as a download.');
+	const reveal = el('button', { class: 'rl-btn rl-btn-primary rl-btn-sm' }, 'Reveal note');
+	reveal.addEventListener('click', async () => {
+		reveal.disabled = true;
+		reveal.textContent = 'Revealing...';
+		try {
+			const text = e2eKey
+				? new TextDecoder().decode(await e2eFetch(file, true))
+				: await fetchNoteText(file, true);
+			cachedText = text;
+			pre.textContent = text;
+			copyBtn.disabled = false;
+			actions.replaceChildren(copyBtn);
+			previewHost.replaceChildren(pre);
+		} catch (e) {
+			const limitReached = e instanceof ApiError && e.status === 410;
+			toastErr(limitReached ? 'Download limit reached' : e);
+			pre.textContent = limitReached ? 'Download limit reached - already taken.' : 'Could not load preview.';
+			previewHost.replaceChildren(warn, pre);
+			reveal.disabled = false;
+			reveal.textContent = 'Reveal note';
+		}
+	});
+	actions.append(reveal);
+	previewHost.append(warn);
+	return card;
 }
 
 // ---- Owner controls --------------------------------------------------------
@@ -578,6 +690,11 @@ function renderShare(share) {
 	clear();
 	const files = share.files || [];
 	const count = files.length;
+	// R4: a single small text file gets the note card instead of a file row.
+	// Plaintext size on E2E shares is derived (file.size is ciphertext).
+	const noteFile = count === 1 && previewKind(files[0].mime, files[0].name) === 'text'
+		&& (share.e2e ? e2ePlainSize(files[0]) : files[0].size) <= NOTE_CAP
+		? files[0] : null;
 	// The server rejects non-owner preview requests on any controlled share (a
 	// one-time share, or one with a download cap). Owners may always preview
 	// (share.owner, resolved server-side from either the X-Edit-Token header
@@ -645,8 +762,10 @@ function renderShare(share) {
 	}
 
 	// One framed card holding a tight list of file rows (previews expand inline).
+	// A note share (C2) replaces its single row with the auto-expanded note card.
 	const list = el('div', { class: 'rl-files' });
-	for (const f of files) list.append(fileCard(f, canPreview));
+	if (noteFile) list.append(noteCard(noteFile, share));
+	else for (const f of files) list.append(fileCard(f, canPreview));
 	root.append(el('section', { class: 'rl-card rl-files-card' }, list));
 }
 
