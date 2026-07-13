@@ -121,7 +121,7 @@ async function loadConfig() {
 // ---- File selection --------------------------------------------------------
 // Accepts File objects or { file, path } entries (drag-with-folders). The path
 // is the relative path within a dropped folder, preserved for display + upload.
-function addFiles(list) {
+function addFiles(list, opts = {}) {
 	if (uploading) return;
 	let added = 0;
 	for (const entry of list) {
@@ -129,10 +129,32 @@ function addFiles(list) {
 		const file = entry.file || entry;
 		if (!file || !file.name) continue;
 		const path = entry.path || file.webkitRelativePath || file.name;
-		selected.push({ file, path, key: ++keyCounter, row: null, done: false });
+		const item = { file, path, key: ++keyCounter, row: null, done: false };
+		if (opts.isNote) item.isNote = true;
+		selected.push(item);
 		added++;
 	}
 	if (added) renderFileList();
+}
+
+// note.txt, note-2.txt, note-3.txt... scanning every currently staged name
+// (including a real file the user happened to pick called note.txt).
+function nextNoteName() {
+	const taken = new Set(selected.map(s => s.path));
+	if (!taken.has('note.txt')) return 'note.txt';
+	let n = 2;
+	while (taken.has(`note-${n}.txt`)) n++;
+	return `note-${n}.txt`;
+}
+
+// Stages a text snippet as a synthetic .txt File through addFiles, so it flows
+// through the same upload pipeline as a real file (R3: draft/resume excludes
+// it via isNote).
+function addNote(text) {
+	if (uploading) return;
+	const name = nextNoteName();
+	addFiles([new File([text], name, { type: 'text/plain' })], { isNote: true });
+	toastOk('Text added to share');
 }
 
 function removeFile(key) {
@@ -331,6 +353,43 @@ fileInput.addEventListener('change', () => {
 	fileInput.value = '';
 });
 
+// ---- Note composer ----------------------------------------------------------
+// R2: rendered outside #dropzone, so its own click/keydown handlers never treat
+// interaction with it as "open the file picker".
+const noteComposer = $('#note-composer');
+const noteText = $('#note-text');
+function openNoteComposer() {
+	noteComposer.classList.remove('rl-hidden');
+	noteText.focus();
+}
+function closeNoteComposer() {
+	noteComposer.classList.add('rl-hidden');
+	noteText.value = '';
+}
+$('#add-text').addEventListener('click', e => {
+	e.stopPropagation();
+	if (uploading) return;
+	noteComposer.classList.contains('rl-hidden') ? openNoteComposer() : closeNoteComposer();
+});
+// Enter/Space on the button bubbles to #dropzone's keydown handler (R2 only
+// guards #add-text's own click), which would preventDefault() the synthesized
+// click - suppressing this handler - and open the file picker instead.
+$('#add-text').addEventListener('keydown', e => {
+	if (e.key === 'Enter' || e.key === ' ') e.stopPropagation();
+});
+$('#note-cancel').addEventListener('click', e => {
+	e.stopPropagation();
+	closeNoteComposer();
+});
+$('#note-add').addEventListener('click', e => {
+	e.stopPropagation();
+	if (uploading) return;
+	const text = noteText.value;
+	if (!text.trim()) return;
+	addNote(text);
+	closeNoteComposer();
+});
+
 ['dragenter', 'dragover'].forEach(ev =>
 	dropzone.addEventListener(ev, e => {
 		e.preventDefault();
@@ -351,7 +410,7 @@ dropzone.addEventListener('drop', async e => {
 	addFiles(files);
 });
 
-// Paste files/images from the clipboard anywhere on the page.
+// Paste files/images, or plain text, from the clipboard anywhere on the page.
 document.addEventListener('paste', e => {
 	if (uploading) return;
 	const items = e.clipboardData && e.clipboardData.items;
@@ -372,7 +431,19 @@ document.addEventListener('paste', e => {
 		e.preventDefault();
 		addFiles(out);
 		toastOk(`Added ${out.length} pasted file${out.length === 1 ? '' : 's'}`);
+		return;
 	}
+	// C1: file items win; only fall back to a text note when there were none,
+	// the paste target isn't a field the user is typing into, and there is
+	// non-whitespace text/plain on the clipboard. Synchronous getData - not the
+	// async getAsString() item API.
+	const target = e.target;
+	const editable = target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
+	if (editable) return;
+	const text = e.clipboardData.getData('text/plain');
+	if (!text || !text.trim()) return;
+	e.preventDefault();
+	addNote(text);
 });
 
 // ---- Upload flow -----------------------------------------------------------
@@ -775,6 +846,7 @@ async function showResult(id, url, e2e) {
 function resetForm() {
 	selected.length = 0;
 	renderFileList();
+	closeNoteComposer();
 	// Bring the composer back and clear the result.
 	$('#share-form').classList.remove('rl-hidden');
 	resultEl.classList.add('rl-hidden');
@@ -883,14 +955,22 @@ async function doUpload() {
 	// writeDraftKey) rather than in this draft - resume then authenticates via
 	// the owner-session cookie above, not a token in the draft. fileIds fill in
 	// as each file registers.
-	draft = {
-		v: 2, id, chunkSize,
-		e2e: !!e2eKey,
-		createdAt: Date.now(),
-		files: selected.map(item => ({ fp: fingerprint(item.file), path: item.path, size: item.file.size, fileId: null })),
-	};
-	writeDraft(draft);
-	if (e2eKeyB64) writeDraftKey(id, e2eKeyB64);
+	// R3: a note has no on-disk source to re-select after a refresh, so it is
+	// excluded from the draft entirely - a mixed note+file share just resumes
+	// the real files and re-adds the note text manually if needed.
+	const draftFiles = selected.filter(item => !item.isNote).map(item => ({ fp: fingerprint(item.file), path: item.path, size: item.file.size, fileId: null }));
+	if (draftFiles.length) {
+		draft = {
+			v: 2, id, chunkSize,
+			e2e: !!e2eKey,
+			createdAt: Date.now(),
+			files: draftFiles,
+		};
+		writeDraft(draft);
+		if (e2eKeyB64) writeDraftKey(id, e2eKeyB64);
+	} else {
+		draft = null; // nothing resumable in this upload; onReg below no-ops (null-guarded)
+	}
 	for (const item of selected) item._resume = null; // a fresh upload, nothing to resume
 
 	await runUpload({ id, token, chunkSize, e2eKey, e2eKeyB64 });

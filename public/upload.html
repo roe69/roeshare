@@ -33,9 +33,20 @@
 							<p class="rl-muted" style="margin: var(--rl-space-1) 0">or</p>
 							<div class="rl-row" style="justify-content: center; flex-wrap: wrap; margin-top: var(--rl-space-1)">
 								<button type="button" id="pick-files" class="rl-btn rl-btn-secondary">Choose files</button>
+								<button type="button" id="add-text" class="rl-btn rl-btn-secondary">Add text</button>
 							</div>
-							<p class="rl-help" style="margin-top: var(--rl-space-3)">You can drag in a whole folder, or paste from your clipboard.</p>
+							<p class="rl-help" style="margin-top: var(--rl-space-3)">You can drag in a whole folder, or paste files or text from your clipboard.</p>
 							<input id="file-input" type="file" multiple hidden />
+						</div>
+
+						<!-- Note composer (outside the dropzone: its click/keydown handlers would
+						     otherwise treat any click inside it as "open file picker"). -->
+						<div id="note-composer" class="rl-card rl-hidden">
+							<textarea id="note-text" class="rl-textarea" placeholder="Type or paste text to share..."></textarea>
+							<div class="rl-row" style="justify-content: flex-end; margin-top: var(--rl-space-2)">
+								<button type="button" id="note-cancel" class="rl-btn rl-btn-ghost">Cancel</button>
+								<button type="button" id="note-add" class="rl-btn rl-btn-primary">Add to share</button>
+							</div>
 						</div>
 
 						<!-- Selected files -->
