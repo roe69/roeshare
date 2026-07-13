@@ -26,6 +26,9 @@ SQLite, zero npm dependencies).
   or corruption is detected, not silently decrypted), keyed from `SECRET`.
 - **Per-share controls.** Password, expiry, download-count cap, one-time
   burn-after-download, and a custom link slug.
+- **Paste to share.** Copy some text and paste it on the upload page (or type
+  it into the note composer) to share it as a note - it's just a `.txt` file,
+  so it gets the exact same controls, encryption, and preview as any upload.
 - **In-browser preview.** Images, video, audio, PDFs, and text/code render
   inline (video and audio stream with seeking, even for E2E shares); download a
   whole share as one zip; a QR code for every link.
