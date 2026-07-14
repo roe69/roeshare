@@ -495,6 +495,94 @@ export default function shares(router) {
 		return json({ id: share.id, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${share.id}` });
 	});
 
+	// ---- Update (owner management: expiry / password) ----------------------
+	// D2: the minimal owner-management surface - change (or clear) the expiry,
+	// and set/replace/clear the password ("make private" / "make public").
+	// Because issueAccessToken/hasAccessToken bind visitor access tokens to
+	// password_hash, setting/changing/clearing the password automatically
+	// invalidates every outstanding visitor access token with zero extra code
+	// - the owner re-obtains one from GET /api/shares/:id. No title editing, no
+	// unlisted flag: shares are already unlisted-by-id, and "private" is what
+	// a password means here.
+	declareRoutePolicy('PATCH', '/api/shares/:id', { auth: 'editTokenOrKey', csrf: true, rateLimit: 'share-edit', audit: 'share.updated' });
+	router.patch('/api/shares/:id', async ctx => {
+		// Resolve the share first so attempts against random/nonexistent ids cannot
+		// mint a long-lived rate-limit bucket each (a memory-growth vector) - same
+		// ordering rationale as unlock/finalize/delete above.
+		const share = liveShare(ctx.params.id);
+		if (!share) return error(404, 'Not found');
+		const limited = enforce(`share-edit:${ctx.params.id}`, ctx.ip, 20, 60_000);
+		if (limited) return limited;
+		const via = ownerVia(ctx.req, share);
+		if (!via) return error(403, 'Forbidden');
+		// M-05: the header/key path carries no ambient credential and needs no
+		// same-origin proof (F-10 convention); ownership proved via the ambient
+		// owner cookie does, same as finalize/delete above.
+		if (via === 'cookie') {
+			const csrf = requireSameOrigin(ctx.req);
+			if (csrf) return csrf;
+		}
+
+		const { value, response } = await readJson(ctx.req, METADATA_BODY_MAX);
+		if (response) return response;
+		const body = value || {};
+
+		// expiresIn: 0 = never; positive n = now()+trunc(n); absent = unchanged.
+		// Same parse as POST /api/shares (create) above, except "unchanged"
+		// replaces "default" for the absent case - a PATCH must never silently
+		// reset an unspecified expiry back to the server default.
+		let setExpiry = false;
+		let expiresAt = share.expires_at;
+		if (body.expiresIn !== undefined && body.expiresIn !== null) {
+			const n = Number(body.expiresIn);
+			if (!Number.isFinite(n) || n < 0) return error(400, 'Invalid expiresIn');
+			expiresAt = n > 0 ? now() + Math.trunc(n) : null;
+			setExpiry = true;
+		}
+
+		// password: string = set/replace ("make private"); explicit null = clear
+		// ("make public"); absent = unchanged. Hashed under the SHARED 'argon2'
+		// bulkhead (not 'argon2-unlock' - that pool exists specifically to
+		// isolate unauthenticated callers, and this route is owner-authenticated).
+		let setPassword = false;
+		let passwordHash = share.password_hash;
+		if (typeof body.password === 'string') {
+			if (body.password.length === 0) return error(400, 'Password cannot be empty');
+			if (body.password.length > config.maxPasswordLength) return error(400, 'Password is too long');
+			const release = acquire('argon2', null, 4);
+			if (!release) return overloaded(2);
+			try {
+				passwordHash = await hashPassword(body.password);
+			} finally {
+				release();
+			}
+			setPassword = true;
+		} else if (body.password === null) {
+			passwordHash = null;
+			setPassword = true;
+		}
+
+		if (setExpiry || setPassword) {
+			const sets = [];
+			const args = [];
+			if (setExpiry) {
+				sets.push('expires_at = ?');
+				args.push(expiresAt);
+			}
+			if (setPassword) {
+				sets.push('password_hash = ?');
+				args.push(passwordHash);
+			}
+			args.push(share.id);
+			db.query(`UPDATE shares SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+		}
+
+		const actor = share.api_key_id ? `apikey:${share.api_key_id}` : null;
+		audit('share.updated', { ip: ctx.ip, actor, target: share.id });
+
+		return json({ ok: true, expiresAt, protected: !!passwordHash });
+	});
+
 	// ---- Delete (owner or admin) -------------------------------------------
 
 	declareRoutePolicy('DELETE', '/api/shares/:id', { auth: 'editTokenOrAdmin', csrf: true, rateLimit: 'delete', audit: 'share.deleted' });

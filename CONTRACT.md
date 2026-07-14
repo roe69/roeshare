@@ -168,6 +168,18 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 
 ### Owner / admin management
 - `DELETE /api/shares/:id` (X-Edit-Token OR admin) -> owner deletes their own share. `{ ok: true }`.
+- `PATCH /api/shares/:id` (X-Edit-Token, owning API key, or owner-session cookie)
+  body `{ expiresIn?, password? }` - the minimal owner self-service surface (no
+  title/slug editing; a share is already unlisted-by-id). `expiresIn`: `0` =
+  never, a positive integer = seconds from now, absent = unchanged; anything
+  else `400 'Invalid expiresIn'`. `password`: a string sets/replaces it ("make
+  private"), explicit `null` clears it ("make public"), absent = unchanged; an
+  empty string is `400`. Rate-limited (20/min per share). Because visitor
+  access tokens are bound to `password_hash` (`issueAccessToken`/
+  `hasAccessToken`), setting/changing/clearing the password invalidates every
+  outstanding visitor access token for the share automatically - the owner
+  re-obtains one from `GET /api/shares/:id`. -> `200 { ok: true, expiresAt,
+  protected }`.
 - `POST /api/admin/login` body `{ password }` -> on success, either sets
   `ADMIN_COOKIE` (HttpOnly, SameSite=Lax, Max-Age=config.adminSessionTtl) and
   returns `{ ok: true }`, or - when TOTP MFA is enabled (F-13) - returns
