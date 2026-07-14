@@ -314,9 +314,13 @@ memoized - only the templated base HTML is cached per file, same as every other
 page). Resolves the share by a direct, read-only DB lookup (id, then a
 case-insensitive slug fallback) with the exact same live/finalized/not-expired
 predicate as `GET /api/shares/:id`, but never calls that handler - so a crawler
-prefetching a pasted link never inflates `view_count`. Rich meta (title,
-description, `og:image` -> the file's `/preview` URL) is emitted only when the
-share is finalized, not `e2e`, not password-protected, not `one_time`, not
+prefetching a pasted link never inflates `view_count`. A case-variant match
+(the id/slug resolved only via the lower() fallback) `302`s to the
+canonically-cased `/s/:id` instead of rendering the page directly - `view.js`'s
+own share fetch is case-sensitive, so serving meta at the wrong case would show
+a rich embed for a link that 404s the moment anyone clicks it. Rich meta
+(title, description, `og:image` -> the file's `/preview` URL) is emitted only
+when the share is finalized, not `e2e`, not password-protected, not `one_time`, not
 download-capped (`maxDownloads` unset - `/preview` itself 403s a non-owner
 once it is), and has at least one complete file whose mime is in
 `EMBED_IMAGE_MIME` (png/jpeg/gif/webp/avif - a deliberate subset of

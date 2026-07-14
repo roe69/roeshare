@@ -149,12 +149,12 @@ function richMetaHtml(share, file, origin) {
 	].join('\n\t');
 }
 
-// Builds the meta block for one request. Any unexpected failure (e.g. a
-// malformed id the queries above choke on) degrades to generic meta rather
-// than a 500 - a link preview is never load-bearing for the page itself.
-function buildShareMeta(idOrSlug, origin) {
+// Builds the meta block for an already-resolved share (or null - generic
+// meta). Any unexpected failure (e.g. a malformed row the queries above
+// choke on) degrades to generic meta rather than a 500 - a link preview is
+// never load-bearing for the page itself.
+function buildShareMeta(share, origin) {
 	try {
-		const share = resolveShareForMeta(idOrSlug);
 		if (!share) return genericMetaHtml();
 		if (!share.finalized || share.e2e || share.password_hash || share.one_time || share.max_downloads !== null) return genericMetaHtml();
 		const files = getEmbeddableFile.all(share.id);
@@ -162,7 +162,7 @@ function buildShareMeta(idOrSlug, origin) {
 		if (!file) return genericMetaHtml();
 		return richMetaHtml(share, file, origin);
 	} catch (e) {
-		console.error('embed meta build failed for', idOrSlug, e);
+		console.error('embed meta build failed for', share?.id, e);
 		return genericMetaHtml();
 	}
 }
@@ -172,10 +172,25 @@ function buildShareMeta(idOrSlug, origin) {
 // file - including the still-unsubstituted {{SHARE_META}} token - per
 // process; only the meta block itself is computed fresh every time and never
 // cached, so two different shares can never leak each other's title/image).
+//
+// A case-variant slug/id (resolveShareForMeta's lower() fallback) redirects
+// to the canonically-cased /s/:id first, rather than rendering meta for a URL
+// the page itself cannot load: GET /api/shares/:id (view.js's fetch) is
+// byte-case-sensitive, so serving 200-with-rich-meta at the wrong case would
+// show a full embed for a link that 404s the moment anyone clicks it.
 export function serveSharePage(idOrSlug, origin) {
+	let share = null;
+	try {
+		share = resolveShareForMeta(idOrSlug);
+	} catch (e) {
+		console.error('share resolution failed for', idOrSlug, e);
+	}
+	if (share && share.id !== idOrSlug) {
+		return new Response(null, { status: 302, headers: { Location: `/s/${share.id}`, 'Cache-Control': 'no-store' } });
+	}
 	const html = renderPage('view.html');
 	if (html === null) return error(404, 'Not found');
-	const meta = buildShareMeta(idOrSlug, origin);
+	const meta = buildShareMeta(share, origin);
 	const out = html.replace('{{SHARE_META}}', meta);
 	return new Response(out, {
 		headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Security-Policy': PAGE_CSP, ...SECURITY_HEADERS },

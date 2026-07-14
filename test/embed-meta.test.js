@@ -295,4 +295,42 @@ describe('embed meta (C)', () => {
 			cleanupDir(dir);
 		}
 	});
+
+	test('a case-variant slug redirects to the canonically-cased page instead of rendering meta the page cannot load', async () => {
+		const dir = freshDataDir('embed-case-redirect');
+		try {
+			const proc = await bootServer(dir, 3762);
+			try {
+				const base = 'http://127.0.0.1:3762';
+				const cookie = await adminCookie(base);
+				const key = await makeKey(base, cookie, 'embed-case-key');
+				const auth = { Authorization: `Bearer ${key.token}` };
+
+				const res = await fetch(`${base}/api/v1/upload?expiresIn=0&mime=image%2Fpng&slug=MyCaseSlug`, {
+					method: 'POST',
+					headers: { ...auth, 'X-Filename': 'pic.png' },
+					body: new Uint8Array([1, 2, 3]),
+				});
+				expect(res.status).toBe(201);
+				const made = await res.json();
+				expect(made.id).toBe('MyCaseSlug');
+
+				for (const path of [`/mycaseslug`, `/s/mycaseslug`]) {
+					const r = await fetch(`${base}${path}`, { redirect: 'manual' });
+					expect(r.status).toBe(302);
+					expect(r.headers.get('location')).toBe('/s/MyCaseSlug');
+				}
+
+				// The canonically-cased URL is served directly, with rich meta.
+				const canonical = await fetch(`${base}/s/MyCaseSlug`);
+				expect(canonical.status).toBe(200);
+				const html = await canonical.text();
+				expect(html).toContain('property="og:image:type" content="image/png"');
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
 });
