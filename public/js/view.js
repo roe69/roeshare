@@ -2,8 +2,8 @@
 // password unlock for protected shares, and owner delete controls.
 
 import {
-	el, $, api, ApiError, toastErr, openModal, copyText,
-	formatBytes, timeUntil, fileGlyph, previewKind, migrateLegacyOwnerTokens,
+	el, $, api, ApiError, toastErr, toastOk, openModal, copyText,
+	formatBytes, timeUntil, fileGlyph, previewKind, migrateLegacyOwnerTokens, addOwnedShare,
 } from './shared.js';
 import { importKey, decryptFile, decryptString, recordAad, fromB64u, IV_LEN, TAG_LEN } from './e2e.js';
 import { mountSidebar } from '/js/sidebar.js';
@@ -12,13 +12,49 @@ mountSidebar();
 
 const root = $('#view');
 
-// End-to-end key (only present for E2E shares). Read from the URL fragment, which
-// the browser never sends to the server.
-let e2eKey = null;
-const e2eKeyB64 = location.hash ? decodeURIComponent(location.hash.slice(1)) : '';
-
-// Share id comes from the path /s/:id.
+// Share id comes from the path /s/:id (or the root-level custom-slug fallback).
 const shareId = decodeURIComponent(location.pathname.split('/').filter(Boolean).pop() || '');
+
+// D3: an owner-manage token RoeSnip appends as `#edit=<token>` on its Open
+// action (never sent in a request line/Referer - same fragment precedent as
+// the E2E key below). This branch MUST run first and MUST strip the fragment
+// immediately - even if the exchange below later fails - so a re-pasted
+// "already opened" link can never leak the owner's manage credential via
+// copy-from-address-bar. The literal "edit=" prefix (anchored, not just a
+// prefix match) keeps this grammar disjoint from a bare base64url E2E key,
+// which never starts with "edit=" - RoeSnip never produces E2E shares anyway.
+const EDIT_TOKEN_RE = /^#edit=([A-Za-z0-9_~-]+)$/;
+const editMatch = EDIT_TOKEN_RE.exec(location.hash);
+const editToken = editMatch ? editMatch[1] : null;
+
+// End-to-end key (only present for E2E shares). Read from the URL fragment, which
+// the browser never sends to the server. The #edit= branch above wins when both
+// would otherwise match (they never do in practice, but the check makes the
+// precedence explicit): an edit token is never treated as an E2E key.
+let e2eKey = null;
+let e2eKeyB64 = editToken ? '' : (location.hash ? decodeURIComponent(location.hash.slice(1)) : '');
+
+if (editToken) {
+	history.replaceState(null, '', location.pathname + location.search);
+}
+
+// Exchanges the #edit= token above for the owner-session cookie, once, before
+// the first metadata load. Silent on any failure (missing/expired token, an
+// older server, network trouble) - the page simply proceeds as an ordinary
+// visitor. The raw token is never persisted anywhere (no localStorage, no
+// settings) - it lives only in this closure for the one exchange request.
+async function exchangeEditToken() {
+	if (!editToken) return;
+	try {
+		const res = await fetch(`/api/shares/${encodeURIComponent(shareId)}/owner-session`, {
+			method: 'POST',
+			headers: { 'X-Edit-Token': editToken },
+		});
+		if (res.ok) addOwnedShare(shareId);
+	} catch {
+		/* proceed as a visitor */
+	}
+}
 
 // Access token: set once the share metadata loads, either because a visitor
 // unlocked a password-protected share, or - M-05 - because the server
@@ -299,13 +335,18 @@ async function loadText(file, pre) {
 	}
 }
 
-function fileCard(file, canPreview) {
-	if (e2eKey) return e2eFileCard(file, canPreview);
+// `autoExpand`: C's single-image auto-preview - true only for a share with
+// exactly one complete image file where preview is permitted for this viewer
+// (see the R1-style gate computed in renderShare), mirroring the existing
+// single-text-note auto-expand precedent (noteCard, below).
+function fileCard(file, canPreview, autoExpand) {
+	if (e2eKey) return e2eFileCard(file, canPreview, autoExpand);
 	const kind = previewKind(file.mime, file.name);
-	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
-	let expanded = false;
+	const previewHost = el('div', { class: autoExpand ? 'rl-file-preview' : 'rl-file-preview rl-hidden' });
+	let expanded = !!autoExpand;
 
-	const toggle = kind === 'none' || !canPreview ? null : el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
+	const toggle = kind === 'none' || !canPreview ? null : el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, expanded ? 'Hide' : 'Preview');
+	if (expanded && toggle) buildPreview(file, previewHost);
 	if (toggle) {
 		toggle.addEventListener('click', () => {
 			expanded = !expanded;
@@ -476,35 +517,42 @@ function e2eDownloadButton(file) {
 	return download;
 }
 
-function e2eFileCard(file, canPreview) {
+function e2eFileCard(file, canPreview, autoExpand) {
 	const kind = previewKind(file.mime, file.name);
-	const previewHost = el('div', { class: 'rl-file-preview rl-hidden' });
+	const previewHost = el('div', { class: autoExpand ? 'rl-file-preview' : 'rl-file-preview rl-hidden' });
 	const sizeText = formatBytes(e2ePlainSize(file));
 	const sub = el('div', { class: 'rl-file-sub' }, sizeText);
 
 	let toggle = null;
+	let shown = false;
+	const showPreview = async () => {
+		const media = await e2ePreview(file, previewHost);
+		// Nice-to-have: once the browser has read the container, show the
+		// duration alongside the size.
+		if (media && (kind === 'video' || kind === 'audio')) {
+			media.addEventListener('loadedmetadata', () => {
+				if (Number.isFinite(media.duration) && media.duration > 0) {
+					const mm = Math.floor(media.duration / 60);
+					const ss = Math.floor(media.duration % 60).toString().padStart(2, '0');
+					sub.textContent = `${sizeText} · ${mm}:${ss}`;
+				}
+			}, { once: true });
+		}
+	};
 	if (kind !== 'none' && canPreview) {
-		let shown = false;
 		toggle = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Preview');
 		toggle.addEventListener('click', async () => {
 			shown = !shown;
 			toggle.textContent = shown ? 'Hide' : 'Preview';
 			previewHost.classList.toggle('rl-hidden', !shown);
-			if (shown) {
-				const media = await e2ePreview(file, previewHost);
-				// Nice-to-have: once the browser has read the container, show the
-				// duration alongside the size.
-				if (media && (kind === 'video' || kind === 'audio')) {
-					media.addEventListener('loadedmetadata', () => {
-						if (Number.isFinite(media.duration) && media.duration > 0) {
-							const mm = Math.floor(media.duration / 60);
-							const ss = Math.floor(media.duration % 60).toString().padStart(2, '0');
-							sub.textContent = `${sizeText} · ${mm}:${ss}`;
-						}
-					}, { once: true });
-				}
-			} else previewHost.replaceChildren();
+			if (shown) await showPreview();
+			else previewHost.replaceChildren();
 		});
+		if (autoExpand) {
+			shown = true;
+			toggle.textContent = 'Hide';
+			showPreview();
+		}
 	}
 
 	const download = e2eDownloadButton(file);
@@ -653,6 +701,115 @@ function ownerDeleteButton() {
 	return del;
 }
 
+// D3: owner-management controls (next to Delete) - change or clear the
+// expiry, and set/replace/clear the password. All three call the new
+// PATCH /api/shares/:id; a same-origin fetch (api.patch) satisfies
+// requireSameOrigin() on the owner-session cookie path exactly like Delete.
+
+function ownerPatch(body) {
+	return api.patch(`/api/shares/${encodeURIComponent(shareId)}`, body);
+}
+
+const EXPIRY_CHOICES = [
+	['0', 'Never'],
+	['3600', '1 hour'],
+	['86400', '1 day'],
+	['604800', '1 week'],
+	['2592000', '30 days'],
+];
+
+function ownerChangeExpiryButton() {
+	const btn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Change expiry...');
+	btn.addEventListener('click', () => {
+		const select = el('select', { class: 'rl-select' },
+			...EXPIRY_CHOICES.map(([value, label]) => el('option', { value }, label)),
+		);
+		openModal({
+			title: 'Change expiry',
+			body: el('div', { class: 'rl-field' }, el('label', { class: 'rl-label' }, 'Expires'), select),
+			actions: [
+				{ label: 'Cancel', variant: 'ghost' },
+				{
+					label: 'Save', variant: 'primary', onClick: async () => {
+						try {
+							await ownerPatch({ expiresIn: Number(select.value) });
+							toastOk('Expiry updated');
+							load();
+						} catch (err) {
+							toastErr(err);
+						}
+					},
+				},
+			],
+		});
+	});
+	return btn;
+}
+
+function ownerMakePrivateButton() {
+	const btn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Make private...');
+	btn.addEventListener('click', () => {
+		const input = el('input', { class: 'rl-input', type: 'password', placeholder: 'New password', autocomplete: 'new-password', autofocus: true });
+		const confirmInput = el('input', { class: 'rl-input', type: 'password', placeholder: 'Confirm password', autocomplete: 'new-password' });
+		openModal({
+			title: 'Make this share private',
+			body: el('div', { class: 'rl-stack' },
+				el('div', { class: 'rl-field' }, el('label', { class: 'rl-label' }, 'Password'), input),
+				el('div', { class: 'rl-field' }, el('label', { class: 'rl-label' }, 'Confirm password'), confirmInput),
+			),
+			actions: [
+				{ label: 'Cancel', variant: 'ghost' },
+				{
+					label: 'Set password', variant: 'primary', onClick: async () => {
+						const password = input.value;
+						if (!password) {
+							toastErr('Enter a password');
+							return true;
+						}
+						if (password !== confirmInput.value) {
+							toastErr('Passwords do not match');
+							return true;
+						}
+						try {
+							await ownerPatch({ password });
+							toastOk('Share is now private');
+							load();
+						} catch (err) {
+							toastErr(err);
+						}
+					},
+				},
+			],
+		});
+	});
+	return btn;
+}
+
+function ownerRemovePasswordButton() {
+	const btn = el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm' }, 'Remove password');
+	btn.addEventListener('click', () => {
+		openModal({
+			title: 'Remove the password?',
+			body: 'Anyone with the link will be able to open this share without a password.',
+			actions: [
+				{ label: 'Cancel', variant: 'ghost' },
+				{
+					label: 'Remove password', variant: 'danger', onClick: async () => {
+						try {
+							await ownerPatch({ password: null });
+							toastOk('Password removed');
+							load();
+						} catch (err) {
+							toastErr(err);
+						}
+					},
+				},
+			],
+		});
+	});
+	return btn;
+}
+
 // ---- QR code ---------------------------------------------------------------
 
 // Show a modal with a scannable QR for the given share URL. The QR renders dark
@@ -701,6 +858,13 @@ function renderShare(share) {
 	// or - M-05 - the owner-session cookie); hide the Preview toggle otherwise
 	// so we never show a control that would just 403.
 	const canPreview = share.owner || !share.oneTime;
+	// C: auto-expand a single image file's preview, mirroring the note
+	// auto-expand above. Stricter than canPreview (also requires no download
+	// cap) - matches the R1 permission the server itself enforces on
+	// /preview, so this never shows a control the server would just 403.
+	const singleImagePreview = count === 1 && !noteFile && files[0].complete
+		&& previewKind(files[0].mime, files[0].name) === 'image'
+		&& (share.owner || (!share.oneTime && share.maxDownloads == null));
 	const totalSize = share.totalSize != null ? share.totalSize : files.reduce((s, f) => s + (f.size || 0), 0);
 
 	const downloads = share.maxDownloads
@@ -727,7 +891,10 @@ function renderShare(share) {
 		statChip(downloads),
 	);
 
-	// Actions: copy link, QR, zip-all (multi-file), and owner delete (right-aligned).
+	// Actions: copy link, QR, zip-all (multi-file), owner management, and owner
+	// delete (right-aligned). D3: owner controls sit next to Delete, always
+	// visible (no hover-reveal) - "Remove password" only shown when currently
+	// protected (share.protected).
 	const actions = el('div', { class: 'rl-row rl-row-wrap' },
 		el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onClick: () => copyText(location.href) }, 'Copy link'),
 		el('button', { class: 'rl-btn rl-btn-secondary rl-btn-sm', onClick: () => openQrModal(location.href) }, 'QR code'),
@@ -735,6 +902,9 @@ function renderShare(share) {
 			? el('a', { class: 'rl-btn rl-btn-accent rl-btn-sm', href: withAccess(`/api/shares/${encodeURIComponent(shareId)}/download-all`) }, 'Download all (zip)')
 			: null,
 		share.owner ? el('span', { class: 'rl-spacer' }) : null,
+		share.owner ? ownerChangeExpiryButton() : null,
+		share.owner ? ownerMakePrivateButton() : null,
+		share.owner && share.protected ? ownerRemovePasswordButton() : null,
 		share.owner ? ownerDeleteButton() : null,
 	);
 
@@ -762,10 +932,11 @@ function renderShare(share) {
 	}
 
 	// One framed card holding a tight list of file rows (previews expand inline).
-	// A note share (C2) replaces its single row with the auto-expanded note card.
+	// A note share (C2) replaces its single row with the auto-expanded note card;
+	// a single-image share (C) auto-expands its own preview the same way.
 	const list = el('div', { class: 'rl-files' });
 	if (noteFile) list.append(noteCard(noteFile, share));
-	else for (const f of files) list.append(fileCard(f, canPreview));
+	else for (const f of files) list.append(fileCard(f, canPreview, singleImagePreview));
 	root.append(el('section', { class: 'rl-card rl-files-card' }, list));
 }
 
@@ -835,5 +1006,6 @@ async function load() {
 // One-release migration (M-05): exchange any legacy `roeshare:edit:<id>` raw
 // token for the new owner-session cookie before the metadata fetch below, so
 // an owner who used this browser before the change is still recognized as one.
+// D3: the fresh #edit= exchange (if any) runs right after, same reasoning.
 if (!shareId) renderMissing();
-else migrateLegacyOwnerTokens().then(load);
+else migrateLegacyOwnerTokens().then(exchangeEditToken).then(load);

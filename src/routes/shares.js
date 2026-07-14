@@ -413,6 +413,13 @@ export default function shares(router) {
 			finalized: !!share.finalized,
 			totalSize,
 			owner,
+			// D3: whether the share is currently password-protected, so the owner
+			// UI (view.js) can show "Remove password" vs "Make private" without a
+			// second round trip. Additive - safe for any already-authorized caller
+			// to see (a visitor only ever reaches this 200 after unlocking or as
+			// owner; a still-locked visitor gets the separate 401 { protected: true }
+			// branch above, unchanged).
+			protected: !!share.password_hash,
 			// Owners (validated via X-Edit-Token or the owner cookie) get a read
 			// access token so their element-src previews and download links work
 			// without unlocking - the edit token itself is too sensitive to place

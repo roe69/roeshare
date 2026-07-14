@@ -153,7 +153,7 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
 ### View / download (visitor)
 - `GET /api/shares/:id` -> share metadata. `404` if missing/deleted/expired.
   If password-protected and caller lacks a valid access/edit token: `401 { protected: true, title? }`.
-  Otherwise `{ id, title, createdAt, expiresAt, oneTime, maxDownloads, downloadCount, finalized, totalSize, owner: boolean, files: [{ id, name, size, mime, complete, downloadCount, aadVersion }] }`.
+  Otherwise `{ id, title, createdAt, expiresAt, oneTime, maxDownloads, downloadCount, finalized, totalSize, owner: boolean, protected: boolean, files: [{ id, name, size, mime, complete, downloadCount, aadVersion }] }`. `protected` reflects whether a password is currently set (D3: lets the owner UI show "Remove password" vs. "Make private" without a second request).
 - `POST /api/shares/:id/unlock` body `{ password }` -> `{ accessToken }` on success, `403` on failure. Use `verifyPassword`.
 - `GET /api/shares/:id/files/:fileId/preview` -> inline stream
   (`Content-Disposition: inline`), Range-aware (`206` + `Content-Range` +
@@ -358,8 +358,16 @@ formatBytes, formatDate, timeUntil, copyText, fileGlyph, previewKind`.
   show a password form -> `unlock` -> store accessToken in memory and append
   `?access=` to media URLs. List files with inline preview (image/video/audio/
   pdf/text via `previewKind`), per-file download, and "Download all (zip)".
-  If owner (`share.owner`, resolved server-side from the owner-session cookie),
-  show delete controls.
+  A single-file image share auto-expands its own preview, mirroring the
+  existing single-text-note auto-expand, when preview is permitted for this
+  viewer (owner, or no one-time/download-cap restriction). D3: before the
+  metadata fetch, an `#edit=<token>` fragment (only ever produced by RoeSnip's
+  Open action) is parsed and IMMEDIATELY stripped via `history.replaceState`
+  (even if the exchange below fails), then exchanged via
+  `POST /api/shares/:id/owner-session` for the owner-session cookie; failure
+  is silent (proceeds as an ordinary visitor). If owner (`share.owner`,
+  resolved server-side from the owner-session cookie), show expiry/password
+  management controls (PATCH `/api/shares/:id`) alongside delete.
 - **`public/admin.html` + `public/js/admin.js`**: login form (if `me.admin` is
   false) -> stats cards -> searchable/sortable table of shares with per-row open
   link, copy link, and delete (with confirm modal); bulk delete; per-file delete
