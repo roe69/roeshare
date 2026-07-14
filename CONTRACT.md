@@ -293,13 +293,32 @@ created (others 404):
 
 ### Pages (`src/routes/pages.js`)
 - `GET /` -> serve `public/upload.html`.
-- `GET /s/:id` -> serve `public/view.html`.
+- `GET /s/:id` -> serve `public/view.html` via `serveSharePage(id, origin)`.
 - `GET /admin` -> serve `public/admin.html`.
-- `GET /<slug>` (root-level custom link) -> serve `public/view.html`. Handled as a
-  fallback in `server.js` AFTER routes + static, matching `^/[A-Za-z0-9_-]{1,64}$`,
-  so it never shadows real routes or assets. `view.js` resolves the share from the
-  last path segment, so `/s/:id` and `/:id` both work.
+- `GET /<slug>` (root-level custom link) -> serve `public/view.html` via the same
+  `serveSharePage()`. Handled as a fallback in `server.js` AFTER routes + static,
+  matching `^/[A-Za-z0-9_-]{1,64}$`, so it never shadows real routes or assets.
+  `view.js` resolves the share from the last path segment, so `/s/:id` and `/:id`
+  both work. This is the route the one-shot upload's returned `url` actually hits.
 Serve with `Bun.file(...)` and `Content-Type: text/html` + the page CSP.
+
+`serveSharePage(idOrSlug, origin)` additionally splices per-request OpenGraph/
+Twitter embed meta into `view.html`'s `{{SHARE_META}}` head token (never
+memoized - only the templated base HTML is cached per file, same as every other
+page). Resolves the share by a direct, read-only DB lookup (id, then a
+case-insensitive slug fallback) with the exact same live/finalized/not-expired
+predicate as `GET /api/shares/:id`, but never calls that handler - so a crawler
+prefetching a pasted link never inflates `view_count`. Rich meta (title,
+description, `og:image` -> the file's `/preview` URL) is emitted only when the
+share is finalized, not `e2e`, not password-protected, not `one_time`, and has
+at least one complete file whose mime is in `EMBED_IMAGE_MIME` (png/jpeg/gif/
+webp/avif - a deliberate subset of `download.js`'s `SAFE_INLINE`, no svg). Every
+other case - missing id, `e2e`, password-protected, one-time, no eligible image,
+or unfinalized - gets fixed, byte-identical generic meta with zero per-share
+data, so the meta itself never reveals which case applies. Every dynamic value
+(title, filename) is escaped via `lib/html.js`'s `escapeHtmlAttr` before
+templating - the first server-side templating of user-controlled text into
+HTML in this codebase.
 
 ## Streaming pattern (download/preview)
 

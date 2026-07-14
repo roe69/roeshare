@@ -10,8 +10,8 @@ import { db, now } from './db.js';
 import { Router, RouterError } from './router.js';
 import { registerRoutes } from './routes/index.js';
 import { assertRouteCoverage } from './lib/routePolicy.js';
-import { servePage } from './routes/pages.js';
-import { clientIp, error, noContent, SECURITY_HEADERS, FORWARDED_FOR_INVALID } from './lib/http.js';
+import { serveSharePage } from './routes/pages.js';
+import { clientIp, error, noContent, requestOrigin, SECURITY_HEADERS, FORWARDED_FOR_INVALID } from './lib/http.js';
 import { hasUploadAccess, isAdmin } from './lib/auth.js';
 import { deleteShareFiles } from './lib/storage.js';
 import { pickEncoding, compressBytes, isCompressibleType, compressResponse } from './lib/compress.js';
@@ -320,8 +320,13 @@ const server = Bun.serve({
 					// Root-level custom slug (e.g. /my-files): serve the view page, which
 					// resolves the share by its last path segment. Runs only after real
 					// routes and static assets have been tried, so it can never shadow
-					// /admin, /api/*, or a favicon.
-					if (!res && /^\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) res = await servePage('view.html');
+					// /admin, /api/*, or a favicon. CRITICAL for embed meta (C in the API
+					// contract): the one-shot upload's returned url is `{origin}/{id}`
+					// (api.js), so every RoeSnip-created link hits THIS fallback, not
+					// /s/:id - serveSharePage (not the plain servePage) must run here too.
+					if (!res && /^\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
+						res = serveSharePage(url.pathname.slice(1), requestOrigin(req, url, server));
+					}
 				}
 			}
 			if (!res) res = error(404, 'Not found');

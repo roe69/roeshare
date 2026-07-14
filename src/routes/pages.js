@@ -4,10 +4,13 @@
 
 import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
+import { db } from '../db.js';
 import { config } from '../config.js';
-import { error, SECURITY_HEADERS } from '../lib/http.js';
+import { error, requestOrigin, SECURITY_HEADERS } from '../lib/http.js';
 import { hasUploadAccess, isAdmin } from '../lib/auth.js';
+import { escapeHtmlAttr } from '../lib/html.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
+import { liveShare } from './shares.js';
 
 const PAGES_DIR = join(import.meta.dir, '..', '..', 'public');
 
@@ -61,6 +64,124 @@ export function servePage(file, extraHeaders) {
 	});
 }
 
+// ---- Share embed metadata (Discord/web link previews) ---------------------
+//
+// C in the API contract: server-rendered OpenGraph/Twitter meta for the view
+// page, injected per request (never memoized - see pageCache above, which is
+// keyed per FILE and would otherwise leak one share's title to every visitor
+// of every share). Rich meta only for a share the server can actually see
+// plaintext for (non-E2E) and that is safe to summarize publicly (not
+// password-protected, not one-time, finalized, and has at least one complete
+// image file) - everything else, including a missing id, gets byte-identical
+// GENERIC meta with zero per-share data, so the meta itself never reveals
+// whether an id exists, is private, or is E2E.
+
+// Deliberate subset of download.js's SAFE_INLINE: no svg (script-capable),
+// no bmp/x-icon (not worth a rich preview).
+const EMBED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif']);
+
+const GENERIC_EMBED_DESCRIPTION = 'Secure, self-hosted file sharing.';
+
+// Case-insensitive fallback lookup for a custom slug typed with different
+// casing - excludes soft-deleted rows, same as shares.js's own slug-conflict
+// check. Only the id is selected; liveShare() below re-reads the full row and
+// re-applies the exact same expiry predicate GET /api/shares/:id uses.
+const getIdByLowerSlug = db.query('SELECT id FROM shares WHERE lower(id) = lower(?) AND deleted_at IS NULL');
+
+// A minimal, read-only file lookup - no download_count/view_count touched,
+// no write of any kind. First complete file (upload order) whose mime is
+// embeddable, or null.
+const getEmbeddableFile = db.query(
+	"SELECT id, name, size, mime FROM files WHERE share_id = ? AND complete = 1 ORDER BY created_at ASC, id ASC"
+);
+
+function formatBytesServer(bytes) {
+	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	let n = Number(bytes) || 0;
+	let i = 0;
+	while (n >= 1024 && i < units.length - 1) {
+		n /= 1024;
+		i++;
+	}
+	return `${n.toFixed(n < 10 && i > 0 ? 1 : 0)} ${units[i]}`;
+}
+
+// Direct, read-only resolution matching liveShare()'s exact predicate (live/
+// finalized/not-deleted/not-expired) - id first (the common case), then a
+// case-insensitive slug fallback. Never touches view_count.
+function resolveShareForMeta(idOrSlug) {
+	const byId = liveShare(idOrSlug);
+	if (byId) return byId;
+	const row = getIdByLowerSlug.get(idOrSlug);
+	if (!row || row.id === idOrSlug) return null;
+	return liveShare(row.id);
+}
+
+function metaTag(prop, attr, content) {
+	return `<meta ${attr}="${prop}" content="${escapeHtmlAttr(content)}">`;
+}
+
+function genericMetaHtml() {
+	return [
+		metaTag('og:site_name', 'property', config.appTitle),
+		metaTag('og:title', 'property', config.appTitle),
+		metaTag('og:type', 'property', 'website'),
+		metaTag('og:description', 'property', GENERIC_EMBED_DESCRIPTION),
+		metaTag('twitter:card', 'name', 'summary'),
+	].join('\n\t');
+}
+
+function richMetaHtml(share, file, origin) {
+	const title = share.title || file.name;
+	const description = `${file.name} (${formatBytesServer(file.size)})`;
+	const imageUrl = `${origin}/api/shares/${share.id}/files/${file.id}/preview`;
+	return [
+		metaTag('og:site_name', 'property', config.appTitle),
+		metaTag('og:title', 'property', title),
+		metaTag('og:description', 'property', description),
+		metaTag('og:type', 'property', 'website'),
+		metaTag('og:url', 'property', `${origin}/s/${share.id}`),
+		metaTag('og:image', 'property', imageUrl),
+		metaTag('og:image:type', 'property', file.mime),
+		metaTag('twitter:card', 'name', 'summary_large_image'),
+		metaTag('twitter:title', 'name', title),
+		metaTag('twitter:image', 'name', imageUrl),
+	].join('\n\t');
+}
+
+// Builds the meta block for one request. Any unexpected failure (e.g. a
+// malformed id the queries above choke on) degrades to generic meta rather
+// than a 500 - a link preview is never load-bearing for the page itself.
+function buildShareMeta(idOrSlug, origin) {
+	try {
+		const share = resolveShareForMeta(idOrSlug);
+		if (!share) return genericMetaHtml();
+		if (!share.finalized || share.e2e || share.password_hash || share.one_time) return genericMetaHtml();
+		const files = getEmbeddableFile.all(share.id);
+		const file = files.find(f => EMBED_IMAGE_MIME.has(String(f.mime || '').toLowerCase().split(';')[0].trim()));
+		if (!file) return genericMetaHtml();
+		return richMetaHtml(share, file, origin);
+	} catch (e) {
+		console.error('embed meta build failed for', idOrSlug, e);
+		return genericMetaHtml();
+	}
+}
+
+// Serves the view page for a share id or custom slug with per-request embed
+// meta spliced into the cached base HTML (renderPage() below caches the base
+// file - including the still-unsubstituted {{SHARE_META}} token - per
+// process; only the meta block itself is computed fresh every time and never
+// cached, so two different shares can never leak each other's title/image).
+export function serveSharePage(idOrSlug, origin) {
+	const html = renderPage('view.html');
+	if (html === null) return error(404, 'Not found');
+	const meta = buildShareMeta(idOrSlug, origin);
+	const out = html.replace('{{SHARE_META}}', meta);
+	return new Response(out, {
+		headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Security-Policy': PAGE_CSP, ...SECURITY_HEADERS },
+	});
+}
+
 export default function pages(router) {
 	// When an upload password is set, an unauthorized visitor gets only the lock
 	// page - the upload portal's markup is never served without the cookie.
@@ -91,7 +212,7 @@ export default function pages(router) {
 		return servePage(file, { 'Cache-Control': 'no-store' });
 	});
 	declareRoutePolicy('GET', '/s/:id', { auth: 'public', csrf: false, rateLimit: null, audit: null });
-	router.get('/s/:id', () => servePage('view.html'));
+	router.get('/s/:id', ctx => serveSharePage(ctx.params.id, requestOrigin(ctx.req, ctx.url, ctx.server)));
 	declareRoutePolicy('GET', '/mine', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/mine', () => servePage('myshares.html'));
 	// API-key portal: sign in with a key name + token to manage that key's shares.

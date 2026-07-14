@@ -64,7 +64,12 @@ const incShareView = db.query('UPDATE shares SET view_count = view_count + 1 WHE
 // A share is "live" when it exists, is not soft-deleted, and has not expired.
 // A non-finalized share's expiry clock has not started yet (see finalize,
 // below), so it is never treated as expired while still being uploaded.
-function liveShare(id) {
+// Exported so routes/pages.js's embed-meta lookup (serveSharePage) can reuse
+// the EXACT same liveness predicate via a direct DB read, rather than
+// duplicating it or going through the GET /api/shares/:id handler (which
+// would inflate view_count on every crawler prefetch - see C in the API
+// contract).
+export function liveShare(id) {
 	const share = getShare.get(id);
 	if (!share || share.deleted_at != null) return null;
 	if (share.finalized && share.expires_at != null && share.expires_at < now()) return null;
