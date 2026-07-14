@@ -16,7 +16,7 @@ import { deleteShareFiles } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
 import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
-import { keyValidForShare, scopeErrorForShare, apiKeyRow, hasScope } from '../lib/apikeys.js';
+import { keyValidForShare, scopeErrorForShare, apiKeyRow, hasScope, clampExpiry } from '../lib/apikeys.js';
 import * as quota from '../lib/quota.js';
 import { audit } from '../lib/audit.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
@@ -539,6 +539,17 @@ export default function shares(router) {
 		if (response) return response;
 		const body = value || {};
 
+		// A not-yet-finalized share's expiry clock hasn't started (liveShare()
+		// treats it as live regardless of expires_at while unfinalized), and
+		// finalize's shiftExpiry below adds the upload duration on top of
+		// whatever is stored - so an expiry set here would be silently re-shifted
+		// at finalize, overshooting whatever the owner asked for. Simplest
+		// correct behavior: ask them to finish uploading first, rather than
+		// taking on shiftExpiry's semantics here.
+		if (!share.finalized && body.expiresIn !== undefined && body.expiresIn !== null) {
+			return error(409, 'Finish uploading before changing expiry');
+		}
+
 		// expiresIn: 0 = never; positive n = now()+trunc(n); absent = unchanged.
 		// Same parse as POST /api/shares (create) above, except "unchanged"
 		// replaces "default" for the absent case - a PATCH must never silently
@@ -549,6 +560,10 @@ export default function shares(router) {
 			const n = Number(body.expiresIn);
 			if (!Number.isFinite(n) || n < 0) return error(400, 'Invalid expiresIn');
 			expiresAt = n > 0 ? now() + Math.trunc(n) : null;
+			// Same cap the create path enforces (api.js's clampExpiry call) - without
+			// this, a key holder could bypass an admin-imposed max_expiry simply by
+			// PATCHing the share it created (e.g. expiresIn:0 to make it permanent).
+			if (share.api_key_id) expiresAt = clampExpiry(apiKeyRow(share.api_key_id), expiresAt);
 			setExpiry = true;
 		}
 

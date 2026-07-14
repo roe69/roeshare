@@ -172,7 +172,13 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
   body `{ expiresIn?, password? }` - the minimal owner self-service surface (no
   title/slug editing; a share is already unlisted-by-id). `expiresIn`: `0` =
   never, a positive integer = seconds from now, absent = unchanged; anything
-  else `400 'Invalid expiresIn'`. `password`: a string sets/replaces it ("make
+  else `400 'Invalid expiresIn'`. A share created by an API key with
+  `max_expiry` has `expiresIn` clamped to that cap here too (same as create) -
+  a key holder cannot PATCH past the admin-imposed lifetime. `expiresIn` on a
+  not-yet-finalized share is `409` ("Finish uploading before changing
+  expiry") - its expiry clock hasn't started yet, and finalize's
+  upload-duration shift would silently re-shift whatever was just set.
+  `password`: a string sets/replaces it ("make
   private"), explicit `null` clears it ("make public"), absent = unchanged; an
   empty string is `400`. Rate-limited (20/min per share). Because visitor
   access tokens are bound to `password_hash` (`issueAccessToken`/

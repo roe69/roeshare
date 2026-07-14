@@ -267,6 +267,108 @@ describe('PATCH /api/shares/:id (D2)', () => {
 		}
 	});
 
+	test('a max_expiry-capped key cannot PATCH a share past its cap, even to never', async () => {
+		cachedAuth = null;
+		const dir = freshDataDir('share-edit-cap');
+		try {
+			const proc = await bootServer(dir, 3754);
+			try {
+				const base = 'http://127.0.0.1:3754';
+
+				const loginRes = await fetch(`${base}/api/admin/login`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json', Origin: base },
+					body: JSON.stringify({ password: ADMIN_PASSWORD }),
+				});
+				const cookie = loginRes.headers.get('set-cookie').split(';')[0];
+				const keyRes = await fetch(`${base}/api/admin/api-keys`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: base },
+					body: JSON.stringify({ name: 'capped-key', limits: { maxExpiry: 3600 } }),
+				});
+				expect(keyRes.status).toBe(201);
+				const key = await keyRes.json();
+				const auth = { Authorization: `Bearer ${key.token}` };
+
+				const madeRes = await fetch(`${base}/api/v1/upload?expiresIn=0`, {
+					method: 'POST',
+					headers: { ...auth, 'X-Filename': 'capped.txt' },
+					body: new Uint8Array([1]),
+				});
+				expect(madeRes.status).toBe(201);
+				const made = await madeRes.json();
+				// The 1-hour cap already clamped the "never" request at creation.
+				expect(made.expiresAt).not.toBeNull();
+				const capLimit = made.expiresAt;
+
+				// PATCHing to "never" must still respect the cap, not bypass it.
+				const patchNever = await fetch(`${base}/api/shares/${made.id}`, {
+					method: 'PATCH',
+					headers: { 'Content-Type': 'application/json', 'X-Edit-Token': made.editToken, Origin: base },
+					body: JSON.stringify({ expiresIn: 0 }),
+				});
+				expect(patchNever.status).toBe(200);
+				const neverBody = await patchNever.json();
+				expect(neverBody.expiresAt).not.toBeNull();
+				expect(neverBody.expiresAt).toBeLessThanOrEqual(capLimit + 5);
+
+				// PATCHing to something longer than the cap is clamped down to it.
+				const patchLong = await fetch(`${base}/api/shares/${made.id}`, {
+					method: 'PATCH',
+					headers: { 'Content-Type': 'application/json', 'X-Edit-Token': made.editToken, Origin: base },
+					body: JSON.stringify({ expiresIn: 999_999 }),
+				});
+				expect(patchLong.status).toBe(200);
+				const longBody = await patchLong.json();
+				expect(longBody.expiresAt).toBeLessThanOrEqual(capLimit + 5);
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
+	test('PATCH expiresIn on a not-yet-finalized share is refused (would be re-shifted by finalize)', async () => {
+		cachedAuth = null;
+		const dir = freshDataDir('share-edit-unfinalized');
+		try {
+			const proc = await bootServer(dir, 3755);
+			try {
+				const base = 'http://127.0.0.1:3755';
+
+				const draftRes = await fetch(`${base}/api/shares`, {
+					method: 'POST',
+					headers: { 'Content-Type': 'application/json', Origin: base },
+					body: JSON.stringify({ expiresIn: 0 }),
+				});
+				expect(draftRes.status).toBe(201);
+				const draft = await draftRes.json();
+
+				// Not finalized yet - changing expiry must be refused, not silently
+				// accepted and then overshot by finalize's shiftExpiry.
+				const patchRes = await fetch(`${base}/api/shares/${draft.id}`, {
+					method: 'PATCH',
+					headers: { 'Content-Type': 'application/json', 'X-Edit-Token': draft.editToken, Origin: base },
+					body: JSON.stringify({ expiresIn: 3600 }),
+				});
+				expect(patchRes.status).toBe(409);
+
+				// A password-only PATCH (no expiresIn) is unaffected.
+				const passRes = await fetch(`${base}/api/shares/${draft.id}`, {
+					method: 'PATCH',
+					headers: { 'Content-Type': 'application/json', 'X-Edit-Token': draft.editToken, Origin: base },
+					body: JSON.stringify({ password: 'still-fine-123' }),
+				});
+				expect(passRes.status).toBe(200);
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
 	test('rate limit fires after 20 edits in a minute', async () => {
 		cachedAuth = null;
 		const dir = freshDataDir('share-edit-ratelimit');
