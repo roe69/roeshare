@@ -254,11 +254,19 @@ slug/password scope, is `403`; the key's `maxExpiry` clamps the share's expiry.
   resumable endpoints (`POST /api/shares/:id/files`, PATCH chunks, `POST .../finalize`) with `X-Edit-Token`. Use for large files.
 - `POST /api/v1/upload` one-shot: request body IS the file bytes; filename via the
   `X-Filename` header (or `?filename=`); options as query params (`title`, `slug`,
-  `expiresIn`, `maxDownloads`, `oneTime`, `mime`). Password via the `X-Upload-Password`
+  `expiresIn`, `maxDownloads`, `oneTime`, `mime`). `expiresIn` (seconds): omitted or
+  empty = `config.defaultExpiry` (7 days on prod); `0` = never; a positive integer =
+  seconds from now, clamped by the key's `maxExpiry`. RoeSnip's RoeShare provider
+  sends the literal `expiresIn=0` by default (never-expire), not the omitted/default
+  form. Password via the `X-Upload-Password`
   header ONLY (keeps it out of proxy logs/history/Referer) - a `?password=` query param
   is rejected with `400` rather than silently ignored, so a stale client fails loud
   instead of publishing an unprotected share. Creates + finalizes a single-file share.
-  -> `201 { id, url, fileId, name, size }`. Bounded by the server's max request body
+  -> `201 { id, url, fileId, name, size, editToken, expiresAt }`. `editToken` is the
+  plaintext owner secret (only its hash is stored server-side) - use it as
+  `X-Edit-Token` on owner-gated routes. `expiresAt` is the resolved expiry (epoch
+  seconds, or `null` for never). Both fields are additive; older clients that only
+  read `url` are unaffected. Bounded by the server's max request body
   size (so for files beyond that, use the resumable flow above).
 
 Manage / restore (for backup clients). A key can only see and act on the shares it

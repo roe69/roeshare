@@ -149,7 +149,7 @@ function scopeError(key, opts) {
 	return null;
 }
 
-// Insert a share row attributed to `key`. Returns { id, editToken }, { conflict }
+// Insert a share row attributed to `key`. Returns { id, editToken, expiresAt }, { conflict }
 // when a requested slug is already taken, { limited } when the key has hit its
 // share cap, or { overloaded } when the argon2 semaphore is full (password
 // shares only). Applies the key's max share lifetime to the expiry.
@@ -236,7 +236,7 @@ async function createShare(ctx, key, opts) {
 	// creation paths - this is the single site both funnel through.
 	audit('share.created', { ip: ctx.ip, actor: `apikey:${key.id}`, target: id });
 
-	return { id, editToken };
+	return { id, editToken, expiresAt };
 }
 
 export default function apiV1(router) {
@@ -522,6 +522,13 @@ export default function apiV1(router) {
 					fileId,
 					name,
 					size,
+					// D1: the plaintext edit token (createShare only ever stores its
+					// hash) and the resolved expiry, so a scripted client can act as
+					// owner and verify expiry without a second round trip. Both are new
+					// fields on an existing 201 body - old clients that only read `url`
+					// are unaffected, and a null expiresAt just means "never".
+					editToken: made.editToken,
+					expiresAt: made.expiresAt,
 				},
 				201,
 			);
