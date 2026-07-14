@@ -316,11 +316,13 @@ case-insensitive slug fallback) with the exact same live/finalized/not-expired
 predicate as `GET /api/shares/:id`, but never calls that handler - so a crawler
 prefetching a pasted link never inflates `view_count`. Rich meta (title,
 description, `og:image` -> the file's `/preview` URL) is emitted only when the
-share is finalized, not `e2e`, not password-protected, not `one_time`, and has
-at least one complete file whose mime is in `EMBED_IMAGE_MIME` (png/jpeg/gif/
-webp/avif - a deliberate subset of `download.js`'s `SAFE_INLINE`, no svg). Every
-other case - missing id, `e2e`, password-protected, one-time, no eligible image,
-or unfinalized - gets fixed, byte-identical generic meta with zero per-share
+share is finalized, not `e2e`, not password-protected, not `one_time`, not
+download-capped (`maxDownloads` unset - `/preview` itself 403s a non-owner
+once it is), and has at least one complete file whose mime is in
+`EMBED_IMAGE_MIME` (png/jpeg/gif/webp/avif - a deliberate subset of
+`download.js`'s `SAFE_INLINE`, no svg). Every other case - missing id, `e2e`,
+password-protected, one-time, download-capped, no eligible image, or
+unfinalized - gets fixed, byte-identical generic meta with zero per-share
 data, so the meta itself never reveals which case applies. Every dynamic value
 (title, filename) is escaped via `lib/html.js`'s `escapeHtmlAttr` before
 templating - the first server-side templating of user-controlled text into

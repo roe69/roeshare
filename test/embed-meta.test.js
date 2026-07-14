@@ -196,6 +196,16 @@ describe('embed meta (C)', () => {
 				});
 				const oneTime = await oneTimeRes.json();
 
+				// Download-capped image: the og:image target (/preview) 403s for a
+				// non-owner whenever max_downloads is set (download.js), so this must
+				// get generic meta too rather than a half-working embed.
+				const cappedRes = await fetch(`${base}/api/v1/upload?expiresIn=0&mime=image%2Fpng&maxDownloads=3&title=CappedPic`, {
+					method: 'POST',
+					headers: { ...auth, 'X-Filename': 'c.png' },
+					body: new Uint8Array([1, 2, 3, 4]),
+				});
+				const capped = await cappedRes.json();
+
 				// E2E share (via the web-portal resumable flow; e2e is not reachable
 				// through the API-key one-shot path).
 				const draftRes = await fetch(`${base}/api/shares`, {
@@ -227,13 +237,13 @@ describe('embed meta (C)', () => {
 				const missingId = 'no-such-share-id-xyz';
 
 				const pages = {};
-				for (const [label, id] of Object.entries({ missing: missingId, nonImage: nonImage.id, password: password.id, oneTime: oneTime.id, e2e: draft.id })) {
+				for (const [label, id] of Object.entries({ missing: missingId, nonImage: nonImage.id, password: password.id, oneTime: oneTime.id, e2e: draft.id, capped: capped.id })) {
 					const r = await fetch(`${base}/${id}`);
 					expect(r.status).toBe(200);
 					pages[label] = await r.text();
 				}
 
-				// All five are byte-for-byte identical - none leaks a title/description/image.
+				// All six are byte-for-byte identical - none leaks a title/description/image.
 				const values = Object.values(pages);
 				for (let i = 1; i < values.length; i++) {
 					expect(values[i]).toBe(values[0]);
@@ -241,6 +251,7 @@ describe('embed meta (C)', () => {
 				expect(pages.password).not.toContain('SecretPic');
 				expect(pages.oneTime).not.toContain('OneTimePic');
 				expect(pages.e2e).not.toContain('E2ESecretTitle');
+				expect(pages.capped).not.toContain('CappedPic');
 				expect(pages.missing).not.toContain('og:image');
 
 				// Cross-share leakage check against the rich (image) share from the

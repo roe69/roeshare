@@ -71,10 +71,10 @@ export function servePage(file, extraHeaders) {
 // keyed per FILE and would otherwise leak one share's title to every visitor
 // of every share). Rich meta only for a share the server can actually see
 // plaintext for (non-E2E) and that is safe to summarize publicly (not
-// password-protected, not one-time, finalized, and has at least one complete
-// image file) - everything else, including a missing id, gets byte-identical
-// GENERIC meta with zero per-share data, so the meta itself never reveals
-// whether an id exists, is private, or is E2E.
+// password-protected, not one-time, not download-capped, finalized, and has
+// at least one complete image file) - everything else, including a missing
+// id, gets byte-identical GENERIC meta with zero per-share data, so the meta
+// itself never reveals whether an id exists, is private, or is E2E.
 
 // Deliberate subset of download.js's SAFE_INLINE: no svg (script-capable),
 // no bmp/x-icon (not worth a rich preview).
@@ -156,7 +156,7 @@ function buildShareMeta(idOrSlug, origin) {
 	try {
 		const share = resolveShareForMeta(idOrSlug);
 		if (!share) return genericMetaHtml();
-		if (!share.finalized || share.e2e || share.password_hash || share.one_time) return genericMetaHtml();
+		if (!share.finalized || share.e2e || share.password_hash || share.one_time || share.max_downloads !== null) return genericMetaHtml();
 		const files = getEmbeddableFile.all(share.id);
 		const file = files.find(f => EMBED_IMAGE_MIME.has(String(f.mime || '').toLowerCase().split(';')[0].trim()));
 		if (!file) return genericMetaHtml();
