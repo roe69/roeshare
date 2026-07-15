@@ -153,7 +153,7 @@ function accessCheck(share, req, url) {
 		if (key && key.id === share.api_key_id && hasScope(key, 'read')) owner = true;
 	}
 	if (owner || !share.password_hash) return { ok: true, owner };
-	const token = readAccessToken(req, url);
+	const token = readAccessToken(req, url, share.id);
 	if (token && hasAccessToken(token, share.id, share.password_hash)) return { ok: true, owner };
 	return { ok: false, owner };
 }

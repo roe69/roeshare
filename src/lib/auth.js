@@ -169,11 +169,45 @@ export function hasAccessToken(token, shareId, passwordHash) {
 	return safeEqual(p.k, credentialTag(`access:${shareId}`, passwordHash || ''));
 }
 
-// The access token may arrive via the Authorization: Bearer header or an
-// `access` query param (handy for direct <video>/<img> element src URLs).
-export function readAccessToken(req, url) {
+// 2026-07 audit F-3: a per-share, HttpOnly grant cookie carrying the exact
+// same signed token issueAccessToken() mints - set alongside the JSON-body
+// accessToken wherever that is issued (unlock, and the owner branch of GET
+// /api/shares/:id below), so a same-origin <img>/<video> src can authenticate
+// via an ambient cookie instead of a URL-borne token. NOT a replacement for
+// the `?access=` query fallback: DEPLOY.md's "serving file content from a
+// separate domain" recipe is explicitly built on the preview/download/zip
+// routes authenticating via a bearer/X-Edit-Token/`?access=` credential and
+// NEVER a cookie, precisely so a reverse-proxied second registrable domain
+// never receives the app's cookies at all - removing the query fallback
+// would break that documented recipe for any operator who followed it (a
+// cookie set on the app's own origin cannot reach a different registrable
+// domain, by design). This cookie only SUPPLEMENTS the existing header/query
+// credential for same-origin requests; public/js/view.js's withAccess() still
+// appends `?access=` exactly as before. Residual, accepted tradeoff: the 1h
+// access token continues to appear in preview/download/zip URLs (and thus
+// proxy/CDN logs, browser history, screenshots) for password-protected
+// shares on a same-origin deployment too - closing that fully would need a
+// deployment-mode flag this audit did not request.
+export const ACCESS_COOKIE_BASE = 'roeshare_access';
+export const accessCookieBase = shareId => `${ACCESS_COOKIE_BASE}_${shareId}`;
+
+export function readAccessGrantCookie(req, shareId) {
+	return readSessionCookie(req, accessCookieBase(shareId));
+}
+
+// The access token may arrive via the Authorization: Bearer header, the F-3
+// per-share grant cookie (same-origin only), or an `access` query param
+// (handy for direct <video>/<img> element src URLs, and the only option that
+// survives DEPLOY.md's separate-file-domain recipe - see the cookie's own
+// comment above). `shareId` is optional so existing callers that have no
+// share id in scope keep working unchanged (cookie check simply skipped).
+export function readAccessToken(req, url, shareId) {
 	const auth = req.headers.get('authorization');
 	if (auth && auth.startsWith('Bearer ')) return auth.slice(7);
+	if (shareId) {
+		const cookieToken = readAccessGrantCookie(req, shareId);
+		if (cookieToken) return cookieToken;
+	}
 	return url?.searchParams?.get('access') || null;
 }
 

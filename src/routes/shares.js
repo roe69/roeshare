@@ -8,7 +8,7 @@ import { json, error, cookie, sessionCookieName, requestOrigin, requestScheme, r
 import { hashPassword, verifyPassword, hashSecretToken, verifySecretToken } from '../lib/crypto.js';
 import {
 	uploadAllowed, isAdmin, issueAccessToken, hasAccessToken, readAccessToken, hasUploadAccess, issueUploadToken, mintUploadLink, redeemUploadLink, UPLOAD_COOKIE,
-	issueOwnerToken, hasOwnerCookie, ownerCookieBase,
+	issueOwnerToken, hasOwnerCookie, ownerCookieBase, accessCookieBase,
 } from '../lib/auth.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { newShareId, newToken } from '../lib/ids.js';
@@ -346,7 +346,17 @@ export default function shares(router) {
 			return error(403, 'Incorrect password');
 		}
 
-		return json({ accessToken: issueAccessToken(share.id, share.password_hash) });
+		const accessToken = issueAccessToken(share.id, share.password_hash);
+		// F-3: also grant the same token via a same-origin HttpOnly cookie, so a
+		// visitor's <img>/<video> element src can authenticate ambiently instead
+		// of via the `?access=` query string view.js still appends - see
+		// lib/auth.js's readAccessGrantCookie comment for why the query fallback
+		// itself is kept.
+		const secure = requestScheme(ctx.req, ctx.url, ctx.server) === 'https';
+		const setCookie = cookie(sessionCookieName(accessCookieBase(share.id), secure), accessToken, {
+			maxAge: config.accessTokenTtl, httpOnly: true, sameSite: 'Lax', secure,
+		});
+		return json({ accessToken }, { headers: { 'Set-Cookie': setCookie } });
 	});
 
 	// ---- Visitor metadata --------------------------------------------------
@@ -380,7 +390,7 @@ export default function shares(router) {
 		const owner = isOwner(ctx.req, share) && (share.api_key_id == null || hasScope(apiKeyRow(share.api_key_id), 'read'));
 
 		if (share.password_hash && !owner) {
-			const token = readAccessToken(ctx.req, ctx.url);
+			const token = readAccessToken(ctx.req, ctx.url, share.id);
 			if (!token || !hasAccessToken(token, share.id, share.password_hash)) {
 				// No share metadata (title in particular, which for backup jobs may
 				// contain hostnames/customer names) before the visitor has proven
@@ -399,6 +409,20 @@ export default function shares(router) {
 
 		const files = getFiles.all(share.id);
 		const totalSize = files.reduce((sum, f) => sum + f.size, 0);
+
+		// Owners (validated via X-Edit-Token or the owner cookie) get a read
+		// access token so their element-src previews and download links work
+		// without unlocking - the edit token itself is too sensitive to place
+		// in URLs. F-3: also grant it via the same-origin cookie (see
+		// lib/auth.js's readAccessGrantCookie) alongside the JSON-body token.
+		const ownerAccessToken = owner ? issueAccessToken(share.id, share.password_hash) : null;
+		const headers = {};
+		if (ownerAccessToken) {
+			const secure = requestScheme(ctx.req, ctx.url, ctx.server) === 'https';
+			headers['Set-Cookie'] = cookie(sessionCookieName(accessCookieBase(share.id), secure), ownerAccessToken, {
+				maxAge: config.accessTokenTtl, httpOnly: true, sameSite: 'Lax', secure,
+			});
+		}
 
 		return noStore(json({
 			id: share.id,
@@ -420,11 +444,7 @@ export default function shares(router) {
 			// owner; a still-locked visitor gets the separate 401 { protected: true }
 			// branch above, unchanged).
 			protected: !!share.password_hash,
-			// Owners (validated via X-Edit-Token or the owner cookie) get a read
-			// access token so their element-src previews and download links work
-			// without unlocking - the edit token itself is too sensitive to place
-			// in URLs.
-			...(owner ? { accessToken: issueAccessToken(share.id, share.password_hash) } : {}),
+			...(ownerAccessToken ? { accessToken: ownerAccessToken } : {}),
 			files: files.map(f => ({
 				id: f.id,
 				name: f.name,
@@ -442,7 +462,7 @@ export default function shares(router) {
 				// upload page can continue an in-flight file. Not exposed to visitors.
 				...(owner ? { received: f.received } : {}),
 			})),
-		}));
+		}, { headers }));
 	});
 
 	// ---- Owner session (M-05) -----------------------------------------------
