@@ -534,6 +534,11 @@ export default function shares(router) {
 			const csrf = requireSameOrigin(ctx.req);
 			if (csrf) return csrf;
 		}
+		// 2026-07 audit F-2: this route was missing its operation-scope check,
+		// unlike finalize/DELETE above - a key scoped down to no 'write' scope
+		// could still change a share's password/expiry through its edit token.
+		const scopeErr = scopeErrorForShare(share, 'write');
+		if (scopeErr) return scopeErr;
 
 		const { value, response } = await readJson(ctx.req, METADATA_BODY_MAX);
 		if (response) return response;

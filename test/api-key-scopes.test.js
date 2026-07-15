@@ -506,4 +506,47 @@ describe('API key operation scopes (F-06)', () => {
 			}
 		});
 	});
+
+	describe('PATCH /api/shares/:id scope enforcement (2026-07 audit F-2)', () => {
+		test('downgrading a key to no write scope after a share is created denies PATCH via its edit token', async () => {
+			const dir = freshDataDir('patch-scope');
+			try {
+				const proc = await bootServer(dir, 3645);
+				try {
+					const base = 'http://127.0.0.1:3645';
+					const adminC = await adminCookie(base);
+
+					const key = await makeScopedKey(base, adminC, 'patch-scope-key', { create: true, write: true, read: true, delete: true });
+					const auth = { Authorization: `Bearer ${key.token}` };
+
+					const createRes = await fetch(`${base}/api/v1/shares`, {
+						method: 'POST',
+						headers: { ...auth, 'Content-Type': 'application/json' },
+						body: JSON.stringify({}),
+					});
+					expect(createRes.status).toBe(201);
+					const { id, editToken } = await createRes.json();
+
+					// Downgrade write scope after the share already exists.
+					const patchKeyRes = await fetch(`${base}/api/admin/api-keys/${key.id}`, {
+						method: 'PATCH',
+						headers: { 'Content-Type': 'application/json', Cookie: adminC, Origin: base },
+						body: JSON.stringify({ name: key.name, limits: { scopes: { create: true, write: false, read: true, delete: true } } }),
+					});
+					expect(patchKeyRes.status).toBe(200);
+
+					const patchShareRes = await fetch(`${base}/api/shares/${id}`, {
+						method: 'PATCH',
+						headers: { 'X-Edit-Token': editToken, 'Content-Type': 'application/json' },
+						body: JSON.stringify({ password: 'x' }),
+					});
+					expect(patchShareRes.status).toBe(403);
+				} finally {
+					await stopServer(proc);
+				}
+			} finally {
+				cleanupDir(dir);
+			}
+		});
+	});
 });
