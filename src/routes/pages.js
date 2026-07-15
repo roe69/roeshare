@@ -74,8 +74,9 @@ export function servePage(file, extraHeaders) {
 // plaintext for (non-E2E) and that is safe to summarize publicly (not
 // password-protected, not one-time, not download-capped, finalized, and has
 // at least one complete image or mp4 video file) - everything else, including
-// a missing id, gets byte-identical GENERIC meta with zero per-share data, so
-// the meta itself never reveals whether an id exists, is private, or is E2E.
+// a missing id, gets byte-identical EMPTY meta (no OG/Twitter tags at all, so
+// chat apps generate no embed whatsoever for such links), and the absence of
+// meta never reveals whether an id exists, is private, or is E2E.
 
 // Deliberate subset of download.js's SAFE_INLINE: no svg (script-capable),
 // no bmp/x-icon (not worth a rich preview).
@@ -86,8 +87,6 @@ const EMBED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image
 // inlines mp4 as a playable video, and a share URL that resolves to bytes a
 // crawler can't actually play is worse than no rich embed at all.
 const EMBED_VIDEO_MIME = new Set(['video/mp4']);
-
-const GENERIC_EMBED_DESCRIPTION = 'Secure, self-hosted file sharing.';
 
 // Case-insensitive fallback lookup for a custom slug typed with different
 // casing - excludes soft-deleted rows, same as shares.js's own slug-conflict
@@ -126,16 +125,6 @@ function resolveShareForMeta(idOrSlug) {
 
 function metaTag(prop, attr, content) {
 	return `<meta ${attr}="${prop}" content="${escapeHtmlAttr(content)}">`;
-}
-
-function genericMetaHtml() {
-	return [
-		metaTag('og:site_name', 'property', config.appTitle),
-		metaTag('og:title', 'property', config.appTitle),
-		metaTag('og:type', 'property', 'website'),
-		metaTag('og:description', 'property', GENERIC_EMBED_DESCRIPTION),
-		metaTag('twitter:card', 'name', 'summary'),
-	].join('\n\t');
 }
 
 function richMetaHtml(share, file, origin) {
@@ -186,18 +175,19 @@ function embeddableFile(share) {
 	return files.find(f => EMBED_IMAGE_MIME.has(mimeOf(f))) || files.find(f => EMBED_VIDEO_MIME.has(mimeOf(f))) || null;
 }
 
-// Builds the meta block for an already-resolved share (or null - generic
-// meta). Any unexpected failure (e.g. a malformed row the queries above
-// choke on) degrades to generic meta rather than a 500 - a link preview is
-// never load-bearing for the page itself.
+// Builds the meta block for an already-resolved share (or null - empty: no
+// OG/Twitter tags means no embed at all for a non-embeddable link). Any
+// unexpected failure (e.g. a malformed row the queries above choke on)
+// degrades to empty meta rather than a 500 - a link preview is never
+// load-bearing for the page itself.
 function buildShareMeta(share, origin) {
 	try {
 		const file = embeddableFile(share);
-		if (!file) return genericMetaHtml();
+		if (!file) return '';
 		return richMetaHtml(share, file, origin);
 	} catch (e) {
 		console.error('embed meta build failed for', share?.id, e);
-		return genericMetaHtml();
+		return '';
 	}
 }
 
@@ -234,6 +224,8 @@ function isBotUA(req) {
 // rather than reading storage.js directly, so this gets the exact same
 // access/rate-limit/one-time/capped gate chain for free (including Range/HEAD
 // support for video), and req/url/server are only needed for this branch.
+// A crawler fetching any NON-embeddable share URL gets an empty 204 instead
+// of the HTML page, so no embed of any kind is ever generated for it.
 export async function serveSharePage(idOrSlug, origin, req, url, server) {
 	let share = null;
 	try {
@@ -251,6 +243,11 @@ export async function serveSharePage(idOrSlug, origin, req, url, server) {
 			res.headers.set('Vary', 'User-Agent');
 			return res;
 		}
+		// Non-embeddable (or missing/private/E2E) share: a preview crawler gets
+		// nothing at all - no HTML, no <title>, no meta - so the chat app renders
+		// no embed of any kind. Byte-identical for every excluded case, so the
+		// empty response itself reveals nothing about why it was excluded.
+		return new Response(null, { status: 204, headers: { 'Vary': 'User-Agent', 'Cache-Control': 'no-store', ...SECURITY_HEADERS } });
 	}
 	const html = renderPage('view.html');
 	if (html === null) return error(404, 'Not found');

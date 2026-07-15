@@ -324,10 +324,16 @@ when the share is finalized, not `e2e`, not password-protected, not `one_time`, 
 download-capped (`maxDownloads` unset - `/preview` itself 403s a non-owner
 once it is), and has at least one complete file whose mime is in
 `EMBED_IMAGE_MIME` (png/jpeg/gif/webp/avif - a deliberate subset of
-`download.js`'s `SAFE_INLINE`, no svg). Every other case - missing id, `e2e`,
-password-protected, one-time, download-capped, no eligible image, or
-unfinalized - gets fixed, byte-identical generic meta with zero per-share
-data, so the meta itself never reveals which case applies. Every dynamic value
+`download.js`'s `SAFE_INLINE`, no svg) or `EMBED_VIDEO_MIME` (mp4 only). Every
+other case - missing id, `e2e`, password-protected, one-time, download-capped,
+no eligible image/video, or unfinalized - renders NO embed meta at all: the
+`{{SHARE_META}}` token resolves to an empty string (byte-identical pages with
+zero per-share data, so the absence of meta never reveals which case applies),
+and a chat link-preview crawler UA (`BOT_UA_RE`: Discordbot etc.) fetching such
+a URL gets an empty `204` instead of the HTML page, so chat apps generate no
+embed of any kind for a non-media link. (Embeddable shares keep the bare-bytes
+bot path: the crawler's fetch of the share URL returns the raw image/mp4 bytes
+directly via `servePreview`, with `Vary: User-Agent`.) Every dynamic value
 (title, filename) is escaped via `lib/html.js`'s `escapeHtmlAttr` before
 templating - the first server-side templating of user-controlled text into
 HTML in this codebase.

@@ -8,10 +8,10 @@
 //   - a public, finalized, non-e2e, single-image share: bot UA -> raw image
 //     bytes (matching /preview byte-for-byte), Content-Type image/*, Vary:
 //     User-Agent; non-bot UA -> HTML page, unchanged
-//   - one-time/password/capped/e2e/non-image shares: bot UA still gets the
-//     ordinary HTML (generic-meta) page, never image bytes - the bare-image
-//     path reuses buildShareMeta's exact eligibility predicate, so none of
-//     these can ever be bare-imaged
+//   - one-time/password/capped/e2e/non-image shares: bot UA gets an empty 204
+//     (no HTML, no meta, so no embed of any kind), never image bytes - the
+//     bare-image path reuses buildShareMeta's exact eligibility predicate, so
+//     none of these can ever be bare-imaged
 //   - a bot fetch of a one-time share does not burn it (still fetchable after)
 //   - a bot fetch never touches view_count
 //
@@ -171,7 +171,7 @@ describe('bare-image embed for bot UAs', () => {
 		}
 	});
 
-	test('one-time/password/capped/e2e/non-image shares: bot UA still gets the ordinary HTML page, never image bytes; one-time is not burned by the bot fetch', async () => {
+	test('one-time/password/capped/e2e/non-image shares: bot UA gets an empty 204 (no embed at all), never image bytes; one-time is not burned by the bot fetch', async () => {
 		const dir = freshDataDir('embed-bot-excluded');
 		try {
 			const proc = await bootServer(dir, 3771);
@@ -232,11 +232,20 @@ describe('bare-image embed for bot UAs', () => {
 				});
 
 				for (const id of [nonImage.id, password.id, oneTime.id, capped.id, draft.id]) {
+					// A crawler UA gets NOTHING for a non-embeddable share - an empty
+					// 204, byte-identical across all exclusion reasons, so no chat app
+					// renders any embed and the response leaks nothing about why.
 					const botRes = await fetch(`${base}/${id}`, { headers: { 'User-Agent': DISCORDBOT_UA } });
-					expect(botRes.status).toBe(200);
-					expect(botRes.headers.get('content-type')).toContain('text/html');
-					const html = await botRes.text();
-					expect(html).not.toContain('og:image');
+					expect(botRes.status).toBe(204);
+					expect(botRes.headers.get('vary')).toContain('User-Agent');
+					expect(await botRes.text()).toBe('');
+
+					// A normal browser UA still gets the regular HTML page (with no
+					// embed meta - see embed-meta.test.js).
+					const humanRes = await fetch(`${base}/${id}`, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+					expect(humanRes.status).toBe(200);
+					expect(humanRes.headers.get('content-type')).toContain('text/html');
+					expect(await humanRes.text()).not.toContain('og:');
 				}
 
 				// The one-time share is still live and its own preview still works for
@@ -309,7 +318,7 @@ describe('bare-video embed for bot UAs', () => {
 		}
 	});
 
-	test('a password-protected mp4 still gets the ordinary HTML page for a bot UA, never video bytes', async () => {
+	test('a password-protected mp4 gets an empty 204 for a bot UA (no embed at all), never video bytes', async () => {
 		const dir = freshDataDir('embed-bot-video-excluded');
 		try {
 			const proc = await bootServer(dir, 3773);
@@ -328,9 +337,15 @@ describe('bare-video embed for bot UAs', () => {
 				const made = await res.json();
 
 				const botRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': DISCORDBOT_UA } });
-				expect(botRes.status).toBe(200);
-				expect(botRes.headers.get('content-type')).toContain('text/html');
-				const html = await botRes.text();
+				expect(botRes.status).toBe(204);
+				expect(botRes.headers.get('vary')).toContain('User-Agent');
+				expect(await botRes.text()).toBe('');
+
+				// A normal browser UA still gets the HTML page, meta-free.
+				const humanRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+				expect(humanRes.status).toBe(200);
+				expect(humanRes.headers.get('content-type')).toContain('text/html');
+				const html = await humanRes.text();
 				expect(html).not.toContain('og:video');
 				expect(html).not.toContain('og:image');
 			} finally {

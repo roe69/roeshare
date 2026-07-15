@@ -9,7 +9,8 @@
 //   - a title containing an attribute-breakout XSS payload comes out fully
 //     escaped (no raw '<' or unescaped '"' near the injected value)
 //   - missing id, e2e, password-protected, one-time, and non-image shares all
-//     render byte-identical GENERIC meta (no per-share data leaks through)
+//     render byte-identical pages with NO embed meta at all (no og:/twitter:
+//     tags, so chat apps generate no embed; no per-share data leaks through)
 //   - two different shares never leak each other's title into one another's
 //     response (no cross-share cache poisoning)
 //   - fetching the page does not touch the share's view_count (a crawler
@@ -162,7 +163,7 @@ describe('embed meta (C)', () => {
 		}
 	});
 
-	test('missing/e2e/password/one-time/non-image shares all render byte-identical generic meta; no cross-share leakage; view_count untouched', async () => {
+	test('missing/e2e/password/one-time/non-image shares all render byte-identical pages with no embed meta; no cross-share leakage; view_count untouched', async () => {
 		const dir = freshDataDir('embed-generic');
 		try {
 			const proc = await bootServer(dir, 3761);
@@ -252,7 +253,10 @@ describe('embed meta (C)', () => {
 				expect(pages.oneTime).not.toContain('OneTimePic');
 				expect(pages.e2e).not.toContain('E2ESecretTitle');
 				expect(pages.capped).not.toContain('CappedPic');
-				expect(pages.missing).not.toContain('og:image');
+				// NO embed meta of any kind - not even generic og:/twitter: chrome -
+				// so no chat app ever renders an embed for a non-embeddable link.
+				expect(pages.missing).not.toContain('og:');
+				expect(pages.missing).not.toContain('twitter:');
 
 				// Cross-share leakage check against the rich (image) share from the
 				// other test: create two DIFFERENT rich shares here and confirm
