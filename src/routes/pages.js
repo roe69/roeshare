@@ -6,11 +6,12 @@ import { join } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { db } from '../db.js';
 import { config } from '../config.js';
-import { error, requestOrigin, SECURITY_HEADERS } from '../lib/http.js';
+import { error, requestOrigin, clientIp, SECURITY_HEADERS } from '../lib/http.js';
 import { hasUploadAccess, isAdmin } from '../lib/auth.js';
 import { escapeHtmlAttr } from '../lib/html.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
 import { liveShare } from './shares.js';
+import { servePreview } from './download.js';
 
 const PAGES_DIR = join(import.meta.dir, '..', '..', 'public');
 
@@ -149,22 +150,43 @@ function richMetaHtml(share, file, origin) {
 	].join('\n\t');
 }
 
+// The single eligibility predicate for "is this share safe to summarize/embed
+// publicly at all" - finalized, non-E2E (server can see plaintext), not
+// password-protected, not one-time, not download-capped, with at least one
+// complete image file. Shared by buildShareMeta (rich OG meta for browsers)
+// and the bare-image bot path below (serveSharePage) so there is exactly one
+// place that decides embeddability, not two that could drift apart.
+function embeddableFile(share) {
+	if (!share || !share.finalized || share.e2e || share.password_hash || share.one_time || share.max_downloads !== null) return null;
+	const files = getEmbeddableFile.all(share.id);
+	return files.find(f => EMBED_IMAGE_MIME.has(String(f.mime || '').toLowerCase().split(';')[0].trim())) || null;
+}
+
 // Builds the meta block for an already-resolved share (or null - generic
 // meta). Any unexpected failure (e.g. a malformed row the queries above
 // choke on) degrades to generic meta rather than a 500 - a link preview is
 // never load-bearing for the page itself.
 function buildShareMeta(share, origin) {
 	try {
-		if (!share) return genericMetaHtml();
-		if (!share.finalized || share.e2e || share.password_hash || share.one_time || share.max_downloads !== null) return genericMetaHtml();
-		const files = getEmbeddableFile.all(share.id);
-		const file = files.find(f => EMBED_IMAGE_MIME.has(String(f.mime || '').toLowerCase().split(';')[0].trim()));
+		const file = embeddableFile(share);
 		if (!file) return genericMetaHtml();
 		return richMetaHtml(share, file, origin);
 	} catch (e) {
 		console.error('embed meta build failed for', share?.id, e);
 		return genericMetaHtml();
 	}
+}
+
+// Chat/link-preview crawler UAs (not general search bots - Googlebot etc. are
+// deliberately excluded so they keep indexing the real HTML page). Discord's
+// own image-proxy re-fetch uses a plain browser UA (see research notes), but
+// that fetch never happens under this scheme: the crawler's first and only
+// request to this URL already gets image bytes directly, so there's no
+// separate og:image URL for it to chase.
+const BOT_UA_RE = /Discordbot|Slackbot-LinkExpanding|TelegramBot|facebookexternalhit|WhatsApp|SkypeUriPreview|LinkedInBot|Twitterbot/i;
+
+function isBotUA(req) {
+	return BOT_UA_RE.test(req.headers.get('user-agent') || '');
 }
 
 // Serves the view page for a share id or custom slug with per-request embed
@@ -178,7 +200,17 @@ function buildShareMeta(share, origin) {
 // the page itself cannot load: GET /api/shares/:id (view.js's fetch) is
 // byte-case-sensitive, so serving 200-with-rich-meta at the wrong case would
 // show a full embed for a link that 404s the moment anyone clicks it.
-export function serveSharePage(idOrSlug, origin) {
+//
+// Bare-image bot path: a chat-app link-preview crawler (isBotUA) fetching a
+// share URL that resolves to an eligible image (embeddableFile - the exact
+// same predicate buildShareMeta uses for og:image) gets the raw image bytes
+// back at THIS url, not an HTML page - Discord's unfurler never follows
+// redirects, so the bytes have to come back on the first response. Delegates
+// entirely to servePreview (the /preview route's own handler) rather than
+// reading storage.js directly, so this gets the exact same access/rate-limit/
+// one-time/capped gate chain for free, and req/url/server are only needed for
+// this branch.
+export async function serveSharePage(idOrSlug, origin, req, url, server) {
 	let share = null;
 	try {
 		share = resolveShareForMeta(idOrSlug);
@@ -188,12 +220,20 @@ export function serveSharePage(idOrSlug, origin) {
 	if (share && share.id !== idOrSlug) {
 		return new Response(null, { status: 302, headers: { Location: `/s/${share.id}`, 'Cache-Control': 'no-store' } });
 	}
+	if (req && isBotUA(req)) {
+		const file = embeddableFile(share);
+		if (file) {
+			const res = await servePreview({ req, url, params: { id: share.id, fileId: file.id }, ip: clientIp(req, server), server });
+			res.headers.set('Vary', 'User-Agent');
+			return res;
+		}
+	}
 	const html = renderPage('view.html');
 	if (html === null) return error(404, 'Not found');
 	const meta = buildShareMeta(share, origin);
 	const out = html.replace('{{SHARE_META}}', meta);
 	return new Response(out, {
-		headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Security-Policy': PAGE_CSP, ...SECURITY_HEADERS },
+		headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache', 'Content-Security-Policy': PAGE_CSP, ...SECURITY_HEADERS, 'Vary': 'User-Agent' },
 	});
 }
 
@@ -227,7 +267,7 @@ export default function pages(router) {
 		return servePage(file, { 'Cache-Control': 'no-store' });
 	});
 	declareRoutePolicy('GET', '/s/:id', { auth: 'public', csrf: false, rateLimit: null, audit: null });
-	router.get('/s/:id', ctx => serveSharePage(ctx.params.id, requestOrigin(ctx.req, ctx.url, ctx.server)));
+	router.get('/s/:id', ctx => serveSharePage(ctx.params.id, requestOrigin(ctx.req, ctx.url, ctx.server), ctx.req, ctx.url, ctx.server));
 	declareRoutePolicy('GET', '/mine', { auth: 'public', csrf: false, rateLimit: null, audit: null });
 	router.get('/mine', () => servePage('myshares.html'));
 	// API-key portal: sign in with a key name + token to manage that key's shares.

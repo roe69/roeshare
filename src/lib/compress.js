@@ -56,7 +56,11 @@ export async function compressResponse(req, res) {
 	if (!enc) return res;
 	const buf = Buffer.from(await res.arrayBuffer());
 	const headers = new Headers(res.headers);
-	headers.set('Vary', 'Accept-Encoding');
+	// Append rather than overwrite: routes/pages.js's share page sets its own
+	// Vary: User-Agent (its body differs for a bot-UA fetch), which a plain
+	// set() here would silently clobber on every compressed response.
+	const existingVary = headers.get('Vary');
+	headers.set('Vary', existingVary ? `${existingVary}, Accept-Encoding` : 'Accept-Encoding');
 	if (buf.length < MIN_BYTES) return new Response(buf, { status: res.status, headers });
 	if (buf.length > MAX_BYTES) return new Response(buf, { status: res.status, headers });
 	const out = compressBytes(buf, enc);

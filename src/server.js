@@ -325,7 +325,7 @@ const server = Bun.serve({
 					// (api.js), so every RoeSnip-created link hits THIS fallback, not
 					// /s/:id - serveSharePage (not the plain servePage) must run here too.
 					if (!res && /^\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
-						res = serveSharePage(url.pathname.slice(1), requestOrigin(req, url, server));
+						res = await serveSharePage(url.pathname.slice(1), requestOrigin(req, url, server), req, url, server);
 					}
 				}
 			}
