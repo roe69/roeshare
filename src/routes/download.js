@@ -497,121 +497,128 @@ function rangeResponse(share, file, req, opts = {}) {
 	});
 }
 
+// Inline preview handler - exported so the embed path (routes/pages.js) can
+// call it directly for a bot-UA fetch of a share URL, reusing this exact gate
+// chain (liveShare -> rename-pending -> rate limit -> accessCheck -> the F-01
+// one-time/capped 403) instead of re-implementing any of it against storage.js
+// directly. Registered on the router below like any other handler.
+export async function servePreview({ req, url, params, ip, server }) {
+	server?.timeout?.(req, 0);
+	// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
+	// of nonexistent ids would each mint their own bucket in the process-wide
+	// rate-limit map at zero cost to the attacker.
+	const share = liveShare(params.id);
+	if (!share) return error(404, 'Share not found');
+	// F-19 follow-up: refuse before any storage.js call while this share's
+	// admin rename is mid-flight (see lib/renames.js's isRenamePending()).
+	if (isRenamePending(share.id)) return renamePendingResponse();
+	// GAP 2 fix: only a genuinely protected share (password-gated or under a
+	// download cap) uses the SQLite-persisted 'dl:' bucket; an ordinary share
+	// uses the plain in-memory-only 'dlv:' bucket instead (see
+	// isRateLimitProtected() and ratelimit.js's PERSIST_PREFIXES comment).
+	const limited = enforce((isRateLimitProtected(share) ? 'dl:' : 'dlv:') + params.id, ip, 600, 60_000);
+	if (limited) return limited;
+	const { ok, owner } = accessCheck(share, req, url);
+	if (!ok) return error(403, 'Password required');
+	// The owner (edit token or the API key that created the share) manages and
+	// restores their own share, so this gate does not apply to them. Preview
+	// never counts as a download, so any share with retrieval control - burn
+	// on first access, or a download cap - must refuse to preview entirely for
+	// a non-owner; otherwise the full file is retrievable inline with the
+	// counter never incremented, silently bypassing the control.
+	if (!owner && (share.one_time || share.max_downloads !== null)) return error(403, 'Preview is disabled for this share');
+	const file = await resolveFile(share.id, params.fileId);
+	if (!file) return error(404, 'File not found');
+	if (!file.complete) return error(409, 'File is not ready');
+
+	// Admission control: shares the same per-IP 'dl' semaphore as the download
+	// endpoint (both stream response bytes to the client). Acquired after the
+	// access/limit checks, before any response is built.
+	const release = acquire('dl', ip, 16);
+	if (!release) return overloaded(3);
+
+	try {
+		// L-05: every preview response is revocable user content - even an
+		// "uncontrolled" share (no password/one_time/max_downloads) can still be
+		// deleted, expired, or have a password/cap added to it after the fact by
+		// its owner or an admin, and its id is not a content digest, so a stale
+		// cached copy would keep serving bytes the visitor is no longer meant to
+		// have. A share's bytes are never a deliberately public, content-
+		// addressed, credential-free object, so no branch here gets long-lived
+		// caching - always no-store.
+		const cacheControl = 'no-store';
+		const offload = offloadHeaders(share, file);
+		if (offload) {
+			// Offload hands the bytes to the reverse proxy (or serves headers-only
+			// for a HEAD probe) - no stream is ever opened by this process.
+			release();
+			const serving = previewServing(file.mime);
+			return new Response(null, {
+				headers: {
+					...offload,
+					'Content-Type': serving.type,
+					'Content-Disposition': contentDisposition(file.name.split('/').pop(), serving.inline),
+					'Content-Security-Policy': PREVIEW_CSP,
+					'Cache-Control': cacheControl,
+					ETag: '"' + file.id + '"',
+					'Accept-Ranges': 'bytes',
+					...FILE_SECURITY_HEADERS,
+				},
+			});
+		}
+		if (req.method === 'HEAD') {
+			// HEAD never opens a stream (see rangeResponse's head handling).
+			release();
+			return rangeResponse(share, file, req, {
+				inline: previewServing(file.mime).inline,
+				contentType: previewServing(file.mime).type,
+				head: true,
+				extraHeaders: { 'Content-Security-Policy': PREVIEW_CSP, 'Cache-Control': cacheControl, ETag: '"' + file.id + '"' },
+			});
+		}
+		// M-04: byte-rate budget, keyed by IP like the 'dl' admission-control
+		// slot just above. Sized from the actual Range (or the whole file when
+		// unranged) BEFORE the stream opens; an invalid range is left to
+		// rangeResponse's 416 below without spending any budget - it transfers
+		// zero bytes either way.
+		const size = plainSize(file, share.id);
+		const range = parseRange(req.headers.get('range'), size);
+		if (config.downloadBytesPerSec > 0 && !range?.invalid) {
+			const cost = range ? range.length : size;
+			const rateLimited = takeBytes('dl-bytes', ip, cost, config.downloadBytesPerSec * 4, config.downloadBytesPerSec);
+			if (rateLimited) { release(); return rateLimited; }
+		}
+		// M-06: lazy migration trigger - fire-and-forget, after the decision to
+		// actually stream this v1 file is made, so it adds no latency here.
+		if (fileEnc(file)?.version === 1) scheduleMigration(file.id);
+		const serving = previewServing(file.mime);
+		return rangeResponse(share, file, req, {
+			inline: serving.inline,
+			contentType: serving.type,
+			size,
+			range,
+			makeBody: src => trackedStream(src, { onEnd: release }),
+			extraHeaders: {
+				'Content-Security-Policy': PREVIEW_CSP,
+				// no-store (see cacheControl above, L-05) - revocable content is
+				// never cached, even across a scrub-back seek in the player.
+				'Cache-Control': cacheControl,
+				ETag: '"' + file.id + '"',
+			},
+		});
+	} catch (e) {
+		release();
+		throw e;
+	}
+}
+
 export default function download(router) {
 	// Inline preview: never counts as a download, so it cannot be metered against
 	// a one-time burn. maxDownloads caps the Download action (a saved copy), not
 	// inline viewing, so a download-limited share still previews fine; one-time
 	// stays blocked because inline streaming would defeat burn-on-first-access.
 	declareRoutePolicy('GET', '/api/shares/:id/files/:fileId/preview', { auth: 'shareAccess', csrf: false, rateLimit: 'dl:<shareId>|dlv:<shareId>', audit: null });
-	router.get('/api/shares/:id/files/:fileId/preview', async ({ req, url, params, ip, server }) => {
-		server?.timeout?.(req, 0);
-		// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
-		// of nonexistent ids would each mint their own bucket in the process-wide
-		// rate-limit map at zero cost to the attacker.
-		const share = liveShare(params.id);
-		if (!share) return error(404, 'Share not found');
-		// F-19 follow-up: refuse before any storage.js call while this share's
-		// admin rename is mid-flight (see lib/renames.js's isRenamePending()).
-		if (isRenamePending(share.id)) return renamePendingResponse();
-		// GAP 2 fix: only a genuinely protected share (password-gated or under a
-		// download cap) uses the SQLite-persisted 'dl:' bucket; an ordinary share
-		// uses the plain in-memory-only 'dlv:' bucket instead (see
-		// isRateLimitProtected() and ratelimit.js's PERSIST_PREFIXES comment).
-		const limited = enforce((isRateLimitProtected(share) ? 'dl:' : 'dlv:') + params.id, ip, 600, 60_000);
-		if (limited) return limited;
-		const { ok, owner } = accessCheck(share, req, url);
-		if (!ok) return error(403, 'Password required');
-		// The owner (edit token or the API key that created the share) manages and
-		// restores their own share, so this gate does not apply to them. Preview
-		// never counts as a download, so any share with retrieval control - burn
-		// on first access, or a download cap - must refuse to preview entirely for
-		// a non-owner; otherwise the full file is retrievable inline with the
-		// counter never incremented, silently bypassing the control.
-		if (!owner && (share.one_time || share.max_downloads !== null)) return error(403, 'Preview is disabled for this share');
-		const file = await resolveFile(share.id, params.fileId);
-		if (!file) return error(404, 'File not found');
-		if (!file.complete) return error(409, 'File is not ready');
-
-		// Admission control: shares the same per-IP 'dl' semaphore as the download
-		// endpoint (both stream response bytes to the client). Acquired after the
-		// access/limit checks, before any response is built.
-		const release = acquire('dl', ip, 16);
-		if (!release) return overloaded(3);
-
-		try {
-			// L-05: every preview response is revocable user content - even an
-			// "uncontrolled" share (no password/one_time/max_downloads) can still be
-			// deleted, expired, or have a password/cap added to it after the fact by
-			// its owner or an admin, and its id is not a content digest, so a stale
-			// cached copy would keep serving bytes the visitor is no longer meant to
-			// have. A share's bytes are never a deliberately public, content-
-			// addressed, credential-free object, so no branch here gets long-lived
-			// caching - always no-store.
-			const cacheControl = 'no-store';
-			const offload = offloadHeaders(share, file);
-			if (offload) {
-				// Offload hands the bytes to the reverse proxy (or serves headers-only
-				// for a HEAD probe) - no stream is ever opened by this process.
-				release();
-				const serving = previewServing(file.mime);
-				return new Response(null, {
-					headers: {
-						...offload,
-						'Content-Type': serving.type,
-						'Content-Disposition': contentDisposition(file.name.split('/').pop(), serving.inline),
-						'Content-Security-Policy': PREVIEW_CSP,
-						'Cache-Control': cacheControl,
-						ETag: '"' + file.id + '"',
-						'Accept-Ranges': 'bytes',
-						...FILE_SECURITY_HEADERS,
-					},
-				});
-			}
-			if (req.method === 'HEAD') {
-				// HEAD never opens a stream (see rangeResponse's head handling).
-				release();
-				return rangeResponse(share, file, req, {
-					inline: previewServing(file.mime).inline,
-					contentType: previewServing(file.mime).type,
-					head: true,
-					extraHeaders: { 'Content-Security-Policy': PREVIEW_CSP, 'Cache-Control': cacheControl, ETag: '"' + file.id + '"' },
-				});
-			}
-			// M-04: byte-rate budget, keyed by IP like the 'dl' admission-control
-			// slot just above. Sized from the actual Range (or the whole file when
-			// unranged) BEFORE the stream opens; an invalid range is left to
-			// rangeResponse's 416 below without spending any budget - it transfers
-			// zero bytes either way.
-			const size = plainSize(file, share.id);
-			const range = parseRange(req.headers.get('range'), size);
-			if (config.downloadBytesPerSec > 0 && !range?.invalid) {
-				const cost = range ? range.length : size;
-				const rateLimited = takeBytes('dl-bytes', ip, cost, config.downloadBytesPerSec * 4, config.downloadBytesPerSec);
-				if (rateLimited) { release(); return rateLimited; }
-			}
-			// M-06: lazy migration trigger - fire-and-forget, after the decision to
-			// actually stream this v1 file is made, so it adds no latency here.
-			if (fileEnc(file)?.version === 1) scheduleMigration(file.id);
-			const serving = previewServing(file.mime);
-			return rangeResponse(share, file, req, {
-				inline: serving.inline,
-				contentType: serving.type,
-				size,
-				range,
-				makeBody: src => trackedStream(src, { onEnd: release }),
-				extraHeaders: {
-					'Content-Security-Policy': PREVIEW_CSP,
-					// no-store (see cacheControl above, L-05) - revocable content is
-					// never cached, even across a scrub-back seek in the player.
-					'Cache-Control': cacheControl,
-					ETag: '"' + file.id + '"',
-				},
-			});
-		} catch (e) {
-			release();
-			throw e;
-		}
-	});
+	router.get('/api/shares/:id/files/:fileId/preview', servePreview);
 
 	// Attachment download: counts as one download - and, for a one-time share,
 	// claims and eventually burns it - only once the delivery is a "full" one
