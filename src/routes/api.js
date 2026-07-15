@@ -44,8 +44,8 @@ import { finalizeTx } from './shares.js';
 const getShareById = db.query('SELECT id, deleted_at, api_key_id FROM shares WHERE lower(id) = lower(?)');
 const hardDeleteShare = db.query('DELETE FROM shares WHERE id = ?');
 const insertShare = db.query(
-	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e, api_key_id)
-	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e, api_key_id, owner_key_version)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
 );
 const insertFile = db.query(
 	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, sha256, enc_version, key_id) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)',
@@ -216,7 +216,7 @@ async function createShare(ctx, key, opts) {
 		const fresh = apiKeyRow(key.id);
 		if (fresh && fresh.max_shares != null && fresh.upload_count >= fresh.max_shares) throw LIMITED;
 
-		insertShare.run(id, opts.title, now(), expiresAt, passwordHash, opts.maxDownloads, opts.oneTime, hashSecretToken(editToken), ctx.ip ?? null, ua, key.id);
+		insertShare.run(id, opts.title, now(), expiresAt, passwordHash, opts.maxDownloads, opts.oneTime, hashSecretToken(editToken), ctx.ip ?? null, ua, key.id, key.secret_version);
 		recordKeyUsage(key.id, { shares: 1 });
 		return id;
 	});

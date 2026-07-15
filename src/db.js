@@ -72,6 +72,15 @@ const schema = {
 		e2e:            'INTEGER NOT NULL DEFAULT 0',  // 1 = client-side end-to-end encrypted
 		view_count:     'INTEGER NOT NULL DEFAULT 0',
 		api_key_id:     'TEXT',                        // key that created it (null = web portal)
+		// 2026-07 audit F-1 (rotate carry-over): the creating key's secret_version
+		// AT SHARE-CREATION TIME (irrelevant/0 when api_key_id is null - a web-
+		// portal share). Only the edit-token/owner-cookie ownership gate
+		// (apikeys.js's keyValidForShare) requires this to still match the key's
+		// CURRENT secret_version - the key's own bearer/session path never reads
+		// it (see routes/api.js, matched by api_key_id alone). DEFAULT 0 backfills
+		// every existing row to match a never-rotated key's version, so no
+		// pre-migration share's edit token/owner cookie is affected.
+		owner_key_version: 'INTEGER NOT NULL DEFAULT 0',
 	},
 	files: {
 		id:             'TEXT PRIMARY KEY',
@@ -171,6 +180,13 @@ const schema = {
 		scope_write:    'INTEGER NOT NULL DEFAULT 0',  // may upload/register/finalize files
 		scope_read:     'INTEGER NOT NULL DEFAULT 0',  // may list/inspect its shares, and read-owns them
 		scope_delete:   'INTEGER NOT NULL DEFAULT 0',  // may delete its shares
+		// 2026-07 audit F-1: bumped every rotateApiKey() call. A share's stamped
+		// owner_key_version is compared against this counter to invalidate the
+		// PRE-rotation edit token/owner cookie - see keyValidForShare in
+		// lib/apikeys.js for the full reasoning (the key's own bearer/session
+		// path is deliberately never gated on it, so a freshly rotated secret
+		// keeps full access to every share the key made before rotating).
+		secret_version: 'INTEGER NOT NULL DEFAULT 0',
 	},
 	// Small persistent key/value store, currently just for migration bookkeeping
 	// (see MIGRATIONS below).

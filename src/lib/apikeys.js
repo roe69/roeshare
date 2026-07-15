@@ -31,7 +31,7 @@ const getKey = db.query('SELECT * FROM api_keys WHERE id = ?');
 const touchKey = db.query('UPDATE api_keys SET last_used_at = ? WHERE id = ?');
 const bumpKey = db.query('UPDATE api_keys SET upload_count = upload_count + ?, bytes_uploaded = bytes_uploaded + ? WHERE id = ?');
 const revokeQ = db.query('UPDATE api_keys SET revoked_at = ? WHERE id = ?');
-const rotateQ = db.query('UPDATE api_keys SET key_hash = ? WHERE id = ?');
+const rotateQ = db.query('UPDATE api_keys SET key_hash = ?, secret_version = secret_version + 1 WHERE id = ?');
 const deleteQ = db.query('DELETE FROM api_keys WHERE id = ?');
 const updateQ = db.query(
 	`UPDATE api_keys SET name = ?, max_file_size = ?, max_share_size = ?, max_shares = ?, max_expiry = ?, allow_slug = ?, allow_password = ?, scope_create = ?, scope_write = ?, scope_read = ?, scope_delete = ? WHERE id = ?`,
@@ -294,7 +294,21 @@ export function clampExpiry(row, expiresAt) {
 export function keyValidForShare(share) {
 	if (!share.api_key_id) return true;
 	const row = apiKeyRow(share.api_key_id);
-	return !!row && row.revoked_at == null && (row.expires_at == null || row.expires_at >= now());
+	if (!row || row.revoked_at != null || (row.expires_at != null && row.expires_at < now())) return false;
+	// 2026-07 audit F-1 (rotate carry-over): edit-token/owner-cookie ownership
+	// must also die when the key's secret was rotated AFTER this share was
+	// made, even though the key itself is still valid - otherwise a leaked old
+	// edit_token/owner cookie would keep granting full owner access forever,
+	// defeating the whole point of rotating a leaked secret. Gated on the
+	// stamped owner_key_version (recorded at share-creation time - see
+	// routes/api.js's createShare) matching the key's CURRENT secret_version
+	// (bumped only by rotateApiKey). Deliberately NOT checked on the key's OWN
+	// bearer/session path: this function is called ONLY from the edit-token/
+	// owner-cookie ownership gates (shares.js's ownerVia, download.js's
+	// accessCheck, uploads.js's checkKeyValid) - never from routes/api.js,
+	// which authorizes v1 calls by api_key_id alone - so a freshly-rotated
+	// secret keeps full access to every share the key made before rotating.
+	return (share.owner_key_version ?? 0) === row.secret_version;
 }
 
 // ---- Operation-level scopes (F-06) -----------------------------------------

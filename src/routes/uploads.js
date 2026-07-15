@@ -22,7 +22,7 @@ import { acquireAll, overloaded, takeBytes, wouldPassBytes } from '../lib/semaph
 import { declareRoutePolicy } from '../lib/routePolicy.js';
 import { sanitizeName } from '../lib/names.js';
 
-const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized FROM shares WHERE id = ? AND deleted_at IS NULL');
+const getShare = db.query('SELECT id, edit_token, expires_at, e2e, creator_ip, api_key_id, finalized, owner_key_version FROM shares WHERE id = ? AND deleted_at IS NULL');
 const shareTotal = db.query('SELECT COALESCE(SUM(size), 0) AS total, COUNT(*) AS count FROM files WHERE share_id = ?');
 const insertFile = db.query(
 	'INSERT INTO files (id, share_id, name, size, received, mime, complete, download_count, created_at, stored_name, iv, enc_version, key_id, e2e_aad_version) VALUES (?, ?, ?, ?, 0, ?, 0, 0, ?, ?, ?, ?, ?, ?)'
