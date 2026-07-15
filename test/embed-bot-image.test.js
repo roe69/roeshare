@@ -14,6 +14,11 @@
 //     these can ever be bare-imaged
 //   - a bot fetch of a one-time share does not burn it (still fetchable after)
 //   - a bot fetch never touches view_count
+//
+// The 'bare-video embed for bot UAs' describe block below extends the same
+// mechanism to video/mp4 (EMBED_VIDEO_MIME): raw video/mp4 bytes including a
+// ranged request, og:video (not og:image) HTML for a normal UA, and the same
+// exclusion gates applied to a password-protected mp4.
 
 import { test, expect, describe } from 'bun:test';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -240,6 +245,126 @@ describe('bare-image embed for bot UAs', () => {
 				// reached, so the bot never even hits the F-01 gate on it).
 				const stillThere = await fetch(`${base}/api/admin/shares/${oneTime.id}`, { headers: { Cookie: cookie } });
 				expect(stillThere.status).toBe(200);
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+});
+
+// Same bare-bytes mechanism, video/mp4 flavor - Discord unfurls a share URL
+// as a playable inline video exactly like a bare image, so an mp4 share needs
+// the same treatment. GIF stays covered by the image path above; this only
+// locks in the new EMBED_VIDEO_MIME branch and the exclusion/pick-order rules
+// around it.
+describe('bare-video embed for bot UAs', () => {
+	test('bot UA gets raw video/mp4 bytes (incl. a ranged request) on /s/:id; normal UA gets HTML with og:video and no og:image', async () => {
+		const dir = freshDataDir('embed-bot-video');
+		try {
+			const proc = await bootServer(dir, 3772);
+			try {
+				const base = 'http://127.0.0.1:3772';
+				const cookie = await adminCookie(base);
+				const key = await makeKey(base, cookie, 'embed-bot-video-key');
+				const auth = { Authorization: `Bearer ${key.token}` };
+
+				const bytes = new Uint8Array(Array.from({ length: 200 }, (_, i) => i % 256));
+				const res = await fetch(`${base}/api/v1/upload?expiresIn=0&mime=video%2Fmp4&title=BotClip`, {
+					method: 'POST',
+					headers: { ...auth, 'X-Filename': 'clip.mp4' },
+					body: bytes,
+				});
+				expect(res.status).toBe(201);
+				const made = await res.json();
+
+				const previewBytes = new Uint8Array(await (await fetch(`${base}/api/shares/${made.id}/files/${made.fileId}/preview`)).arrayBuffer());
+
+				const botRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': DISCORDBOT_UA } });
+				expect(botRes.status).toBe(200);
+				expect(botRes.headers.get('content-type')).toContain('video/mp4');
+				expect(botRes.headers.get('vary')).toContain('User-Agent');
+				expect(botRes.headers.get('content-disposition')).toContain('inline');
+				expect(new Uint8Array(await botRes.arrayBuffer())).toEqual(previewBytes);
+
+				// Range GET on the share URL itself (not just /preview directly) -
+				// proves rangeResponse's 206 path works through the bot delegation.
+				const rangeRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': DISCORDBOT_UA, Range: 'bytes=0-99' } });
+				expect(rangeRes.status).toBe(206);
+				expect(rangeRes.headers.get('content-range')).toBe(`bytes 0-99/${bytes.length}`);
+				expect(new Uint8Array(await rangeRes.arrayBuffer())).toEqual(bytes.slice(0, 100));
+
+				const humanRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' } });
+				expect(humanRes.status).toBe(200);
+				expect(humanRes.headers.get('content-type')).toContain('text/html');
+				const html = await humanRes.text();
+				expect(html).toContain('property="og:video:type" content="video/mp4"');
+				expect(html).not.toContain('og:image');
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
+	test('a password-protected mp4 still gets the ordinary HTML page for a bot UA, never video bytes', async () => {
+		const dir = freshDataDir('embed-bot-video-excluded');
+		try {
+			const proc = await bootServer(dir, 3773);
+			try {
+				const base = 'http://127.0.0.1:3773';
+				const cookie = await adminCookie(base);
+				const key = await makeKey(base, cookie, 'embed-bot-video-excluded-key');
+				const auth = { Authorization: `Bearer ${key.token}` };
+
+				const res = await fetch(`${base}/api/v1/upload?expiresIn=0&mime=video%2Fmp4&title=SecretClip`, {
+					method: 'POST',
+					headers: { ...auth, 'X-Filename': 's.mp4', 'X-Upload-Password': 'embed-bot-video-secret-1' },
+					body: new Uint8Array([1, 2, 3, 4]),
+				});
+				expect(res.status).toBe(201);
+				const made = await res.json();
+
+				const botRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': DISCORDBOT_UA } });
+				expect(botRes.status).toBe(200);
+				expect(botRes.headers.get('content-type')).toContain('text/html');
+				const html = await botRes.text();
+				expect(html).not.toContain('og:video');
+				expect(html).not.toContain('og:image');
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+
+	test('a gif share still gets raw image/gif bytes for a bot UA (locks in the existing image path alongside the new video one)', async () => {
+		const dir = freshDataDir('embed-bot-gif');
+		try {
+			const proc = await bootServer(dir, 3774);
+			try {
+				const base = 'http://127.0.0.1:3774';
+				const cookie = await adminCookie(base);
+				const key = await makeKey(base, cookie, 'embed-bot-gif-key');
+				const auth = { Authorization: `Bearer ${key.token}` };
+
+				const bytes = new Uint8Array([71, 73, 70, 56, 57, 97, 1, 2, 3, 4]);
+				const res = await fetch(`${base}/api/v1/upload?expiresIn=0&mime=image%2Fgif&title=BotGif`, {
+					method: 'POST',
+					headers: { ...auth, 'X-Filename': 'g.gif' },
+					body: bytes,
+				});
+				expect(res.status).toBe(201);
+				const made = await res.json();
+
+				const botRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': DISCORDBOT_UA } });
+				expect(botRes.status).toBe(200);
+				expect(botRes.headers.get('content-type')).toContain('image/gif');
+				expect(botRes.headers.get('vary')).toContain('User-Agent');
+				expect(new Uint8Array(await botRes.arrayBuffer())).toEqual(bytes);
 			} finally {
 				await stopServer(proc);
 			}

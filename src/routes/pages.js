@@ -73,13 +73,19 @@ export function servePage(file, extraHeaders) {
 // of every share). Rich meta only for a share the server can actually see
 // plaintext for (non-E2E) and that is safe to summarize publicly (not
 // password-protected, not one-time, not download-capped, finalized, and has
-// at least one complete image file) - everything else, including a missing
-// id, gets byte-identical GENERIC meta with zero per-share data, so the meta
-// itself never reveals whether an id exists, is private, or is E2E.
+// at least one complete image or mp4 video file) - everything else, including
+// a missing id, gets byte-identical GENERIC meta with zero per-share data, so
+// the meta itself never reveals whether an id exists, is private, or is E2E.
 
 // Deliberate subset of download.js's SAFE_INLINE: no svg (script-capable),
 // no bmp/x-icon (not worth a rich preview).
 const EMBED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/avif']);
+
+// Also a deliberate subset of SAFE_INLINE: webm/ogg are left out even though
+// download.js serves them inline fine - Discord's own unfurler only reliably
+// inlines mp4 as a playable video, and a share URL that resolves to bytes a
+// crawler can't actually play is worse than no rich embed at all.
+const EMBED_VIDEO_MIME = new Set(['video/mp4']);
 
 const GENERIC_EMBED_DESCRIPTION = 'Secure, self-hosted file sharing.';
 
@@ -135,31 +141,49 @@ function genericMetaHtml() {
 function richMetaHtml(share, file, origin) {
 	const title = share.title || file.name;
 	const description = `${file.name} (${formatBytesServer(file.size)})`;
-	const imageUrl = `${origin}/api/shares/${share.id}/files/${file.id}/preview`;
-	return [
+	const mediaUrl = `${origin}/api/shares/${share.id}/files/${file.id}/preview`;
+	const isVideo = EMBED_VIDEO_MIME.has(String(file.mime || '').toLowerCase().split(';')[0].trim());
+	const base = [
 		metaTag('og:site_name', 'property', config.appTitle),
 		metaTag('og:title', 'property', title),
 		metaTag('og:description', 'property', description),
-		metaTag('og:type', 'property', 'website'),
 		metaTag('og:url', 'property', `${origin}/s/${share.id}`),
-		metaTag('og:image', 'property', imageUrl),
-		metaTag('og:image:type', 'property', file.mime),
-		metaTag('twitter:card', 'name', 'summary_large_image'),
-		metaTag('twitter:title', 'name', title),
-		metaTag('twitter:image', 'name', imageUrl),
-	].join('\n\t');
+	];
+	// Video and image shares each get only their own media tag - an og:video
+	// pointing at an image (or vice versa) is meaningless, and Discord itself
+	// never reaches this HTML anyway (it hits the bare-bytes bot path above).
+	const media = isVideo
+		? [
+				metaTag('og:type', 'property', 'video.other'),
+				metaTag('og:video', 'property', mediaUrl),
+				metaTag('og:video:secure_url', 'property', mediaUrl),
+				metaTag('og:video:type', 'property', file.mime),
+			]
+		: [
+				metaTag('og:type', 'property', 'website'),
+				metaTag('og:image', 'property', mediaUrl),
+				metaTag('og:image:type', 'property', file.mime),
+				metaTag('twitter:card', 'name', 'summary_large_image'),
+				metaTag('twitter:title', 'name', title),
+				metaTag('twitter:image', 'name', mediaUrl),
+			];
+	return [...base, ...media].join('\n\t');
 }
 
 // The single eligibility predicate for "is this share safe to summarize/embed
 // publicly at all" - finalized, non-E2E (server can see plaintext), not
 // password-protected, not one-time, not download-capped, with at least one
-// complete image file. Shared by buildShareMeta (rich OG meta for browsers)
-// and the bare-image bot path below (serveSharePage) so there is exactly one
-// place that decides embeddability, not two that could drift apart.
+// complete image or mp4 video file. Shared by buildShareMeta (rich OG meta
+// for browsers) and the bare-bytes bot path below (serveSharePage) so there
+// is exactly one place that decides embeddability, not two that could drift
+// apart. Image wins over video when a share has both: the first complete
+// image (in upload order) is preferred, falling back to the first complete
+// mp4 only when the share has no embeddable image at all.
 function embeddableFile(share) {
 	if (!share || !share.finalized || share.e2e || share.password_hash || share.one_time || share.max_downloads !== null) return null;
 	const files = getEmbeddableFile.all(share.id);
-	return files.find(f => EMBED_IMAGE_MIME.has(String(f.mime || '').toLowerCase().split(';')[0].trim())) || null;
+	const mimeOf = f => String(f.mime || '').toLowerCase().split(';')[0].trim();
+	return files.find(f => EMBED_IMAGE_MIME.has(mimeOf(f))) || files.find(f => EMBED_VIDEO_MIME.has(mimeOf(f))) || null;
 }
 
 // Builds the meta block for an already-resolved share (or null - generic
@@ -201,15 +225,15 @@ function isBotUA(req) {
 // byte-case-sensitive, so serving 200-with-rich-meta at the wrong case would
 // show a full embed for a link that 404s the moment anyone clicks it.
 //
-// Bare-image bot path: a chat-app link-preview crawler (isBotUA) fetching a
-// share URL that resolves to an eligible image (embeddableFile - the exact
-// same predicate buildShareMeta uses for og:image) gets the raw image bytes
-// back at THIS url, not an HTML page - Discord's unfurler never follows
-// redirects, so the bytes have to come back on the first response. Delegates
-// entirely to servePreview (the /preview route's own handler) rather than
-// reading storage.js directly, so this gets the exact same access/rate-limit/
-// one-time/capped gate chain for free, and req/url/server are only needed for
-// this branch.
+// Bare-bytes bot path: a chat-app link-preview crawler (isBotUA) fetching a
+// share URL that resolves to an eligible image or mp4 video (embeddableFile -
+// the exact same predicate buildShareMeta uses for og:image/og:video) gets
+// the raw bytes back at THIS url, not an HTML page - Discord's unfurler never
+// follows redirects, so the bytes have to come back on the first response.
+// Delegates entirely to servePreview (the /preview route's own handler)
+// rather than reading storage.js directly, so this gets the exact same
+// access/rate-limit/one-time/capped gate chain for free (including Range/HEAD
+// support for video), and req/url/server are only needed for this branch.
 export async function serveSharePage(idOrSlug, origin, req, url, server) {
 	let share = null;
 	try {
