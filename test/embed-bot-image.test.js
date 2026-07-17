@@ -28,6 +28,9 @@ import { join } from 'node:path';
 const ROOT = join(import.meta.dir, '..');
 const ADMIN_PASSWORD = 'EmbedBotImageTest-Pw-2026';
 const DISCORDBOT_UA = 'Mozilla/5.0 (compatible; Discordbot/2.0; +https://discordapp.com)';
+// Discord's documented second fetch of the same URL (discord-api-docs#1600) -
+// a frozen 2015-era UA, distinct from the Discordbot crawler UA above.
+const DISCORD_SECOND_FETCH_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.10; rv:38.0) Gecko/20100101 Firefox/38.0';
 
 function freshDataDir(prefix) {
 	return mkdtempSync(join(tmpdir(), `roeshare-${prefix}-`));
@@ -380,6 +383,58 @@ describe('bare-video embed for bot UAs', () => {
 				expect(botRes.headers.get('content-type')).toContain('image/gif');
 				expect(botRes.headers.get('vary')).toContain('User-Agent');
 				expect(new Uint8Array(await botRes.arrayBuffer())).toEqual(bytes);
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+});
+
+// F-XX: Discord is documented to send a SECOND fetch of the same share URL
+// using a frozen, non-Discordbot UA (discord-api-docs#1600). Before this fix
+// that second fetch fell into the plain-HTML branch (isBotUA only matched
+// the Discordbot UA above), so the embed card showed up but the media itself
+// - the object of that second fetch - was HTML, not bytes. Locks in that the
+// exact documented UA now gets bytes, while any ordinary Firefox UA (however
+// similar-looking) still gets the normal HTML page.
+describe('Discord second-fetch UA (discord-api-docs#1600)', () => {
+	test('the exact documented second-fetch UA gets raw media bytes; a modern real Firefox UA still gets the HTML view page', async () => {
+		const dir = freshDataDir('embed-bot-second-fetch');
+		try {
+			const proc = await bootServer(dir, 3777);
+			try {
+				const base = 'http://127.0.0.1:3777';
+				const cookie = await adminCookie(base);
+				const key = await makeKey(base, cookie, 'embed-bot-second-fetch-key');
+				const auth = { Authorization: `Bearer ${key.token}` };
+
+				const bytes = new Uint8Array([71, 73, 70, 56, 57, 97, 1, 2, 3, 4]);
+				const res = await fetch(`${base}/api/v1/upload?expiresIn=0&mime=image%2Fgif&title=SecondFetchGif`, {
+					method: 'POST',
+					headers: { ...auth, 'X-Filename': 's.gif' },
+					body: bytes,
+				});
+				expect(res.status).toBe(201);
+				const made = await res.json();
+
+				const secondFetchRes = await fetch(`${base}/s/${made.id}`, { headers: { 'User-Agent': DISCORD_SECOND_FETCH_UA } });
+				expect(secondFetchRes.status).toBe(200);
+				expect(secondFetchRes.headers.get('content-type')).toContain('image/gif');
+				expect(secondFetchRes.headers.get('vary')).toContain('User-Agent');
+				expect(new Uint8Array(await secondFetchRes.arrayBuffer())).toEqual(bytes);
+
+				// A real, modern Firefox UA (or anything else merely containing
+				// "Firefox") must never be misidentified as Discord's second fetch -
+				// only the exact frozen string matches.
+				const realFirefoxRes = await fetch(`${base}/s/${made.id}`, {
+					headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0' },
+				});
+				expect(realFirefoxRes.status).toBe(200);
+				expect(realFirefoxRes.headers.get('content-type')).toContain('text/html');
+				const html = await realFirefoxRes.text();
+				expect(html).toContain('property="og:image:type" content="image/gif"');
 			} finally {
 				await stopServer(proc);
 			}

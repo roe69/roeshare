@@ -192,15 +192,20 @@ function buildShareMeta(share, origin) {
 }
 
 // Chat/link-preview crawler UAs (not general search bots - Googlebot etc. are
-// deliberately excluded so they keep indexing the real HTML page). Discord's
-// own image-proxy re-fetch uses a plain browser UA (see research notes), but
-// that fetch never happens under this scheme: the crawler's first and only
-// request to this URL already gets image bytes directly, so there's no
-// separate og:image URL for it to chase.
+// deliberately excluded so they keep indexing the real HTML page).
 const BOT_UA_RE = /Discordbot|Slackbot-LinkExpanding|TelegramBot|facebookexternalhit|WhatsApp|SkypeUriPreview|LinkedInBot|Twitterbot/i;
 
+// Discord is documented to send a SECOND, non-Discordbot-UA fetch of the same
+// URL (discord-api-docs#1600) using this exact, frozen 2015-era UA string.
+// Without recognizing it, that second fetch falls into the HTML branch below
+// and gets a document where media bytes were expected - an embed card that
+// never plays. Matched by exact equality only (never a partial/pattern match
+// on "Firefox"), so no real Firefox user can ever be misidentified as a bot.
+const DISCORD_SECOND_FETCH_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.10; rv:38.0) Gecko/20100101 Firefox/38.0';
+
 function isBotUA(req) {
-	return BOT_UA_RE.test(req.headers.get('user-agent') || '');
+	const ua = req.headers.get('user-agent') || '';
+	return BOT_UA_RE.test(ua) || ua === DISCORD_SECOND_FETCH_UA;
 }
 
 // Serves the view page for a share id or custom slug with per-request embed
