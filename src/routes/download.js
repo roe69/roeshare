@@ -521,7 +521,14 @@ const PREVIEW_BUFFER_CAP = 32 * 1024 * 1024; // 32MiB
 // one-time/capped 403) instead of re-implementing any of it against storage.js
 // directly. Registered on the router below like any other handler.
 export async function servePreview({ req, url, params, ip, server }) {
-	server?.timeout?.(req, 0);
+	// The unbounded per-request timeout below is only granted to the actual
+	// streaming branch further down (a file above PREVIEW_BUFFER_CAP). The
+	// buffered branch fully materializes the response body up front and
+	// releases its 'dl' admission-control slot before the bytes are flushed to
+	// the client, so a client that stalls or never reads must still be bounded
+	// by Bun's default idleTimeout (255s, server.js) - otherwise a stalled
+	// direct-to-origin client could hold an unbounded number of up-to-32MiB
+	// buffers in memory indefinitely.
 	// Resolve the share BEFORE rate-limiting against its id: otherwise a flood
 	// of nonexistent ids would each mint their own bucket in the process-wide
 	// rate-limit map at zero cost to the attacker.
@@ -629,6 +636,11 @@ export async function servePreview({ req, url, params, ip, server }) {
 			release();
 			return rangeResponse(share, file, req, { inline: serving.inline, contentType: serving.type, size, range, body, extraHeaders });
 		}
+		// Only the true streaming branch (file above PREVIEW_BUFFER_CAP) gets the
+		// unbounded per-request timeout - see the comment at the top of this
+		// function. This path holds no materialized buffer; its memory footprint
+		// is bounded by stream backpressure, same as the /download handlers below.
+		server?.timeout?.(req, 0);
 		return rangeResponse(share, file, req, {
 			inline: serving.inline,
 			contentType: serving.type,
