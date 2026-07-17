@@ -479,8 +479,15 @@ function rangeResponse(share, file, req, opts = {}) {
 	// createReadStream fd would leak on every probe.
 	let body = null;
 	if (!head) {
-		const decrypted = blobRangeStream(share.id, file.id, start, end, fileEnc(file));
-		body = makeBody ? makeBody(decrypted) : decrypted;
+		if (opts.body !== undefined) {
+			// Pre-buffered body (see servePreview's PREVIEW_BUFFER_CAP branch below):
+			// the caller already read the decrypted stream into a Uint8Array itself,
+			// so no stream is opened here at all.
+			body = opts.body;
+		} else {
+			const decrypted = blobRangeStream(share.id, file.id, start, end, fileEnc(file));
+			body = makeBody ? makeBody(decrypted) : decrypted;
+		}
 	}
 	return new Response(body, {
 		status: range ? 206 : 200,
@@ -496,6 +503,17 @@ function rangeResponse(share, file, req, opts = {}) {
 		},
 	});
 }
+
+// Bun (1.3.14, this repo's pinned Dockerfile version) silently drops an
+// explicitly-set Content-Length and forces chunked framing for any streamed
+// Response body over ~255 bytes - but keeps the header for a Blob/TypedArray
+// body. A chat-app crawler (Discord's media pipeline in particular) needs a
+// correct Content-Length/Range contract to render an inline player, so
+// servePreview's GET branch below fully buffers any response bounded by this
+// cap instead of streaming it. Every embeddable image/gif and most mp4s fall
+// under it; anything larger keeps streaming unbuffered, as before, to avoid
+// holding a large file fully in memory.
+const PREVIEW_BUFFER_CAP = 32 * 1024 * 1024; // 32MiB
 
 // Inline preview handler - exported so the embed path (routes/pages.js) can
 // call it directly for a bot-UA fetch of a share URL, reusing this exact gate
@@ -592,19 +610,32 @@ export async function servePreview({ req, url, params, ip, server }) {
 		// actually stream this v1 file is made, so it adds no latency here.
 		if (fileEnc(file)?.version === 1) scheduleMigration(file.id);
 		const serving = previewServing(file.mime);
+		const extraHeaders = {
+			'Content-Security-Policy': PREVIEW_CSP,
+			// no-store (see cacheControl above, L-05) - revocable content is
+			// never cached, even across a scrub-back seek in the player.
+			'Cache-Control': cacheControl,
+			ETag: '"' + file.id + '"',
+		};
+		// See PREVIEW_BUFFER_CAP above: read the decrypted range fully into memory
+		// and release the semaphore slot immediately, rather than handing off a
+		// stream whose Content-Length Bun would otherwise drop.
+		const bytesToSend = range ? range.length : size;
+		if (bytesToSend <= PREVIEW_BUFFER_CAP) {
+			const start = range ? range.start : 0;
+			const end = range ? range.end : size - 1;
+			const decrypted = blobRangeStream(share.id, file.id, start, end, fileEnc(file));
+			const body = new Uint8Array(await new Response(decrypted).arrayBuffer());
+			release();
+			return rangeResponse(share, file, req, { inline: serving.inline, contentType: serving.type, size, range, body, extraHeaders });
+		}
 		return rangeResponse(share, file, req, {
 			inline: serving.inline,
 			contentType: serving.type,
 			size,
 			range,
 			makeBody: src => trackedStream(src, { onEnd: release }),
-			extraHeaders: {
-				'Content-Security-Policy': PREVIEW_CSP,
-				// no-store (see cacheControl above, L-05) - revocable content is
-				// never cached, even across a scrub-back seek in the player.
-				'Cache-Control': cacheControl,
-				ETag: '"' + file.id + '"',
-			},
+			extraHeaders,
 		});
 	} catch (e) {
 		release();
