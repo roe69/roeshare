@@ -873,6 +873,32 @@ export default function download(router) {
 	// same one-time claim/burn-on-completion treatment as a full single-file
 	// download: only the request whose stream actually drains to the end gets
 	// to count the download and burn the share.
+	// Slug-only convenience download: resolve the share's current single file and
+	// redirect to its canonical file-download URL. The fileId changes on every
+	// republish, but this route resolves the live file server-side from the share
+	// id, so a stable external link (e.g. the RSProx recorder launcher) never has
+	// to know the fileId and keeps working across republishes. The redirect target
+	// enforces the real download counting/one-time-burn logic.
+	declareRoutePolicy('GET', '/api/shares/:id/download', { auth: 'shareAccess', csrf: false, rateLimit: 'dlv:<shareId>', audit: null });
+	router.get('/api/shares/:id/download', async ({ req, url, params, ip }) => {
+		const limited = enforce('dlv:' + params.id, ip, 600, 60_000);
+		if (limited) return limited;
+		const share = liveOrPendingShare(params.id);
+		if (!share) return error(404, 'Share not found');
+		if (isRenamePending(share.id)) return renamePendingResponse();
+		const { ok } = accessCheck(share, req, url);
+		if (!ok) return error(403, 'Password required');
+		const file = getCompleteFiles.get(share.id);
+		if (!file) return error(404, 'No downloadable file');
+		return new Response(null, {
+			status: 302,
+			headers: {
+				Location: `/api/shares/${share.id}/files/${file.id}/download${url.search || ''}`,
+				...SECURITY_HEADERS,
+			},
+		});
+	});
+
 	declareRoutePolicy('GET', '/api/shares/:id/download-all', { auth: 'shareAccess', csrf: false, rateLimit: 'zip', audit: 'share.burned' });
 	router.get('/api/shares/:id/download-all', async ({ req, url, params, ip, server }) => {
 		// A long archive stream must not be killed by an idle timeout.
