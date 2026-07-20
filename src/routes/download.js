@@ -890,10 +890,21 @@ export default function download(router) {
 		if (!ok) return error(403, 'Password required');
 		const file = getCompleteFiles.get(share.id);
 		if (!file) return error(404, 'No downloadable file');
+		// file.id is minted fresh on every (re)publish, so it doubles as a change
+		// token: a client (e.g. the RSProx recorder launcher) sends the ETag it last
+		// saw as If-None-Match and gets a cheap 304 when the published build hasn't
+		// changed, avoiding an 86MB re-download on every launch.
+		const etag = '"' + file.id + '"';
+		const inm = req.headers.get('if-none-match');
+		if (inm && inm.split(',').some(t => t.trim() === etag)) {
+			return new Response(null, { status: 304, headers: { ETag: etag, 'Cache-Control': 'no-cache', ...SECURITY_HEADERS } });
+		}
 		return new Response(null, {
 			status: 302,
 			headers: {
 				Location: `/api/shares/${share.id}/files/${file.id}/download${url.search || ''}`,
+				ETag: etag,
+				'Cache-Control': 'no-cache',
 				...SECURITY_HEADERS,
 			},
 		});
