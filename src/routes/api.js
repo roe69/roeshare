@@ -32,6 +32,7 @@ import { audit } from '../lib/audit.js';
 import { declareRoutePolicy } from '../lib/routePolicy.js';
 import { sanitizeName } from '../lib/names.js';
 import { finalizeTx } from './shares.js';
+import { shareLink } from './pages.js';
 
 // lower(id) so a slug can never collide-by-case with an existing one (the
 // on-disk share directory is effectively case-insensitive on some
@@ -64,7 +65,7 @@ function shareView(s, origin, files) {
 	return {
 		id: s.id,
 		title: s.title,
-		url: `${origin}/${s.id}`,
+		url: shareLink(s, origin),
 		createdAt: s.created_at,
 		expiresAt: s.expires_at,
 		oneTime: !!s.one_time,
@@ -518,7 +519,18 @@ export default function apiV1(router) {
 			return json(
 				{
 					id: made.id,
-					url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${made.id}`,
+					// The ready-to-paste link. For a single image/mp4 share (the whole
+					// point of this endpoint - RoeSnip and friends) this is the
+					// direct-media form, `<origin>/<id>.<ext>`, because a chat app's
+					// media proxy reads the format off the URL extension: the same
+					// animated GIF unfurls as a static first frame from an
+					// extensionless URL and as the full animation from a `.gif` one
+					// (measured against Discord's own proxy, 2026-07-28 - see
+					// routes/pages.js's MEDIA_EXT_MIME comment). Anything without an
+					// embeddable file falls back to the plain share-page URL this
+					// always used to return; `id` is right here either way, so a
+					// client that wants the share page can always build it.
+					url: shareLink(made.id, requestOrigin(ctx.req, ctx.url, ctx.server)),
 					fileId,
 					name,
 					size,

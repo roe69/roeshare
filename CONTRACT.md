@@ -286,6 +286,10 @@ slug/password scope, is `403`; the key's `maxExpiry` clamps the share's expiry.
   seconds, or `null` for never). Both fields are additive; older clients that only
   read `url` are unaffected. Bounded by the server's max request body
   size (so for files beyond that, use the resumable flow above).
+  `url` is the **direct-media link** `<origin>/<id>.<ext>` when the share has an
+  embeddable image/mp4 (see "Direct-media links" below) and the plain
+  `<origin>/<id>` share-page link otherwise; `id` is always present, so a client
+  that wants the share page can build it either way.
 
 Manage / restore (for backup clients). A key can only see and act on the shares it
 created (others 404):
@@ -305,7 +309,10 @@ created (others 404):
   `serveSharePage()`. Handled as a fallback in `server.js` AFTER routes + static,
   matching `^/[A-Za-z0-9_-]{1,64}$`, so it never shadows real routes or assets.
   `view.js` resolves the share from the last path segment, so `/s/:id` and `/:id`
-  both work. This is the route the one-shot upload's returned `url` actually hits.
+  both work.
+- `GET /<slug>.<ext>` (and `/s/<slug>.<ext>`) -> **direct media**: the share's own
+  bytes, for every caller. See "Direct-media links" below. This is the route the
+  one-shot upload's returned `url` hits for an image/mp4 share.
 Serve with `Bun.file(...)` and `Content-Type: text/html` + the page CSP.
 
 `serveSharePage(idOrSlug, origin)` additionally splices per-request OpenGraph/
@@ -337,6 +344,38 @@ directly via `servePreview`, with `Vary: User-Agent`.) Every dynamic value
 (title, filename) is escaped via `lib/html.js`'s `escapeHtmlAttr` before
 templating - the first server-side templating of user-controlled text into
 HTML in this codebase.
+
+### Direct-media links (`/<id>.<ext>`)
+
+A share URL may carry the file extension of its embeddable file - `/<id>.gif`,
+`/<id>.mp4` - and that form serves the bytes themselves to **every** caller,
+bot or browser, via `serveShareMedia()` -> `servePreview()` (same gate chain,
+same Range/HEAD support). Extensions are matched to an exact mime
+(`MEDIA_EXT_MIME`: png/jpg/jpeg/gif/webp/avif/mp4), so the extension can never
+lie about what the bytes are, and eligibility is `embeddableFile()` - the same
+single predicate the OG meta and the bare-bytes bot path use, narrowed to the
+requested mime. Two measured reasons for the shape (2026-07-28, against the
+live deployment and Discord's own API):
+
+1. A chat app's media proxy picks its output format from the **extension in the
+   URL**, not from the origin's `Content-Type`. The same animated GIF unfurled
+   from an extensionless URL comes back from `images-ext-1.discordapp.net` as a
+   static `image/png` first frame; served from a `.gif` URL it comes back as the
+   full animated `image/gif`. The embed JSON is byte-identical either way, so
+   nothing on the response side can fix it - only the URL shape.
+2. Because this form does **not** branch on User-Agent, it has exactly one
+   representation and is safe to cache in a CDN that ignores `Vary:
+   User-Agent` (Cloudflare, in front of the live deployment) - so it is served
+   `Cache-Control: public, max-age=300` (short, because share bytes stay
+   revocable; long enough for the unfurl/scan/fan-out burst). The extensionless
+   share URL, which serves HTML to humans and bytes to crawlers, can never be
+   cached that way and keeps `no-store`.
+
+Every miss - unknown id, an extension that does not match a file the share has,
+or any share `embeddableFile()` rejects (unfinalized, e2e, password, one-time,
+download-capped) - answers with one byte-identical `404` marked `no-store`. An
+extension outside `MEDIA_EXT_MIME` is not treated as a share lookup at all and
+falls through to the ordinary 404.
 
 ## Streaming pattern (download/preview)
 

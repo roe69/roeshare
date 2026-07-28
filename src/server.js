@@ -10,7 +10,7 @@ import { db, now } from './db.js';
 import { Router, RouterError } from './router.js';
 import { registerRoutes } from './routes/index.js';
 import { assertRouteCoverage } from './lib/routePolicy.js';
-import { serveSharePage } from './routes/pages.js';
+import { serveSharePage, serveShareMedia } from './routes/pages.js';
 import { clientIp, error, noContent, requestOrigin, SECURITY_HEADERS, FORWARDED_FOR_INVALID } from './lib/http.js';
 import { hasUploadAccess, isAdmin } from './lib/auth.js';
 import { deleteShareFiles } from './lib/storage.js';
@@ -324,8 +324,21 @@ const server = Bun.serve({
 					// contract): the one-shot upload's returned url is `{origin}/{id}`
 					// (api.js), so every RoeSnip-created link hits THIS fallback, not
 					// /s/:id - serveSharePage (not the plain servePage) must run here too.
-					if (!res && /^\/[A-Za-z0-9_-]{1,64}$/.test(url.pathname)) {
-						res = await serveSharePage(url.pathname.slice(1), requestOrigin(req, url, server), req, url, server);
+					//
+					// That segment may also carry the media extension of the share's
+					// embeddable file (/<id>.gif, /<id>.mp4 - see routes/pages.js's
+					// MEDIA_EXT_MIME comment), which resolves to the bytes themselves for
+					// every caller instead of to the view page. serveShareMedia returns
+					// null for any other extension, so an unrelated dotted path
+					// (/foo.php, a missing /robots.txt) still falls through to the plain
+					// 404 below rather than being answered as a share lookup.
+					if (!res) {
+						const seg = /^\/([A-Za-z0-9_-]{1,64})(?:\.([A-Za-z0-9]{1,8}))?$/.exec(url.pathname);
+						if (seg && seg[2] !== undefined) {
+							res = await serveShareMedia(seg[1], seg[2].toLowerCase(), req, url, server);
+						} else if (seg) {
+							res = await serveSharePage(seg[1], requestOrigin(req, url, server), req, url, server);
+						}
 					}
 				}
 			}

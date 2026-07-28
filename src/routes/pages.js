@@ -88,6 +88,103 @@ const EMBED_IMAGE_MIME = new Set(['image/png', 'image/jpeg', 'image/gif', 'image
 // crawler can't actually play is worse than no rich embed at all.
 const EMBED_VIDEO_MIME = new Set(['video/mp4']);
 
+// ---- Direct-media links (/<id>.<ext>) -------------------------------------
+//
+// A share URL may carry the real file extension of its embeddable file, and
+// that form serves the bytes themselves to EVERY caller - bot or browser -
+// exactly like a CDN/image-host link. Two independently measured reasons
+// (2026-07-28, against the live deployment + Discord's own API):
+//
+//  1. Discord's media proxy picks its output format from the extension in the
+//     URL path, not from the origin's Content-Type. The same animated GIF,
+//     unfurled from an extensionless URL, comes back from
+//     images-ext-1.discordapp.net as a STATIC image/png first frame; served
+//     from a URL ending in .gif it comes back as the full animated image/gif.
+//     The embed JSON is byte-identical in both cases, so this is not fixable
+//     from the meta/response side - only the URL shape moves it.
+//  2. Because the extensioned form does not branch on User-Agent, its response
+//     is a single representation and is therefore safe to cache in a CDN that
+//     ignores `Vary: User-Agent` (Cloudflare, in front of the live
+//     deployment). The extensionless share URL, which serves HTML to humans
+//     and bytes to crawlers, can never be - one cached representation would be
+//     handed to the wrong audience.
+//
+// Extensions are matched to an exact mime: a `.gif` URL only ever resolves to
+// a file actually stored as image/gif, so the extension can never lie to the
+// proxy about what the bytes are.
+const MEDIA_EXT_MIME = new Map([
+	['png', 'image/png'],
+	['jpg', 'image/jpeg'],
+	['jpeg', 'image/jpeg'],
+	['gif', 'image/gif'],
+	['webp', 'image/webp'],
+	['avif', 'image/avif'],
+	['mp4', 'video/mp4'],
+]);
+
+// The canonical extension to advertise for a stored mime (the inverse of the
+// map above, minus the 'jpeg' alias - both spellings resolve, only 'jpg' is
+// ever built into a link).
+const MIME_MEDIA_EXT = new Map([
+	['image/png', 'png'],
+	['image/jpeg', 'jpg'],
+	['image/gif', 'gif'],
+	['image/webp', 'webp'],
+	['image/avif', 'avif'],
+	['video/mp4', 'mp4'],
+]);
+
+// Short, deliberate exception to the no-store rule the rest of the share bytes
+// live under (see download.js's L-05 comment). A share is only reachable at a
+// direct-media URL when embeddableFile() says it is public in every sense -
+// finalized, non-E2E, no password, not one-time, not download-capped - so
+// these bytes are already served to any anonymous caller that has the link.
+// Five minutes is sized for the burst that actually matters (a chat app
+// unfurls, scans, then fans the same URL out to its own edges within seconds
+// of a link being posted) while keeping the window in which a since-deleted
+// share could still be served from a CDN edge to minutes, not the year
+// Discord's own media proxy caches it for regardless of what we send.
+const DIRECT_MEDIA_CACHE = 'public, max-age=300';
+
+const mimeOf = f => String(f?.mime || '').toLowerCase().split(';')[0].trim();
+
+// Split a trailing media extension off a path segment, or null when there is
+// none. Share ids and custom slugs are [A-Za-z0-9_-] only (lib/slug.js), so a
+// dot in the segment is unambiguously an extension separator and never part of
+// the id itself.
+function splitMediaExt(segment) {
+	const dot = segment.lastIndexOf('.');
+	if (dot <= 0) return null;
+	const ext = segment.slice(dot + 1).toLowerCase();
+	if (!MEDIA_EXT_MIME.has(ext)) return null;
+	return { id: segment.slice(0, dot), ext };
+}
+
+// The direct-media URL for a share, or null when it has no embeddable
+// image/video to point at (not finalized yet, E2E, password-protected,
+// one-time, download-capped, or simply not media). Takes an id or an
+// already-fetched share row - callers that hold the row must not pay for a
+// second lookup. Never throws: a link is not worth failing a request over.
+function directMediaUrl(idOrShare, origin) {
+	try {
+		const share = typeof idOrShare === 'string' ? liveShare(idOrShare) : idOrShare;
+		const file = embeddableFile(share);
+		const ext = file && MIME_MEDIA_EXT.get(mimeOf(file));
+		return ext ? `${origin}/${share.id}.${ext}` : null;
+	} catch (e) {
+		console.error('direct media link build failed for', typeof idOrShare === 'string' ? idOrShare : idOrShare?.id, e);
+		return null;
+	}
+}
+
+// The public link to advertise for a share: the direct-media form when there
+// is one (so a pasted link unfurls as bare, animated, CDN-cacheable media),
+// the plain share page otherwise.
+export function shareLink(idOrShare, origin) {
+	const id = typeof idOrShare === 'string' ? idOrShare : idOrShare?.id;
+	return directMediaUrl(idOrShare, origin) || `${origin}/${id}`;
+}
+
 // Case-insensitive fallback lookup for a custom slug typed with different
 // casing - excludes soft-deleted rows, same as shares.js's own slug-conflict
 // check. Only the id is selected; liveShare() below re-reads the full row and
@@ -168,10 +265,19 @@ function richMetaHtml(share, file, origin) {
 // apart. Image wins over video when a share has both: the first complete
 // image (in upload order) is preferred, falling back to the first complete
 // mp4 only when the share has no embeddable image at all.
-function embeddableFile(share) {
+//
+// `wantMime` narrows the search to files of exactly that mime instead of
+// applying the image-then-video preference - used by the direct-media route
+// below so a `.mp4` URL resolves to the share's mp4 even when the share also
+// carries an image that would otherwise win. It is a filter ON TOP of this
+// predicate, never a second predicate: an ineligible share resolves to null
+// here whatever mime is asked for.
+function embeddableFile(share, wantMime) {
 	if (!share || !share.finalized || share.e2e || share.password_hash || share.one_time || share.max_downloads !== null) return null;
 	const files = getEmbeddableFile.all(share.id);
-	const mimeOf = f => String(f.mime || '').toLowerCase().split(';')[0].trim();
+	if (wantMime) {
+		return files.find(f => mimeOf(f) === wantMime && (EMBED_IMAGE_MIME.has(wantMime) || EMBED_VIDEO_MIME.has(wantMime))) || null;
+	}
 	return files.find(f => EMBED_IMAGE_MIME.has(mimeOf(f))) || files.find(f => EMBED_VIDEO_MIME.has(mimeOf(f))) || null;
 }
 
@@ -208,6 +314,51 @@ function isBotUA(req) {
 	return BOT_UA_RE.test(ua) || ua === DISCORD_SECOND_FETCH_UA;
 }
 
+// Direct-media route: /<id>.<ext> (and /s/<id>.<ext>) serves the share's own
+// bytes to every caller, with no User-Agent branching at all - see the
+// MEDIA_EXT_MIME comment above for the two measured reasons that shape exists.
+// Delegates to servePreview for the same reason the bot path does: it inherits
+// the whole gate chain (liveShare -> rename-pending -> rate limit ->
+// accessCheck -> the F-01 one-time/capped 403) plus Range/HEAD support, rather
+// than reaching into storage.js on its own.
+//
+// Returns null (not a 404) when the extension is not a media extension at all,
+// so the caller can fall through to its own not-found handling; every other
+// miss - unknown id, private/E2E/password/one-time/capped share, or an
+// extension that does not match a file this share actually has - answers with
+// one byte-identical 404, so the response reveals nothing about which it was.
+export async function serveShareMedia(idOrSlug, ext, req, url, server) {
+	const wantMime = MEDIA_EXT_MIME.get(ext);
+	if (!wantMime) return null;
+	let share = null;
+	try {
+		share = resolveShareForMeta(idOrSlug);
+	} catch (e) {
+		console.error('share resolution failed for', idOrSlug, e);
+	}
+	const file = embeddableFile(share, wantMime);
+	if (!file) return notFoundMedia();
+	const res = await servePreview({ req, url, params: { id: share.id, fileId: file.id }, ip: clientIp(req, server), server });
+	// Only a real body gets the cacheable header. Everything else here is
+	// transient or per-caller (a 503 while a rename is mid-flight, a 429, a
+	// 403) and must never be stored by an intermediary and replayed - and a
+	// bare error() carries no Cache-Control of its own, which would leave a
+	// CDN free to apply its default heuristic for a ".gif"/".mp4" path.
+	if (res.status === 200 || res.status === 206) res.headers.set('Cache-Control', DIRECT_MEDIA_CACHE);
+	else res.headers.set('Cache-Control', 'no-store');
+	return res;
+}
+
+// The generic 404 shape, explicitly marked no-store: a CDN in front of us
+// applies its own default caching heuristic to an uncontrolled response for a
+// ".gif"/".mp4" path, and a share that is briefly unresolvable (mid-rename, or
+// simply not finalized yet) must not have that 404 pinned at an edge.
+function notFoundMedia() {
+	const res = error(404, 'Not found');
+	res.headers.set('Cache-Control', 'no-store');
+	return res;
+}
+
 // Serves the view page for a share id or custom slug with per-request embed
 // meta spliced into the cached base HTML (renderPage() below caches the base
 // file - including the still-unsubstituted {{SHARE_META}} token - per
@@ -232,6 +383,11 @@ function isBotUA(req) {
 // A crawler fetching any NON-embeddable share URL gets an empty 204 instead
 // of the HTML page, so no embed of any kind is ever generated for it.
 export async function serveSharePage(idOrSlug, origin, req, url, server) {
+	// /s/<id>.<ext> is the same direct-media link as /<id>.<ext> (the root-level
+	// form is what gets published, but both resolve, exactly as /s/<id> and
+	// /<id> both resolve to the share page).
+	const media = splitMediaExt(idOrSlug);
+	if (media) return (await serveShareMedia(media.id, media.ext, req, url, server)) || notFoundMedia();
 	let share = null;
 	try {
 		share = resolveShareForMeta(idOrSlug);
