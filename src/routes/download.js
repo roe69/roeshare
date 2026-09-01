@@ -489,11 +489,21 @@ function rangeResponse(share, file, req, opts = {}) {
 			body = makeBody ? makeBody(decrypted) : decrypted;
 		}
 	}
+	const bodyLength = String(range ? range.length : size);
 	return new Response(body, {
 		status: range ? 206 : 200,
 		headers: {
 			'Content-Type': contentType || file.mime || 'application/octet-stream',
-			'Content-Length': String(range ? range.length : size),
+			'Content-Length': bodyLength,
+			// The same figure again under a name Bun leaves alone. Bun (see
+			// PREVIEW_BUFFER_CAP below) strips Content-Length off any streamed body
+			// and frames it chunked, so a client that wants to show progress on a
+			// large download - the RoeLite launcher fetching the RoeProx recorder -
+			// gets no total at all from Content-Length. Buffering is only viable
+			// under the preview cap; for everything else this header is the
+			// contract: it is the byte count of THIS response body (the range
+			// length on a 206), exactly what Content-Length would have said.
+			'X-Content-Length': bodyLength,
 			'Accept-Ranges': 'bytes',
 			'Content-Disposition': contentDisposition(file.name.split('/').pop(), inline),
 			'Cache-Control': 'no-store',

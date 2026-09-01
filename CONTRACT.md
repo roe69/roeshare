@@ -159,6 +159,11 @@ accepts the cookie (`hasUploadAccess`) or a `uploadPassword` in the body.
   (`Content-Disposition: inline`), Range-aware (`206` + `Content-Range` +
   `Accept-Ranges: bytes`). Does NOT count as a download. Enforce access + not expired.
 - `GET /api/shares/:id/files/:fileId/download` -> attachment stream, Range-aware.
+  Every file response (preview, download, direct-media) also carries
+  `X-Content-Length`: the byte count of the response body (the range length on a
+  `206`), i.e. what `Content-Length` says - which Bun strips off any streamed body
+  above the preview buffer cap and replaces with chunked framing. A client showing
+  download progress reads it when `Content-Length` is absent.
   Counts as one download: increment `files.download_count` and `shares.download_count`,
   insert a `download_events` row. Enforce `maxDownloads` (block with `410` when reached),
   expiry, and access. If `one_time`, soft-delete the share + `deleteShareFiles` after the response.
@@ -390,6 +395,7 @@ return new Response(slice.stream(), {
   headers: {
     'Content-Type': mime,
     'Content-Length': String(range ? range.length : size),
+    'X-Content-Length': String(range ? range.length : size), // survives Bun's chunked framing (see rangeResponse)
     'Accept-Ranges': 'bytes',
     'Content-Disposition': contentDisposition(name, /*inline*/ true|false),
     ...(range ? { 'Content-Range': `bytes ${range.start}-${range.end}/${size}` } : {}),
