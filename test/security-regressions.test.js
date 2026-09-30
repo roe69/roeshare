@@ -244,3 +244,38 @@ describe('admin slug rename enforces case-insensitive uniqueness', () => {
 		}
 	});
 });
+
+describe('web share creation reclaims a deleted share\'s custom link', () => {
+	test('a slug whose share was deleted can be used again', async () => {
+		const dir = freshDataDir('slug-reclaim');
+		try {
+			const proc = await bootServer(dir, 3921);
+			try {
+				const base = 'http://127.0.0.1:3921';
+				const create = () =>
+					fetch(`${base}/api/shares`, {
+						method: 'POST',
+						headers: { 'Content-Type': 'application/json' },
+						body: JSON.stringify({ e2e: false, slug: 'reused-link', expiresIn: 0 }),
+					});
+
+				const first = await create();
+				expect(first.status).toBe(201);
+				const { editToken } = await first.json();
+
+				const del = await fetch(`${base}/api/shares/reused-link`, { method: 'DELETE', headers: { 'X-Edit-Token': editToken } });
+				expect(del.status).toBeLessThan(300);
+				expect((await fetch(`${base}/api/shares/reused-link`)).status).toBe(404);
+
+				const second = await create();
+				expect(second.status).toBe(201);
+				expect((await second.json()).id).toBe('reused-link');
+				expect((await fetch(`${base}/api/shares/reused-link`)).status).toBe(200);
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	});
+});

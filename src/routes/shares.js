@@ -12,7 +12,7 @@ import {
 } from '../lib/auth.js';
 import { bumpMetric, bumpUploader } from '../lib/stats.js';
 import { newShareId, newToken } from '../lib/ids.js';
-import { deleteShareFiles } from '../lib/storage.js';
+import { deleteShareFiles, isCleanupPending } from '../lib/storage.js';
 import { enforce } from '../lib/ratelimit.js';
 import { acquire, acquireAll, overloaded } from '../lib/semaphore.js';
 import { slugError } from '../lib/slug.js';
@@ -59,6 +59,7 @@ export const finalizeTx = db.transaction(shareId => {
 // share creation (see the finalize handler below).
 const shiftExpiry = db.query('UPDATE shares SET expires_at = expires_at + (? - created_at) WHERE id = ?');
 const softDelete = db.query('UPDATE shares SET deleted_at = ? WHERE id = ?');
+const hardDeleteDeadShare = db.query('DELETE FROM shares WHERE id = ? AND deleted_at IS NOT NULL');
 const incShareView = db.query('UPDATE shares SET view_count = view_count + 1 WHERE id = ?');
 
 // A share is "live" when it exists, is not soft-deleted, and has not expired.
@@ -263,6 +264,16 @@ export default function shares(router) {
 			const err = slugError(slug);
 			if (err) return error(400, err);
 			if (getShareBySlugCI.get(slug)) return error(409, 'That custom link is already taken');
+			// A soft-deleted row still holds the id (the primary key), so reclaim it
+			// by hard-deleting it before the insert below, as api.js's createShare
+			// does. A dead API-key share stays with its key, and a directory still
+			// being torn down must finish first or the new blobs would race its rm().
+			const dead = getShare.get(slug);
+			if (dead) {
+				if (dead.api_key_id != null) return error(409, 'That custom link is already taken');
+				if (isCleanupPending(dead.id)) return error(409, 'That link was just deleted and is still being cleaned up; try again shortly');
+				hardDeleteDeadShare.run(dead.id);
+			}
 			id = slug;
 		} else {
 			id = newShareId();
@@ -274,10 +285,6 @@ export default function shares(router) {
 		try {
 			insertShare.run(id, title, now(), expiresAt, passwordHash, maxDownloads, oneTime, hashSecretToken(editToken), ctx.ip ?? null, ua, e2e);
 		} catch (e) {
-			// A soft-deleted share keeps its row (and its id, the primary key) around,
-			// so getShareBySlugCI's "taken" check above cannot see it and reusing that
-			// slug hits a PK collision here. Report it the same way as an upfront
-			// conflict rather than letting it surface as a 500.
 			if (String(e?.message).includes('UNIQUE constraint failed')) return error(409, 'That custom link is already taken');
 			throw e;
 		}
