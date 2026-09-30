@@ -460,22 +460,23 @@ function readOptions() {
 		throw new Error('Passwords do not match');
 	}
 
-	// Expiry: a preset number of seconds, 0 = never, or a custom future date.
+	// Expiry: a preset number of seconds, 0 = never, or a custom future date
+	// sent as an absolute time so it is kept exactly as picked.
 	let expiresIn;
+	let expiresAt;
 	const expSel = $('#opt-expiry').value;
 	if (expSel === 'custom') {
 		const v = $('#opt-expiry-custom').value;
 		if (!v) throw new Error('Pick a custom expiry date');
 		const ms = new Date(v).getTime();
 		if (!Number.isFinite(ms)) throw new Error('That expiry date is not valid');
-		const secs = Math.round((ms - Date.now()) / 1000);
-		if (secs <= 0) throw new Error('The expiry date must be in the future');
-		expiresIn = secs;
+		if (ms <= Date.now()) throw new Error('The expiry date must be in the future');
+		expiresAt = Math.floor(ms / 1000);
 	} else {
 		expiresIn = Number(expSel);
 	}
 
-	const body = { expiresIn };
+	const body = expiresAt ? { expiresAt } : { expiresIn };
 
 	// Download limit replaces the old max-downloads + one-time pair.
 	const limSel = $('#opt-limit').value;
@@ -855,9 +856,6 @@ function resetForm() {
 	$('#opt-slug').value = '';
 	$('#opt-password').value = '';
 	$('#opt-password-confirm').value = '';
-	$('#opt-expiry').value = '604800';
-	$('#opt-expiry-custom').value = '';
-	$('#opt-expiry-custom').classList.add('rl-hidden');
 	$('#opt-limit').value = 'unlimited';
 	$('#opt-limit-num').value = '';
 	$('#opt-limit-num').classList.add('rl-hidden');

@@ -30,6 +30,7 @@ const insertFile = db.query(
 const getFile = db.query('SELECT id, size, received, complete, iv, enc_version, key_id, e2e_aad_version FROM files WHERE id = ? AND share_id = ?');
 const updateReceived = db.query('UPDATE files SET received = ?, complete = ? WHERE id = ?');
 const updateSha256 = db.query('UPDATE files SET sha256 = ? WHERE id = ?');
+const touchShare = db.query('UPDATE shares SET last_activity_at = ? WHERE id = ?');
 
 // H-1: charset/length a client-generated E2E file id must satisfy (same
 // convention as every other id in this app - see lib/ids.js) before it is
@@ -225,6 +226,7 @@ export default function uploads(router) {
 				if (fresh.total + size > caps.maxShareSize) return 'share';
 				if (!reserveInTx(fileId, share.id, size)) return 'server';
 				insertFile.run(fileId, share.id, name, size, mime, now(), fileId, iv, 2, CURRENT_AT_REST_KEY_ID, aadVersion);
+				touchShare.run(now(), share.id);
 				return true;
 			})();
 		} catch (e) {
@@ -394,6 +396,7 @@ export default function uploads(router) {
 				// the ledger from what the row says.
 				db.transaction(() => {
 					updateReceived.run(received, complete, file.id);
+					touchShare.run(now(), share.id);
 					if (complete && !file.complete) commitInTx(file.id, file.size);
 					else touchInTx(file.id);
 				})();

@@ -81,6 +81,13 @@ const schema = {
 		// every existing row to match a never-rotated key's version, so no
 		// pre-migration share's edit token/owner cookie is affected.
 		owner_key_version: 'INTEGER NOT NULL DEFAULT 0',
+		// 1 = expires_at is an absolute date the uploader picked, so finalize
+		// must not shift it by the upload duration the way it does a relative one.
+		expiry_fixed:   'INTEGER NOT NULL DEFAULT 0',
+		// Last file registration or chunk write (null = created_at). The
+		// abandoned-upload sweep measures idleness from here, so a slow upload
+		// that is still making progress is never swept out from under itself.
+		last_activity_at: 'INTEGER',
 	},
 	files: {
 		id:             'TEXT PRIMARY KEY',

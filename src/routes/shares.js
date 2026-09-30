@@ -27,8 +27,8 @@ const getShare = db.query('SELECT * FROM shares WHERE id = ?');
 // resolve deleted rows by exact id for existing links).
 const getShareBySlugCI = db.query('SELECT id FROM shares WHERE lower(id) = lower(?) AND deleted_at IS NULL');
 const insertShare = db.query(
-	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e)
-	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	`INSERT INTO shares (id, title, created_at, expires_at, password_hash, max_downloads, one_time, edit_token, creator_ip, creator_ua, e2e, expiry_fixed)
+	 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 );
 const getFiles = db.query('SELECT id, name, size, received, mime, complete, download_count, sha256, e2e_aad_version FROM files WHERE share_id = ? ORDER BY created_at ASC');
 const setFinalized = db.query('UPDATE shares SET finalized = 1 WHERE id = ?');
@@ -217,9 +217,16 @@ export default function shares(router) {
 			title = body.title.trim().slice(0, 200) || null;
 		}
 
-		// expiresIn: omitted -> default; 0 -> never; otherwise seconds from now.
+		// expiresAt: an absolute date (epoch seconds), kept exactly as given.
+		// Otherwise expiresIn: omitted -> default; 0 -> never; else seconds from now.
 		let expiresAt;
-		if (body.expiresIn === undefined || body.expiresIn === null) {
+		let expiryFixed = 0;
+		if (body.expiresAt !== undefined && body.expiresAt !== null) {
+			const n = Number(body.expiresAt);
+			if (!Number.isFinite(n) || Math.trunc(n) <= now()) return error(400, 'Invalid expiresAt');
+			expiresAt = Math.trunc(n);
+			expiryFixed = 1;
+		} else if (body.expiresIn === undefined || body.expiresIn === null) {
 			expiresAt = config.defaultExpiry > 0 ? now() + config.defaultExpiry : null;
 		} else {
 			const n = Number(body.expiresIn);
@@ -283,7 +290,7 @@ export default function shares(router) {
 		const ua = (ctx.req.headers.get('user-agent') || '').slice(0, 512) || null;
 
 		try {
-			insertShare.run(id, title, now(), expiresAt, passwordHash, maxDownloads, oneTime, hashSecretToken(editToken), ctx.ip ?? null, ua, e2e);
+			insertShare.run(id, title, now(), expiresAt, passwordHash, maxDownloads, oneTime, hashSecretToken(editToken), ctx.ip ?? null, ua, e2e, expiryFixed);
 		} catch (e) {
 			if (String(e?.message).includes('UNIQUE constraint failed')) return error(409, 'That custom link is already taken');
 			throw e;
@@ -530,7 +537,7 @@ export default function shares(router) {
 		// the first finalize, so a re-finalize cannot keep pushing the clock out.
 		const firstFinalize = !share.finalized;
 		if (!finalizeTx(share.id)) return error(409, 'All files must finish uploading before finalizing');
-		if (firstFinalize && share.expires_at != null) shiftExpiry.run(now(), share.id);
+		if (firstFinalize && share.expires_at != null && !share.expiry_fixed) shiftExpiry.run(now(), share.id);
 		return json({ id: share.id, url: `${requestOrigin(ctx.req, ctx.url, ctx.server)}/${share.id}` });
 	});
 

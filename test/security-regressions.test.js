@@ -279,3 +279,37 @@ describe('web share creation reclaims a deleted share\'s custom link', () => {
 		}
 	});
 });
+
+describe('share expiry is kept exactly as chosen', () => {
+	test('never stays never and a custom date is not shifted by the upload time', async () => {
+		const dir = freshDataDir('expiry-kept');
+		try {
+			const proc = await bootServer(dir, 3922);
+			try {
+				const base = 'http://127.0.0.1:3922';
+				const cookie = await adminCookie(base);
+				const upload = async body => {
+					const s = await fetch(`${base}/api/shares`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ e2e: false, ...body }) }).then(r => r.json());
+					const H = { 'X-Edit-Token': s.editToken };
+					const f = await fetch(`${base}/api/shares/${s.id}/files`, { method: 'POST', headers: { ...H, 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'a.txt', size: 3 }) }).then(r => r.json());
+					await new Promise(r => setTimeout(r, 2100));
+					expect((await fetch(`${base}/api/shares/${s.id}/files/${f.fileId}?offset=0`, { method: 'PATCH', headers: H, body: 'abc' })).status).toBeLessThan(300);
+					expect((await fetch(`${base}/api/shares/${s.id}/finalize`, { method: 'POST', headers: H })).status).toBe(200);
+					return fetch(`${base}/api/admin/shares/${s.id}`, { headers: { Cookie: cookie } }).then(r => r.json());
+				};
+
+				expect((await upload({ expiresIn: 0 })).expiresAt).toBeNull();
+
+				const at = Math.floor(Date.now() / 1000) + 3 * 86400;
+				expect((await upload({ expiresAt: at })).expiresAt).toBe(at);
+
+				const rel = await upload({ expiresIn: 86400 });
+				expect(rel.expiresAt).toBeGreaterThanOrEqual(rel.createdAt + 86400 + 2);
+			} finally {
+				await stopServer(proc);
+			}
+		} finally {
+			cleanupDir(dir);
+		}
+	}, 20000);
+});
